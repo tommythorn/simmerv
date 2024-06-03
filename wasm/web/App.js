@@ -303,7 +303,7 @@ export default class App {
       case '':
         // Do nothing
         return command.length === 1;
-	    break;
+            break;
       // UGH...
       case 'b':
       case 'br':
@@ -406,7 +406,7 @@ export default class App {
             return true;
           default:
             return false;
-	    }
+            }
         break;
       default:
         return false;

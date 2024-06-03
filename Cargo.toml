@@ -16,6 +16,9 @@ exclude = [
 [workspace]
 members = [".", "cli", "wasm"]
 
+[lints.clippy]
+match-bool = "deny"
+
 [badges]
 travis-ci = { repository = "takahirox/riscv-rust" }
 
