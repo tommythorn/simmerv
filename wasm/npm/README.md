@@ -2,8 +2,10 @@
 
 [![npm version](https://badge.fury.io/js/riscv_emu_rust_wasm.svg)](https://badge.fury.io/js/riscv_emu_rust_wasm)
 
+This is a fork of [Takahiro's riscv-rust](https://github.com/takahirox/riscv-rust).
+
 riscv_emu_rust_wasm is a WebAssembly [RISC-V](https://riscv.org/) processor and peripheral devices emulator
-based on [riscv-rust](https://github.com/takahirox/riscv-rust).
+based on [riscv-rust](https://github.com/tommythorn/riscv-rust).
 
 ## How to install
 
@@ -52,7 +54,7 @@ runCycles();
 
 ## API
 
-Refer to [the comments in WasmRiscv](https://github.com/takahirox/riscv-rust/blob/master/wasm/src/lib.rs)
+Refer to [the comments in WasmRiscv](https://github.com/tommythorn/riscv-rust/blob/master/wasm/src/lib.rs)
 
 ## How to build WebAssembly RISC-V emulator locally
 
@@ -60,7 +62,7 @@ Prerequirements
 - Install [wasm-bindgen client](https://rustwasm.github.io/docs/wasm-bindgen/)
 
 ```sh
-$ git clone https://github.com/takahirox/riscv-rust.git
+$ git clone https://github.com/tommythorn/riscv-rust.git
 $ cd riscv-rust/wasm
 $ bash build.sh
 ```

@@ -12,7 +12,7 @@ $ mkdir riscv64-linux
 
 ## Build Linux kernel
 
-See https://github.com/takahirox/riscv-rust/tree/master/resources/linux/opensbi#build-linux-kernel
+See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#build-linux-kernel
 
 ## Build BBL
 
@@ -29,11 +29,11 @@ $ make -j $(nproc)
 
 ## Build busybox
 
-See https://github.com/takahirox/riscv-rust/tree/master/resources/linux/opensbi#build-busybox
+See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#build-busybox
 
 ## Make root file system image
 
-See https://github.com/takahirox/riscv-rust/tree/master/resources/linux/opensbi#make-root-file-system-image
+See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#make-root-file-system-image
 
 ## Copy the files
 
@@ -45,7 +45,7 @@ $ cp rootfs/rootfs.img path_to_riscv-rust/resources/linux/
 
 ## Appendix : Build QEMU
 
-See https://github.com/takahirox/riscv-rust/tree/master/resources/linux/opensbi#appendix--build-qemu
+See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#appendix--build-qemu
 
 ```sh
 $ cd riscv64-linux

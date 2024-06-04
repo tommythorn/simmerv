@@ -2,10 +2,10 @@
 name = "riscv_emu_rust"
 version = "0.2.0"
 description = "RISC-V emulator written in Rust"
-authors = ["Takahiro <hogehoge@gachapin.jp>"]
+authors = ["Takahiro <hogehoge@gachapin.jp>", "Tommy Thorn <tommy-github2@thorn.ws>"]
 license = "MIT"
-homepage = "https://github.com/takahirox/riscv-rust"
-repository = "https://github.com/takahirox/riscv-rust"
+homepage = "https://github.com/tommythorn/riscv-rust"
+repository = "https://github.com/tommythorn/riscv-rust"
 exclude = [
   "resources/*",
   "screenshots/*",
@@ -20,7 +20,7 @@ members = [".", "cli", "wasm"]
 match-bool = "deny"
 
 [badges]
-travis-ci = { repository = "takahirox/riscv-rust" }
+travis-ci = { repository = "tommythorn/riscv-rust" }
 
 [dependencies]
 fnv = "1.0.7"

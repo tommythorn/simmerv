@@ -3,9 +3,9 @@
   "description": "RISC-V emulator written in Rust and compiled to WebAssembly",
   "author": "Takahiro <hogehoge@gachapin.jp>",
   "version": "0.2.2",
-  "repository:": "https://github.com/takahirox/riscv-rust.git",
-  "homepage": "https://github.com/takahirox/riscv-rust/tree/master/wasm/npm",
-  "bugs": "https://github.com/takahirox/riscv-rust/issues",
+  "repository:": "https://github.com/tommythorn/riscv-rust.git",
+  "homepage": "https://github.com/tommythorn/riscv-rust/tree/master/wasm/npm",
+  "bugs": "https://github.com/tommythorn/riscv-rust/issues",
   "files": [
     "nodejs/riscv_emu_rust_wasm_bg.d.ts",
     "nodejs/riscv_emu_rust_wasm_bg.wasm",

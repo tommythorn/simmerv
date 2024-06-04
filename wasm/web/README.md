@@ -1,12 +1,12 @@
-[riscv-rust/wasm/web](https://github.com/takahirox/riscv-rust/tree/master/wasm/web) is a directory for WebAssembly RISC-V emulator compiled from [riscv-rust](https://github.com/takahirox/riscv-rust) and its online demo. You can import the emulator into your web page.
+[riscv-rust/wasm/web](https://github.com/tommythorn/riscv-rust/tree/master/wasm/web) is a directory for WebAssembly RISC-V emulator compiled from [riscv-rust](https://github.com/tommythorn/riscv-rust) and its online demo. You can import the emulator into your web page.
 
 ## Online Demo
 
-[index.html](https://takahirox.github.io/riscv-rust/wasm/web/index.html)
+[index.html](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 ## How to import in a web page
 
-Download [riscv_emu_rust_wasm.js](https://github.com/takahirox/riscv-rust/blob/master/wasm/web/riscv_emu_rust_wasm.js) and [riscv_emu_rust_wasm_bg.wasm](https://github.com/takahirox/riscv-rust/blob/master/wasm/web/riscv_emu_rust_wasm_bg.wasm), and place them to where a web page can access.
+Download [riscv_emu_rust_wasm.js](https://github.com/tommythorn/riscv-rust/blob/master/wasm/web/riscv_emu_rust_wasm.js) and [riscv_emu_rust_wasm_bg.wasm](https://github.com/tommythorn/riscv-rust/blob/master/wasm/web/riscv_emu_rust_wasm_bg.wasm), and place them to where a web page can access.
 
 Below is the example code to import and use them.
 
@@ -52,7 +52,7 @@ Below is the example code to import and use them.
 
 ## API
 
-Refer to the comments in [`WasmRiscv`](https://github.com/takahirox/riscv-rust/blob/master/wasm/src/lib.rs)
+Refer to the comments in [`WasmRiscv`](https://github.com/tommythorn/riscv-rust/blob/master/wasm/src/lib.rs)
 
 ## How to build WebAssembly RISC-V emulator and run demo in web browser locally
 
@@ -60,7 +60,7 @@ Prerequirements
 - Install [wasm-bindgen client](https://rustwasm.github.io/docs/wasm-bindgen/)
 
 ```sh
-$ git clone https://github.com/takahirox/riscv-rust.git
+$ git clone https://github.com/tommythorn/riscv-rust.git
 $ cd riscv-rust/wasm
 $ bash build.sh
 # boot local server and access riscv-rust/wasm/web/index.html

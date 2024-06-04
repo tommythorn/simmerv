@@ -1,6 +1,6 @@
 # riscv-rust
 
-[![Build Status](https://travis-ci.org/takahirox/riscv-rust.svg?branch=master)](https://travis-ci.org/takahirox/riscv-rust)
+[![Build Status](https://travis-ci.org/tommythorn/riscv-rust.svg?branch=master)](https://travis-ci.org/tommythorn/riscv-rust)
 [![Crate](https://img.shields.io/crates/v/riscv_emu_rust.svg)](https://crates.io/crates/riscv_emu_rust)
 [![npm version](https://badge.fury.io/js/riscv_emu_rust_wasm.svg)](https://badge.fury.io/js/riscv_emu_rust_wasm)
 
@@ -8,7 +8,7 @@ riscv-rust is a [RISC-V](https://riscv.org/) processor and peripheral devices em
 
 ## Online Demo
 
-You can run Linux or xv6 on the emulator in your browser. [Online demo is here](https://takahirox.github.io/riscv-rust/wasm/web/index.html)
+You can run Linux or xv6 on the emulator in your browser. [Online demo is here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 ## Screenshots
 
@@ -65,7 +65,7 @@ Refer to [Document](https://docs.rs/riscv_emu_rust/0.2.0/riscv_emu_rust/struct.E
 ## How to build core library locally
 
 ```sh
-$ git clone https://github.com/takahirox/riscv-rust.git
+$ git clone https://github.com/tommythorn/riscv-rust.git
 $ cd riscv-rust
 $ cargo build --release
 ```
@@ -93,11 +93,11 @@ $ cargo run $path_to_riscv_tets/isa/rv32ui-p-add -n
 
 ## How to import and use WebAssembly RISC-V emulator in a web browser
 
-See [wasm/web](https://github.com/takahirox/riscv-rust/tree/master/wasm/web)
+See [wasm/web](https://github.com/tommythorn/riscv-rust/tree/master/wasm/web)
 
 ## How to install and use WebAssembly RISC-V emulator npm package
 
-See [wasm/npm](https://github.com/takahirox/riscv-rust/tree/master/wasm/npm)
+See [wasm/npm](https://github.com/tommythorn/riscv-rust/tree/master/wasm/npm)
 
 ## Links
 
