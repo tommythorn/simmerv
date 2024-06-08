@@ -1,60 +1,39 @@
-extern crate pancurses;
-
-use self::pancurses::*;
+use crate::nonblocknoecho::NonblockNoEcho;
 use riscv_emu_rust::terminal::Terminal;
-use std::str;
+use std::io::{self, Stdout, Write};
 
 /// Popup `Terminal` used for desktop program.
 pub struct PopupTerminal {
-    window: Window,
-    in_escape_sequence: bool,
+    input: NonblockNoEcho,
 }
 
 impl PopupTerminal {
     pub fn new() -> Self {
-        let window = initscr();
-        window.scrollok(true);
-        window.keypad(true);
-        window.nodelay(true);
-        noecho();
-        curs_set(0);
         PopupTerminal {
-            window,
-            in_escape_sequence: false,
+            input: NonblockNoEcho::new(false), // Don't catch ctrl-C  ... for now
         }
     }
 }
 
 impl Terminal for PopupTerminal {
     fn put_byte(&mut self, value: u8) {
-        // Cutting off escape sequence so far
-        // @TODO: Implement properly
-        if !self.in_escape_sequence && value == 0x1b {
-            self.in_escape_sequence = true;
-        }
-        if self.in_escape_sequence {
-            if value == 0x6d {
-                self.in_escape_sequence = false;
-            }
-            return;
-        }
-        let str = vec![value];
-        self.window.printw(str::from_utf8(&str).unwrap());
-        self.window.refresh();
+        print!("{}", value as char);
     }
 
     fn get_input(&mut self) -> u8 {
-        match self.window.getch() {
-            Some(Input::Character(c)) => c as u8,
-            _ => 0,
+        let stdout: Stdout = io::stdout();
+        stdout.lock().flush().unwrap();
+        if let Some(ch) = self.input.get_key() {
+            ch
+        } else {
+            0
         }
     }
 
     // Wasm specific methods. No use.
-
     fn put_input(&mut self, _value: u8) {}
 
     fn get_output(&mut self) -> u8 {
-        0 // dummy
+        0
     }
 }

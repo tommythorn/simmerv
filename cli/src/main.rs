@@ -2,6 +2,7 @@ extern crate getopts;
 extern crate riscv_emu_rust;
 
 mod dummy_terminal;
+mod nonblocknoecho;
 mod popup_terminal;
 
 use crate::dummy_terminal::DummyTerminal;
