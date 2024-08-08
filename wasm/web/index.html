@@ -3,11 +3,6 @@
     <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
     <link rel="stylesheet" href="xtermjs/xterm.css" />
     <script src="xtermjs/xterm.js"></script>
-    <style>
-      #terminal {
-        height: 90%;
-      }
-    </style>
   </head>
   <body>
     <script type="module">
@@ -29,7 +24,7 @@
       terminal.setOption('convertEol', true);
       terminal.open(document.getElementById('terminal'));
 
-      terminal.writeln('Message from the emulator author Takahiro:');
+      terminal.writeln('Message from Takahiro, the original author of the emulator:');
       terminal.writeln('');
       terminal.writeln('This is RISC-V processor emulator written in Rust and compiled to WebAssembly.');
       terminal.writeln('You can run the RISC-V port of Linux or xv6 (UNIX V6 rewritten by MIT for x86)');
@@ -91,7 +86,7 @@
         const elementPaddingVer = elementPadding.top + elementPadding.bottom;
         const availableHeight = parentElementHeight - elementPaddingVer;
         const rows = Math.max(MINIMUM_ROWS, Math.floor(availableHeight / core._renderService.dimensions.actualCellHeight));
-        terminal.resize(COLUMNS, rows);
+        terminal.resize(COLUMNS, /*rows*/ MINIMUM_ROWS);
       };
 
       window.addEventListener('resize', onResize);
