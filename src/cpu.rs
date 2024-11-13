@@ -1,9 +1,12 @@
+#![allow(clippy::unreadable_literal)]
+#![allow(clippy::cast_possible_wrap)]
+
 extern crate fnv;
 
 use self::fnv::FnvHashMap;
 
-use mmu::{AddressingMode, Mmu};
-use terminal::Terminal;
+use crate::mmu::{AddressingMode, Mmu};
+use crate::terminal::Terminal;
 
 const CSR_CAPACITY: usize = 4096;
 
@@ -123,7 +126,7 @@ pub enum TrapType {
     MachineExternalInterrupt,
 }
 
-fn _get_privilege_mode_name(mode: &PrivilegeMode) -> &'static str {
+const fn _get_privilege_mode_name(mode: &PrivilegeMode) -> &'static str {
     match mode {
         PrivilegeMode::User => "User",
         PrivilegeMode::Supervisor => "Supervisor",
@@ -133,7 +136,7 @@ fn _get_privilege_mode_name(mode: &PrivilegeMode) -> &'static str {
 }
 
 // bigger number is higher privilege level
-fn get_privilege_encoding(mode: &PrivilegeMode) -> u8 {
+const fn get_privilege_encoding(mode: &PrivilegeMode) -> u8 {
     match mode {
         PrivilegeMode::User => 0,
         PrivilegeMode::Supervisor => 1,
@@ -143,6 +146,9 @@ fn get_privilege_encoding(mode: &PrivilegeMode) -> u8 {
 }
 
 /// Returns `PrivilegeMode` from encoded privilege mode bits
+/// # Panics
+/// On unknown modes crash
+#[must_use]
 pub fn get_privilege_mode(encoding: u64) -> PrivilegeMode {
     match encoding {
         0 => PrivilegeMode::User,
@@ -152,7 +158,7 @@ pub fn get_privilege_mode(encoding: u64) -> PrivilegeMode {
     }
 }
 
-fn _get_trap_type_name(trap_type: &TrapType) -> &'static str {
+const fn _get_trap_type_name(trap_type: &TrapType) -> &'static str {
     match trap_type {
         TrapType::InstructionAddressMisaligned => "InstructionAddressMisaligned",
         TrapType::InstructionAccessFault => "InstructionAccessFault",
@@ -180,10 +186,10 @@ fn _get_trap_type_name(trap_type: &TrapType) -> &'static str {
     }
 }
 
-fn get_trap_cause(trap: &Trap, xlen: &Xlen) -> u64 {
+const fn get_trap_cause(trap: &Trap, xlen: &Xlen) -> u64 {
     let interrupt_bit = match xlen {
-        Xlen::Bit32 => 0x80000000_u64,
-        Xlen::Bit64 => 0x8000000000000000_u64,
+        Xlen::Bit32 => 0x8000_0000_u64,
+        Xlen::Bit64 => 0x8000_0000_0000_0000_u64,
     };
     match trap.trap_type {
         TrapType::InstructionAddressMisaligned => 0,
@@ -217,8 +223,9 @@ impl Cpu {
     ///
     /// # Arguments
     /// * `Terminal`
+    #[must_use]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
-        let mut cpu = Cpu {
+        let mut cpu = Self {
             clock: 0,
             xlen: Xlen::Bit64,
             privilege_mode: PrivilegeMode::Machine,
@@ -232,10 +239,10 @@ impl Cpu {
             is_reservation_set: false,
             _dump_flag: false,
             decode_cache: DecodeCache::new(),
-            unsigned_data_mask: 0xffffffffffffffff,
+            unsigned_data_mask: 0xffff_ffff_ffff_ffff,
         };
         cpu.x[0xb] = 0x1020; // I don't know why but Linux boot seems to require this initialization
-        cpu.write_csr_raw(CSR_MISA_ADDRESS, 0x800000008014312f);
+        cpu.write_csr_raw(CSR_MISA_ADDRESS, 0x8000_0000_8014_312f);
         cpu
     }
 
@@ -254,18 +261,19 @@ impl Cpu {
     pub fn update_xlen(&mut self, xlen: Xlen) {
         self.xlen = xlen.clone();
         self.unsigned_data_mask = match xlen {
-            Xlen::Bit32 => 0xffffffff,
-            Xlen::Bit64 => 0xffffffffffffffff,
+            Xlen::Bit32 => 0xffff_ffff,
+            Xlen::Bit64 => 0xffff_ffff_ffff_ffff,
         };
-        self.mmu.update_xlen(xlen.clone());
+        self.mmu.update_xlen(xlen);
     }
 
     /// Reads integer register content
     ///
     /// # Arguments
     /// * `reg` Register number. Must be 0-31
+    #[must_use]
     pub fn read_register(&self, reg: u8) -> i64 {
-        debug_assert!(reg <= 31, "reg must be 0-31. {}", reg);
+        debug_assert!(reg <= 31, "reg must be 0-31. {reg}");
         match reg {
             0 => 0, // 0th register is hardwired zero
             _ => self.x[reg as usize],
@@ -273,7 +281,8 @@ impl Cpu {
     }
 
     /// Reads Program counter content
-    pub fn read_pc(&self) -> u64 {
+    #[must_use]
+    pub const fn read_pc(&self) -> u64 {
         self.pc
     }
 
@@ -282,7 +291,7 @@ impl Cpu {
         let instruction_address = self.pc;
         match self.tick_operate() {
             Ok(()) => {}
-            Err(e) => self.handle_exception(e, instruction_address),
+            Err(e) => self.handle_exception(&e, instruction_address),
         }
         self.mmu.tick(&mut self.csr[CSR_MIP_ADDRESS as usize]);
         self.handle_interrupt(self.pc);
@@ -323,10 +332,7 @@ impl Cpu {
                 result
             }
             Err(()) => {
-                panic!(
-                    "Unknown instruction PC:{:x} WORD:{:x}",
-                    instruction_address, original_word
-                );
+                panic!("Unknown instruction PC:{instruction_address:x} WORD:{original_word:x}");
             }
         }
     }
@@ -364,6 +370,7 @@ impl Cpu {
     ///
     /// # Arguments
     /// * `word` word instruction data decoded
+    #[allow(clippy::unused_self)]
     fn decode_and_get_instruction_index(&self, word: u32) -> Result<usize, ()> {
         for (i, inst) in INSTRUCTIONS.iter().enumerate() {
             if (word & inst.mask) == inst.data {
@@ -373,130 +380,64 @@ impl Cpu {
         Err(())
     }
 
-    fn handle_interrupt(&mut self, instruction_address: u64) {
+    fn handle_interrupt(&mut self, addr: u64) {
         // @TODO: Optimize
+        use self::TrapType::{
+            MachineExternalInterrupt, MachineSoftwareInterrupt, MachineTimerInterrupt,
+            SupervisorExternalInterrupt, SupervisorSoftwareInterrupt, SupervisorTimerInterrupt,
+        };
         let minterrupt = self.read_csr_raw(CSR_MIP_ADDRESS) & self.read_csr_raw(CSR_MIE_ADDRESS);
+        let value = self.pc;
 
-        if (minterrupt & MIP_MEIP) != 0
-            && self.handle_trap(
-                Trap {
-                    trap_type: TrapType::MachineExternalInterrupt,
-                    value: self.pc, // dummy
-                },
-                instruction_address,
-                true,
-            )
-        {
-            // Who should clear mip bit?
-            self.write_csr_raw(
-                CSR_MIP_ADDRESS,
-                self.read_csr_raw(CSR_MIP_ADDRESS) & !MIP_MEIP,
-            );
-            self.wfi = false;
-            return;
-        }
-        if (minterrupt & MIP_MSIP) != 0
-            && self.handle_trap(
-                Trap {
-                    trap_type: TrapType::MachineSoftwareInterrupt,
-                    value: self.pc, // dummy
-                },
-                instruction_address,
-                true,
-            )
-        {
-            self.write_csr_raw(
-                CSR_MIP_ADDRESS,
-                self.read_csr_raw(CSR_MIP_ADDRESS) & !MIP_MSIP,
-            );
-            self.wfi = false;
-            return;
-        }
-        if (minterrupt & MIP_MTIP) != 0
-            && self.handle_trap(
-                Trap {
-                    trap_type: TrapType::MachineTimerInterrupt,
-                    value: self.pc, // dummy
-                },
-                instruction_address,
-                true,
-            )
-        {
-            self.write_csr_raw(
-                CSR_MIP_ADDRESS,
-                self.read_csr_raw(CSR_MIP_ADDRESS) & !MIP_MTIP,
-            );
-            self.wfi = false;
-            return;
-        }
-        if (minterrupt & MIP_SEIP) != 0
-            && self.handle_trap(
-                Trap {
-                    trap_type: TrapType::SupervisorExternalInterrupt,
-                    value: self.pc, // dummy
-                },
-                instruction_address,
-                true,
-            )
-        {
-            self.write_csr_raw(
-                CSR_MIP_ADDRESS,
-                self.read_csr_raw(CSR_MIP_ADDRESS) & !MIP_SEIP,
-            );
-            self.wfi = false;
-            return;
-        }
-        if (minterrupt & MIP_SSIP) != 0
-            && self.handle_trap(
-                Trap {
-                    trap_type: TrapType::SupervisorSoftwareInterrupt,
-                    value: self.pc, // dummy
-                },
-                instruction_address,
-                true,
-            )
-        {
-            self.write_csr_raw(
-                CSR_MIP_ADDRESS,
-                self.read_csr_raw(CSR_MIP_ADDRESS) & !MIP_SSIP,
-            );
-            self.wfi = false;
-            return;
-        }
-        if (minterrupt & MIP_STIP) != 0
-            && self.handle_trap(
-                Trap {
-                    trap_type: TrapType::SupervisorTimerInterrupt,
-                    value: self.pc, // dummy
-                },
-                instruction_address,
-                true,
-            )
-        {
-            self.write_csr_raw(
-                CSR_MIP_ADDRESS,
-                self.read_csr_raw(CSR_MIP_ADDRESS) & !MIP_STIP,
-            );
-            self.wfi = false;
+        for (intr, trap_type) in [
+            (MIP_MEIP, MachineExternalInterrupt),
+            (MIP_MSIP, MachineSoftwareInterrupt),
+            (MIP_MTIP, MachineTimerInterrupt),
+            (MIP_SEIP, SupervisorExternalInterrupt),
+            (MIP_SSIP, SupervisorSoftwareInterrupt),
+            (MIP_STIP, SupervisorTimerInterrupt),
+        ] {
+            let trap = Trap { trap_type, value };
+            if minterrupt & intr != 0 && self.handle_trap(&trap, addr, true) {
+                // Who should clear mip bit?
+                self.write_csr_raw(CSR_MIP_ADDRESS, self.read_csr_raw(CSR_MIP_ADDRESS) & !intr);
+                self.wfi = false;
+                return;
+            }
         }
     }
 
-    fn handle_exception(&mut self, exception: Trap, instruction_address: u64) {
+    fn handle_exception(&mut self, exception: &Trap, instruction_address: u64) {
         self.handle_trap(exception, instruction_address, false);
     }
 
-    fn handle_trap(&mut self, trap: Trap, instruction_address: u64, is_interrupt: bool) -> bool {
-        let current_privilege_encoding = get_privilege_encoding(&self.privilege_mode) as u64;
-        let cause = get_trap_cause(&trap, &self.xlen);
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
+    fn handle_trap(&mut self, trap: &Trap, instruction_address: u64, is_interrupt: bool) -> bool {
+        let current_privilege_encoding = u64::from(get_privilege_encoding(&self.privilege_mode));
+        let cause = get_trap_cause(trap, &self.xlen);
 
         // First, determine which privilege mode should handle the trap.
         // @TODO: Check if this logic is correct
-        let mdeleg = if is_interrupt { self.read_csr_raw(CSR_MIDELEG_ADDRESS) } else { self.read_csr_raw(CSR_MEDELEG_ADDRESS) };
-        let sdeleg = if is_interrupt { self.read_csr_raw(CSR_SIDELEG_ADDRESS) } else { self.read_csr_raw(CSR_SEDELEG_ADDRESS) };
+        let mdeleg = if is_interrupt {
+            self.read_csr_raw(CSR_MIDELEG_ADDRESS)
+        } else {
+            self.read_csr_raw(CSR_MEDELEG_ADDRESS)
+        };
+        let sdeleg = if is_interrupt {
+            self.read_csr_raw(CSR_SIDELEG_ADDRESS)
+        } else {
+            self.read_csr_raw(CSR_SEDELEG_ADDRESS)
+        };
         let pos = cause & 0xffff;
 
-        let new_privilege_mode = if ((mdeleg >> pos) & 1) == 0 { PrivilegeMode::Machine } else if ((sdeleg >> pos) & 1) == 0 { PrivilegeMode::Supervisor } else { PrivilegeMode::User };
-        let new_privilege_encoding = get_privilege_encoding(&new_privilege_mode) as u64;
+        let new_privilege_mode = if ((mdeleg >> pos) & 1) == 0 {
+            PrivilegeMode::Machine
+        } else if ((sdeleg >> pos) & 1) == 0 {
+            PrivilegeMode::Supervisor
+        } else {
+            PrivilegeMode::User
+        };
+        let new_privilege_encoding = u64::from(get_privilege_encoding(&new_privilege_mode));
 
         let current_status = match self.privilege_mode {
             PrivilegeMode::Machine => self.read_csr_raw(CSR_MSTATUS_ADDRESS),
@@ -691,16 +632,20 @@ impl Cpu {
         Ok(word)
     }
 
-    fn has_csr_access_privilege(&self, address: u16) -> bool {
+    const fn has_csr_access_privilege(&self, address: u16) -> bool {
         let privilege = (address >> 8) & 0x3; // the lowest privilege level that can access the CSR
         privilege as u8 <= get_privilege_encoding(&self.privilege_mode)
     }
 
-    fn read_csr(&mut self, address: u16) -> Result<u64, Trap> {
-        if self.has_csr_access_privilege(address) { Ok(self.read_csr_raw(address)) } else { Err(Trap {
-            trap_type: TrapType::IllegalInstruction,
-            value: self.pc.wrapping_sub(4), // @TODO: Is this always correct?
-        }) }
+    fn read_csr(&self, address: u16) -> Result<u64, Trap> {
+        if self.has_csr_access_privilege(address) {
+            Ok(self.read_csr_raw(address))
+        } else {
+            Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: self.pc.wrapping_sub(4), // @TODO: Is this always correct?
+            })
+        }
     }
 
     fn write_csr(&mut self, address: u16, value: u64) -> Result<(), Trap> {
@@ -717,10 +662,12 @@ impl Cpu {
                 self.update_addressing_mode(value);
             }
             Ok(())
-        } else { Err(Trap {
-            trap_type: TrapType::IllegalInstruction,
-            value: self.pc.wrapping_sub(4), // @TODO: Is this always correct?
-        }) }
+        } else {
+            Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: self.pc.wrapping_sub(4), // @TODO: Is this always correct?
+            })
+        }
     }
 
     // SSTATUS, SIE, and SIP are subsets of MSTATUS, MIE, and MIP
@@ -729,7 +676,7 @@ impl Cpu {
             // @TODO: Mask shuld consider of 32-bit mode
             CSR_FFLAGS_ADDRESS => self.csr[CSR_FCSR_ADDRESS as usize] & 0x1f,
             CSR_FRM_ADDRESS => (self.csr[CSR_FCSR_ADDRESS as usize] >> 5) & 0x7,
-            CSR_SSTATUS_ADDRESS => self.csr[CSR_MSTATUS_ADDRESS as usize] & 0x80000003000de162,
+            CSR_SSTATUS_ADDRESS => self.csr[CSR_MSTATUS_ADDRESS as usize] & 0x8000_0003_000d_e162,
             CSR_SIE_ADDRESS => self.csr[CSR_MIE_ADDRESS as usize] & 0x222,
             CSR_SIP_ADDRESS => self.csr[CSR_MIP_ADDRESS as usize] & 0x222,
             CSR_TIME_ADDRESS => self.mmu.get_clint().read_mtime(),
@@ -748,8 +695,8 @@ impl Cpu {
                 self.csr[CSR_FCSR_ADDRESS as usize] |= (value << 5) & 0xe0;
             }
             CSR_SSTATUS_ADDRESS => {
-                self.csr[CSR_MSTATUS_ADDRESS as usize] &= !0x80000003000de162;
-                self.csr[CSR_MSTATUS_ADDRESS as usize] |= value & 0x80000003000de162;
+                self.csr[CSR_MSTATUS_ADDRESS as usize] &= !0x8000_0003_000d_e162;
+                self.csr[CSR_MSTATUS_ADDRESS as usize] |= value & 0x8000_0003_000d_e162;
                 self.mmu
                     .update_mstatus(self.read_csr_raw(CSR_MSTATUS_ADDRESS));
             }
@@ -800,7 +747,7 @@ impl Cpu {
 
     fn update_addressing_mode(&mut self, value: u64) {
         let addressing_mode = match self.xlen {
-            Xlen::Bit32 => match value & 0x80000000 {
+            Xlen::Bit32 => match value & 0x8000_0000 {
                 0 => AddressingMode::None,
                 _ => AddressingMode::SV32,
             },
@@ -815,15 +762,16 @@ impl Cpu {
             },
         };
         let ppn = match self.xlen {
-            Xlen::Bit32 => value & 0x3fffff,
-            Xlen::Bit64 => value & 0xfffffffffff,
+            Xlen::Bit32 => value & 0x0000_003f_ffff,
+            Xlen::Bit64 => value & 0x0fff_ffff_ffff,
         };
         self.mmu.update_addressing_mode(addressing_mode);
         self.mmu.update_ppn(ppn);
     }
 
     // @TODO: Rename to better name?
-    fn sign_extend(&self, value: i64) -> i64 {
+    #[allow(clippy::cast_possible_truncation)]
+    const fn sign_extend(&self, value: i64) -> i64 {
         match self.xlen {
             Xlen::Bit32 => value as i32 as i64,
             Xlen::Bit64 => value,
@@ -831,20 +779,22 @@ impl Cpu {
     }
 
     // @TODO: Rename to better name?
-    fn unsigned_data(&self, value: i64) -> u64 {
+    #[allow(clippy::cast_sign_loss)]
+    const fn unsigned_data(&self, value: i64) -> u64 {
         (value as u64) & self.unsigned_data_mask
     }
 
     // @TODO: Rename to better name?
-    fn most_negative(&self) -> i64 {
+    const fn most_negative(&self) -> i64 {
         match self.xlen {
-            Xlen::Bit32 => std::i32::MIN as i64,
-            Xlen::Bit64 => std::i64::MIN,
+            Xlen::Bit32 => i32::MIN as i64,
+            Xlen::Bit64 => i64::MIN,
         }
     }
 
     // @TODO: Optimize
-    fn uncompress(&self, halfword: u32) -> u32 {
+    #[allow(clippy::too_many_lines, clippy::unused_self)]
+    const fn uncompress(&self, halfword: u32) -> u32 {
         let op = halfword & 0x3; // [1:0]
         let funct3 = (halfword >> 13) & 0x7; // [15:13]
 
@@ -946,14 +896,16 @@ impl Cpu {
                         | (imm4_0 << 7)
                         | 0x23;
                 }
-                _ => {} // Not happens
+                _ => {
+                    unreachable!();
+                }
             },
             1 => {
                 match funct3 {
                     0 => {
                         let r = (halfword >> 7) & 0x1f; // [11:7]
                         let imm = match halfword & 0x1000 {
-                                                        0x1000 => 0xffffffc0,
+                                                        0x1000 => 0xffff_ffc0,
                                                         _ => 0
                                                 } | // imm[31:6] <= [12]
                                                 ((halfword >> 7) & 0x20) | // imm[5] <= [12]
@@ -976,7 +928,7 @@ impl Cpu {
                         // addiw r, r, imm
                         let r = (halfword >> 7) & 0x1f;
                         let imm = match halfword & 0x1000 {
-                                                        0x1000 => 0xffffffc0,
+                                                        0x1000 => 0xffff_ffc0,
                                                         _ => 0
                                                 } | // imm[31:6] <= [12]
                                                 ((halfword >> 7) & 0x20) | // imm[5] <= [12]
@@ -991,7 +943,7 @@ impl Cpu {
                         // addi rd, x0, imm
                         let r = (halfword >> 7) & 0x1f;
                         let imm = match halfword & 0x1000 {
-                                                        0x1000 => 0xffffffc0,
+                                                        0x1000 => 0xffff_ffc0,
                                                         _ => 0
                                                 } | // imm[31:6] <= [12]
                                                 ((halfword >> 7) & 0x20) | // imm[5] <= [12]
@@ -1008,7 +960,7 @@ impl Cpu {
                             // C.ADDI16SP
                             // addi r, r, nzimm
                             let imm = match halfword & 0x1000 {
-                                                                0x1000 => 0xfffffc00,
+                                                                0x1000 => 0xffff_fc00,
                                                                 _ => 0
                                                         } | // imm[31:10] <= [12]
                                                         ((halfword >> 3) & 0x200) | // imm[9] <= [12]
@@ -1069,7 +1021,7 @@ impl Cpu {
                                 // andi, r+8, r+8, imm
                                 let r = (halfword >> 7) & 0x7; // [9:7]
                                 let imm = match halfword & 0x1000 {
-                                                                        0x1000 => 0xffffffc0,
+                                                                        0x1000 => 0xffff_ffc0,
                                                                         _ => 0
                                                                 } | // imm[31:6] <= [12]
                                                                 ((halfword >> 7) & 0x20) | // imm[5] <= [12]
@@ -1143,25 +1095,22 @@ impl Cpu {
                                                 | ((rs1 + 8) << 7)
                                                 | 0x3b;
                                         }
-                                        2 => {
+                                        2 | 3 => {
                                             // Reserved
                                         }
-                                        3 => {
-                                            // Reserved
-                                        }
-                                        _ => {} // Not happens
+                                        _ => unreachable!(),
                                     },
-                                    _ => {} // No happens
+                                    _ => unreachable!(),
                                 };
                             }
-                            _ => {} // not happens
+                            _ => unreachable!(),
                         };
                     }
                     5 => {
                         // C.J
                         // jal x0, imm
                         let offset = match halfword & 0x1000 {
-                                                                0x1000 => 0xfffff000,
+                                                                0x1000 => 0xffff_f000,
                                                                 _ => 0
                                                         } | // offset[31:12] <= [12]
                                                         ((halfword >> 1) & 0x800) | // offset[11] <= [12]
@@ -1183,7 +1132,7 @@ impl Cpu {
                         // beq r+8, x0, offset
                         let r = (halfword >> 7) & 0x7;
                         let offset = match halfword & 0x1000 {
-                                                                0x1000 => 0xfffffe00,
+                                                                0x1000 => 0xffff_fe00,
                                                                 _ => 0
                                                         } | // offset[31:9] <= [12]
                                                         ((halfword >> 4) & 0x100) | // offset[8] <= [12]
@@ -1202,7 +1151,7 @@ impl Cpu {
                         // bne r+8, x0, offset
                         let r = (halfword >> 7) & 0x7;
                         let offset = match halfword & 0x1000 {
-                                                                0x1000 => 0xfffffe00,
+                                                                0x1000 => 0xffff_fe00,
                                                                 _ => 0
                                                         } | // offset[31:9] <= [12]
                                                         ((halfword >> 4) & 0x100) | // offset[8] <= [12]
@@ -1216,7 +1165,7 @@ impl Cpu {
                                                         ((offset >> 11) & 0x1); // imm1[0] <= [11]
                         return (imm2 << 25) | ((r + 8) << 20) | (1 << 12) | (imm1 << 7) | 0x63;
                     }
-                    _ => {} // No happens
+                    _ => unreachable!(),
                 };
             }
             2 => {
@@ -1294,7 +1243,7 @@ impl Cpu {
                                 if rs1 == 0 && rs2 == 0 {
                                     // C.EBREAK
                                     // ebreak
-                                    return 0x00100073;
+                                    return 0x0010_0073;
                                 }
                                 if rs1 != 0 && rs2 == 0 {
                                     // C.JALR
@@ -1309,7 +1258,7 @@ impl Cpu {
                                 // rs1 == 0 && rs2 != 0 is Hists
                                 // @TODO: Supports Hinsts
                             }
-                            _ => {} // Not happens
+                            _ => unreachable!(),
                         };
                     }
                     5 => {
@@ -1359,12 +1308,12 @@ impl Cpu {
                             | (imm4_0 << 7)
                             | 0x23;
                     }
-                    _ => {} // Not happens
+                    _ => unreachable!(),
                 };
             }
-            _ => {} // No happnes
+            _ => unreachable!(),
         };
-        0xffffffff // Return invalid value
+        0xffff_ffff // Return invalid value
     }
 
     /// Disassembles an instruction pointed by Program Counter.
@@ -1380,7 +1329,9 @@ impl Cpu {
             }
         };
 
-        let word = if (original_word & 0x3) == 0x3 { original_word } else {
+        let word = if (original_word & 0x3) == 0x3 {
+            original_word
+        } else {
             original_word &= 0xffff;
             self.uncompress(original_word)
         };
@@ -1398,9 +1349,9 @@ impl Cpu {
         };
 
         let mut s = format!("PC:{:016x} ", self.unsigned_data(self.pc as i64));
-        s += &format!("{:08x} ", original_word);
+        s += &format!("{original_word:08x} ");
         s += &format!("{} ", inst.name);
-        s += &(inst.disassemble)(self, word, self.pc, true).to_string();
+        s += &(inst.disassemble)(self, word, self.pc, true);
         s
     }
 
@@ -1429,18 +1380,19 @@ struct FormatB {
     imm: u64,
 }
 
-fn parse_format_b(word: u32) -> FormatB {
+#[allow(clippy::cast_sign_loss)]
+const fn parse_format_b(word: u32) -> FormatB {
     FormatB {
         rs1: ((word >> 15) & 0x1f) as usize, // [19:15]
         rs2: ((word >> 20) & 0x1f) as usize, // [24:20]
         imm: (
-            match word & 0x80000000 { // imm[31:12] = [31]
-                                0x80000000 => 0xfffff000,
+            match word & 0x8000_0000 { // imm[31:12] = [31]
+                                0x8000_0000 => 0xffff_f000,
                                 _ => 0
                         } |
-                        ((word << 4) & 0x00000800) | // imm[11] = [7]
-                        ((word >> 20) & 0x000007e0) | // imm[10:5] = [30:25]
-                        ((word >> 7) & 0x0000001e)
+                        ((word << 4) & 0x0000_0800) | // imm[11] = [7]
+                        ((word >> 20) & 0x0000_07e0) | // imm[10:5] = [30:25]
+                        ((word >> 7) & 0x0000_001e)
             // imm[4:1] = [11:8]
         ) as i32 as i64 as u64,
     }
@@ -1467,7 +1419,7 @@ struct FormatCSR {
     rd: usize,
 }
 
-fn parse_format_csr(word: u32) -> FormatCSR {
+const fn parse_format_csr(word: u32) -> FormatCSR {
     FormatCSR {
         csr: ((word >> 20) & 0xfff) as u16, // [31:20]
         rs: ((word >> 15) & 0x1f) as usize, // [19:15], also uimm
@@ -1500,16 +1452,16 @@ struct FormatI {
     imm: i64,
 }
 
-fn parse_format_i(word: u32) -> FormatI {
+const fn parse_format_i(word: u32) -> FormatI {
     FormatI {
         rd: ((word >> 7) & 0x1f) as usize,   // [11:7]
         rs1: ((word >> 15) & 0x1f) as usize, // [19:15]
         imm: (
-            match word & 0x80000000 {
+            match word & 0x8000_0000 {
                 // imm[31:11] = [31]
-                0x80000000 => 0xfffff800,
+                0x8000_0000 => 0xffff_f800,
                 _ => 0,
-            } | ((word >> 20) & 0x000007ff)
+            } | ((word >> 20) & 0x0000_07ff)
             // imm[10:0] = [30:20]
         ) as i32 as i64,
     }
@@ -1550,17 +1502,18 @@ struct FormatJ {
     imm: u64,
 }
 
-fn parse_format_j(word: u32) -> FormatJ {
+#[allow(clippy::cast_sign_loss)]
+const fn parse_format_j(word: u32) -> FormatJ {
     FormatJ {
         rd: ((word >> 7) & 0x1f) as usize, // [11:7]
         imm: (
-            match word & 0x80000000 { // imm[31:20] = [31]
-                                0x80000000 => 0xfff00000,
+            match word & 0x8000_0000 { // imm[31:20] = [31]
+                                0x8000_0000 => 0xfff0_0000,
                                 _ => 0
                         } |
-                        (word & 0x000ff000) | // imm[19:12] = [19:12]
-                        ((word & 0x00100000) >> 9) | // imm[11] = [20]
-                        ((word & 0x7fe00000) >> 20)
+                        (word & 0x000f_f000) | // imm[19:12] = [19:12]
+                        ((word & 0x0010_0000) >> 9) | // imm[11] = [20]
+                        ((word & 0x7fe0_0000) >> 20)
             // imm[10:1] = [30:21]
         ) as i32 as i64 as u64,
     }
@@ -1583,7 +1536,7 @@ struct FormatR {
     rs2: usize,
 }
 
-fn parse_format_r(word: u32) -> FormatR {
+const fn parse_format_r(word: u32) -> FormatR {
     FormatR {
         rd: ((word >> 7) & 0x1f) as usize,   // [11:7]
         rs1: ((word >> 15) & 0x1f) as usize, // [19:15]
@@ -1617,7 +1570,7 @@ struct FormatR2 {
     rs3: usize,
 }
 
-fn parse_format_r2(word: u32) -> FormatR2 {
+const fn parse_format_r2(word: u32) -> FormatR2 {
     FormatR2 {
         rd: ((word >> 7) & 0x1f) as usize,   // [11:7]
         rs1: ((word >> 15) & 0x1f) as usize, // [19:15]
@@ -1654,7 +1607,7 @@ struct FormatS {
     imm: i64,
 }
 
-fn parse_format_s(word: u32) -> FormatS {
+const fn parse_format_s(word: u32) -> FormatS {
     FormatS {
         rs1: ((word >> 15) & 0x1f) as usize, // [19:15]
         rs2: ((word >> 20) & 0x1f) as usize, // [24:20]
@@ -1690,7 +1643,7 @@ struct FormatU {
     imm: u64,
 }
 
-fn parse_format_u(word: u32) -> FormatU {
+const fn parse_format_u(word: u32) -> FormatU {
     FormatU {
         rd: ((word >> 7) & 0x1f) as usize, // [11:7]
         imm: (
@@ -1753,13 +1706,19 @@ fn get_register_name(num: usize) -> &'static str {
         29 => "t4",
         30 => "t5",
         31 => "t6",
-        _ => panic!("Unknown register num {}", num),
+        _ => panic!("Unknown register num {num}"),
     }
 }
 
 const INSTRUCTION_NUM: usize = 116;
 
 // @TODO: Reorder in often used order as
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::float_cmp
+)]
 const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     Instruction {
         mask: 0xfe00707f,
@@ -1789,7 +1748,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADDIW",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm) as i32 as i64;
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(f.imm) as i32);
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1800,7 +1759,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADDW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]) as i32 as i64;
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1834,7 +1793,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i32 as i64,
+                Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
@@ -1878,7 +1837,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i32 as i64,
+                Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
@@ -1903,7 +1862,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
-            let max = if cpu.x[f.rs2] as u64 >= tmp { cpu.x[f.rs2] as u64 } else { tmp };
+            let max = if cpu.x[f.rs2] as u64 >= tmp {
+                cpu.x[f.rs2] as u64
+            } else {
+                tmp
+            };
             match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -1923,12 +1886,16 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
-            let max = if cpu.x[f.rs2] as u32 >= tmp { cpu.x[f.rs2] as u32 } else { tmp };
+            let max = if cpu.x[f.rs2] as u32 >= tmp {
+                cpu.x[f.rs2] as u32
+            } else {
+                tmp
+            };
             match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             };
-            cpu.x[f.rd] = tmp as i32 as i64;
+            cpu.x[f.rd] = i64::from(tmp as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1962,7 +1929,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i32 as i64,
+                Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
@@ -2006,7 +1973,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i32 as i64,
+                Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
@@ -2259,7 +2226,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else if dividend == cpu.most_negative() && divisor == -1 {
                 cpu.x[f.rd] = dividend;
             } else {
-                cpu.x[f.rd] = cpu.sign_extend(dividend.wrapping_div(divisor))
+                cpu.x[f.rd] = cpu.sign_extend(dividend.wrapping_div(divisor));
             }
             Ok(())
         },
@@ -2276,7 +2243,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
             } else {
-                cpu.x[f.rd] = cpu.sign_extend(dividend.wrapping_div(divisor) as i64)
+                cpu.x[f.rd] = cpu.sign_extend(dividend.wrapping_div(divisor) as i64);
             }
             Ok(())
         },
@@ -2293,7 +2260,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
             } else {
-                cpu.x[f.rd] = dividend.wrapping_div(divisor) as i32 as i64
+                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
             }
             Ok(())
         },
@@ -2309,10 +2276,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let divisor = cpu.x[f.rs2] as i32;
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
-            } else if dividend == std::i32::MIN && divisor == -1 {
-                cpu.x[f.rd] = dividend as i32 as i64;
+            } else if dividend == i32::MIN && divisor == -1 {
+                cpu.x[f.rd] = i64::from(dividend as i32);
             } else {
-                cpu.x[f.rd] = dividend.wrapping_div(divisor) as i32 as i64
+                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
             }
             Ok(())
         },
@@ -2375,7 +2342,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // Is this implementation correct?
-            cpu.f[f.rd] = f32::from_bits(cpu.f[f.rs1].to_bits() as u32) as f64;
+            cpu.f[f.rd] = f64::from(f32::from_bits(cpu.f[f.rs1].to_bits() as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2386,7 +2353,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.W",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.x[f.rs1] as i32 as f64;
+            cpu.f[f.rd] = f64::from(cpu.x[f.rs1] as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2397,7 +2364,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.WU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.x[f.rs1] as u32 as f64;
+            cpu.f[f.rd] = f64::from(cpu.x[f.rs1] as u32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2409,7 +2376,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // Is this implementation correct?
-            cpu.f[f.rd] = cpu.f[f.rs1] as f32 as f64;
+            cpu.f[f.rd] = f64::from(cpu.f[f.rs1] as f32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2421,7 +2388,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // Is this implementation correct?
-            cpu.x[f.rd] = cpu.f[f.rs1] as u32 as i32 as i64;
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as u32 as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2436,10 +2403,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let divisor = cpu.f[f.rs2];
             // Is this implementation correct?
             if divisor == 0.0 {
-                cpu.f[f.rd] = std::f64::INFINITY;
+                cpu.f[f.rd] = f64::INFINITY;
                 cpu.set_fcsr_dz();
             } else if divisor == -0.0 {
-                cpu.f[f.rd] = std::f64::NEG_INFINITY;
+                cpu.f[f.rd] = f64::NEG_INFINITY;
                 cpu.set_fcsr_dz();
             } else {
                 cpu.f[f.rd] = dividend / divisor;
@@ -2474,7 +2441,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FEQ.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = if cpu.f[f.rs1] == cpu.f[f.rs2] { 1 } else { 0 };
+
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] == cpu.f[f.rs2]);
             Ok(())
         },
         disassemble: dump_empty,
@@ -2502,7 +2470,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLE.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = if cpu.f[f.rs1] <= cpu.f[f.rs2] { 1 } else { 0 };
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] <= cpu.f[f.rs2]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2513,7 +2481,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLT.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = if cpu.f[f.rs1] < cpu.f[f.rs2] { 1 } else { 0 };
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] < cpu.f[f.rs2]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2525,7 +2493,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
             cpu.f[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => f64::from_bits(data as i32 as i64 as u64),
+                Ok(data) => f64::from_bits(i64::from(data as i32) as u64),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2539,7 +2507,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             // @TODO: Update fcsr if needed?
             let f = parse_format_r2(word);
-            cpu.f[f.rd] = cpu.f[f.rs1] * cpu.f[f.rs2] + cpu.f[f.rs3];
+            cpu.f[f.rd] = cpu.f[f.rs1].mul_add(cpu.f[f.rs2], cpu.f[f.rs3]);
             Ok(())
         },
         disassemble: dump_format_r2,
@@ -2584,7 +2552,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.X.W",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.f[f.rs1].to_bits() as i32 as i64;
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1].to_bits() as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2595,7 +2563,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.W.X",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = f64::from_bits(cpu.x[f.rs1] as u32 as u64);
+            cpu.f[f.rd] = f64::from_bits(u64::from(cpu.x[f.rs1] as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2722,7 +2690,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = match cpu.mmu.load(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => data as i8 as i64,
+                Ok(data) => i64::from(data as i8),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2736,7 +2704,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = match cpu.mmu.load(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => data as i64,
+                Ok(data) => i64::from(data),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2770,7 +2738,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 .mmu
                 .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
             {
-                Ok(data) => data as i16 as i64,
+                Ok(data) => i64::from(data as i16),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2787,7 +2755,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 .mmu
                 .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
             {
-                Ok(data) => data as i64,
+                Ok(data) => i64::from(data),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2824,7 +2792,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(data) => {
                     cpu.is_reservation_set = true;
                     cpu.reservation = cpu.x[f.rs1] as u64; // Is virtual address ok?
-                    data as i32 as i64
+                    i64::from(data as i32)
                 }
                 Err(e) => return Err(e),
             };
@@ -2850,7 +2818,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => data as i32 as i64,
+                Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2864,7 +2832,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => data as i64,
+                Ok(data) => i64::from(data),
                 Err(e) => return Err(e),
             };
             Ok(())
@@ -2890,7 +2858,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.x[f.rd] = match cpu.xlen {
                 Xlen::Bit32 => cpu.sign_extend((cpu.x[f.rs1] * cpu.x[f.rs2]) >> 32),
-                Xlen::Bit64 => (((cpu.x[f.rs1] as i128) * (cpu.x[f.rs2] as i128)) >> 64) as i64,
+                Xlen::Bit64 => ((i128::from(cpu.x[f.rs1]) * i128::from(cpu.x[f.rs2])) >> 64) as i64,
             };
             Ok(())
         },
@@ -2904,11 +2872,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.x[f.rd] = match cpu.xlen {
                 Xlen::Bit32 => cpu.sign_extend(
-                    (((cpu.x[f.rs1] as u32 as u64) * (cpu.x[f.rs2] as u32 as u64)) >> 32) as i64,
+                    ((u64::from(cpu.x[f.rs1] as u32) * u64::from(cpu.x[f.rs2] as u32)) >> 32)
+                        as i64,
                 ),
                 Xlen::Bit64 => {
-                    ((cpu.x[f.rs1] as u64 as u128).wrapping_mul(cpu.x[f.rs2] as u64 as u128) >> 64)
-                        as i64
+                    (u128::from(cpu.x[f.rs1] as u64).wrapping_mul(u128::from(cpu.x[f.rs2] as u64))
+                        >> 64) as i64
                 }
             };
             Ok(())
@@ -2923,10 +2892,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.x[f.rd] = match cpu.xlen {
                 Xlen::Bit32 => cpu.sign_extend(
-                    ((cpu.x[f.rs1] as i64).wrapping_mul(cpu.x[f.rs2] as u32 as i64) >> 32) as i64,
+                    ((cpu.x[f.rs1] as i64).wrapping_mul(i64::from(cpu.x[f.rs2] as u32)) >> 32)
+                        as i64,
                 ),
                 Xlen::Bit64 => {
-                    ((cpu.x[f.rs1] as u128).wrapping_mul(cpu.x[f.rs2] as u64 as u128) >> 64) as i64
+                    ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64)
+                        as i64
                 }
             };
             Ok(())
@@ -2939,8 +2910,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] =
-                cpu.sign_extend((cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32) as i64);
+            cpu.x[f.rd] = cpu.sign_extend(i64::from(
+                (cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32),
+            ));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3042,8 +3014,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let dividend = cpu.x[f.rs1] as u32;
             let divisor = cpu.x[f.rs2] as u32;
             cpu.x[f.rd] = match divisor {
-                0 => dividend as i32 as i64,
-                _ => dividend.wrapping_rem(divisor) as i32 as i64,
+                0 => i64::from(dividend as i32),
+                _ => i64::from(dividend.wrapping_rem(divisor) as i32),
             };
             Ok(())
         },
@@ -3058,11 +3030,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let dividend = cpu.x[f.rs1] as i32;
             let divisor = cpu.x[f.rs2] as i32;
             if divisor == 0 {
-                cpu.x[f.rd] = dividend as i64;
-            } else if dividend == std::i32::MIN && divisor == -1 {
+                cpu.x[f.rd] = i64::from(dividend);
+            } else if dividend == i32::MIN && divisor == -1 {
                 cpu.x[f.rd] = 0;
             } else {
-                cpu.x[f.rd] = dividend.wrapping_rem(divisor) as i64;
+                cpu.x[f.rd] = i64::from(dividend.wrapping_rem(divisor));
             }
             Ok(())
         },
@@ -3086,16 +3058,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.is_reservation_set && cpu.reservation == (cpu.x[f.rs1] as u64) { match cpu
-                .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
-            {
-                Ok(()) => {
-                    cpu.is_reservation_set = false;
-                    0
+            cpu.x[f.rd] = if cpu.is_reservation_set && cpu.reservation == (cpu.x[f.rs1] as u64) {
+                match cpu
+                    .mmu
+                    .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
+                {
+                    Ok(()) => {
+                        cpu.is_reservation_set = false;
+                        0
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
-            } } else { 1 };
+            } else {
+                1
+            };
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3107,13 +3083,17 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.is_reservation_set && cpu.reservation == (cpu.x[f.rs1] as u64) { match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
-                Ok(()) => {
-                    cpu.is_reservation_set = false;
-                    0
+            cpu.x[f.rd] = if cpu.is_reservation_set && cpu.reservation == (cpu.x[f.rs1] as u64) {
+                match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
+                    Ok(()) => {
+                        cpu.is_reservation_set = false;
+                        0
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
-            } } else { 1 };
+            } else {
+                1
+            };
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3184,7 +3164,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             let shamt = f.rs2 as u32;
-            cpu.x[f.rd] = (cpu.x[f.rs1] << shamt) as i32 as i64;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] << shamt) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3195,7 +3175,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLLW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = (cpu.x[f.rs1] as u32).wrapping_shl(cpu.x[f.rs2] as u32) as i32 as i64;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shl(cpu.x[f.rs2] as u32) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3206,7 +3186,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLT",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = if cpu.x[f.rs1] < cpu.x[f.rs2] { 1 } else { 0 };
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < cpu.x[f.rs2]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3217,7 +3197,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTI",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = if cpu.x[f.rs1] < f.imm { 1 } else { 0 };
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < f.imm);
             Ok(())
         },
         disassemble: dump_format_i,
@@ -3228,7 +3208,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTIU",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = if cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(f.imm) { 1 } else { 0 };
+            cpu.x[f.rd] = i64::from(cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(f.imm));
             Ok(())
         },
         disassemble: dump_format_i,
@@ -3239,7 +3219,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = if cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(cpu.x[f.rs2]) { 1 } else { 0 };
+            cpu.x[f.rd] =
+                i64::from(cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(cpu.x[f.rs2]));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3278,7 +3259,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             let shamt = (word >> 20) & 0x1f;
-            cpu.x[f.rd] = ((cpu.x[f.rs1] as i32) >> shamt) as i64;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32) >> shamt);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3289,7 +3270,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRAW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = (cpu.x[f.rs1] as i32).wrapping_shr(cpu.x[f.rs2] as u32) as i64;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_shr(cpu.x[f.rs2] as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3366,7 +3347,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Xlen::Bit64 => 0x3f,
             };
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = ((cpu.x[f.rs1] as u32) >> shamt) as i32 as i64;
+            cpu.x[f.rd] = i64::from(((cpu.x[f.rs1] as u32) >> shamt) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3377,7 +3358,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRLW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = (cpu.x[f.rs1] as u32).wrapping_shr(cpu.x[f.rs2] as u32) as i32 as i64;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shr(cpu.x[f.rs2] as u32) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3399,7 +3380,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SUBW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]) as i32 as i64;
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3513,12 +3494,16 @@ impl DecodeCache {
         // Initialize linked list
         let mut entries = Vec::new();
         for i in 0..DECODE_CACHE_ENTRY_NUM {
-            let next_index = if i == DECODE_CACHE_ENTRY_NUM - 1 { NULL_ENTRY } else { i + 1 };
+            let next_index = if i == DECODE_CACHE_ENTRY_NUM - 1 {
+                NULL_ENTRY
+            } else {
+                i + 1
+            };
             let prev_index = if i == 0 { NULL_ENTRY } else { i - 1 };
             entries.push(DecodeCacheEntry::new(next_index, prev_index));
         }
 
-        DecodeCache {
+        Self {
             hash_map: FnvHashMap::default(),
             entries,
             front_index: 0,
@@ -3536,34 +3521,31 @@ impl DecodeCache {
     /// # Arguments
     /// * `word` word instruction data
     fn get(&mut self, word: u32) -> Option<usize> {
-        let result = match self.hash_map.get(&word) {
-            Some(index) => {
-                self.hit_count += 1;
-                // Move the entry to front of the list unless it is at front.
-                if self.front_index != *index {
-                    let next_index = self.entries[*index].next_index;
-                    let prev_index = self.entries[*index].prev_index;
+        let result = if let Some(index) = self.hash_map.get(&word) {
+            self.hit_count += 1;
+            // Move the entry to front of the list unless it is at front.
+            if self.front_index != *index {
+                let next_index = self.entries[*index].next_index;
+                let prev_index = self.entries[*index].prev_index;
 
-                    // Remove the entry from the list
-                    if self.back_index == *index {
-                        self.back_index = prev_index;
-                    } else {
-                        self.entries[next_index].prev_index = prev_index;
-                    }
-                    self.entries[prev_index].next_index = next_index;
-
-                    // Push the entry to front
-                    self.entries[*index].prev_index = NULL_ENTRY;
-                    self.entries[*index].next_index = self.front_index;
-                    self.entries[self.front_index].prev_index = *index;
-                    self.front_index = *index;
+                // Remove the entry from the list
+                if self.back_index == *index {
+                    self.back_index = prev_index;
+                } else {
+                    self.entries[next_index].prev_index = prev_index;
                 }
-                Some(self.entries[*index].instruction_index)
+                self.entries[prev_index].next_index = next_index;
+
+                // Push the entry to front
+                self.entries[*index].prev_index = NULL_ENTRY;
+                self.entries[*index].next_index = self.front_index;
+                self.entries[self.front_index].prev_index = *index;
+                self.front_index = *index;
             }
-            None => {
-                self.miss_count += 1;
-                None
-            }
+            Some(self.entries[*index].instruction_index)
+        } else {
+            self.miss_count += 1;
+            None
         };
         //println!("Hit:{:X}, Miss:{:X}, Ratio:{}", self.hit_count, self.miss_count,
         //      (self.hit_count as f64) / (self.hit_count + self.miss_count) as f64);
@@ -3626,8 +3608,8 @@ impl DecodeCacheEntry {
     /// # Arguments
     /// * `next_index`
     /// * `prev_index`
-    fn new(next_index: usize, prev_index: usize) -> Self {
-        DecodeCacheEntry {
+    const fn new(next_index: usize, prev_index: usize) -> Self {
+        Self {
             word: 0,
             instruction_index: INVALID_CACHE_ENTRY,
             next_index,
@@ -3639,8 +3621,8 @@ impl DecodeCacheEntry {
 #[cfg(test)]
 mod test_cpu {
     use super::*;
-    use mmu::DRAM_BASE;
-    use terminal::DummyTerminal;
+    use crate::mmu::DRAM_BASE;
+    use crate::terminal::DummyTerminal;
 
     fn create_cpu() -> Cpu {
         Cpu::new(Box::new(DummyTerminal::new()))
@@ -3693,7 +3675,7 @@ mod test_cpu {
             match i {
                 // 0th register is hardwired zero
                 0 => assert_eq!(0, cpu.read_register(i)),
-                _ => assert_eq!(i as i64 + 1, cpu.read_register(i)),
+                _ => assert_eq!(i64::from(i) + 1, cpu.read_register(i)),
             }
         }
 
@@ -3705,7 +3687,7 @@ mod test_cpu {
             match i {
                 // 0th register is hardwired zero
                 0 => assert_eq!(0, cpu.read_register(i)),
-                _ => assert_eq!(-(i as i64 + 1), cpu.read_register(i)),
+                _ => assert_eq!(-(i64::from(i) + 1), cpu.read_register(i)),
             }
         }
 
@@ -3714,6 +3696,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn tick() {
         let mut cpu = create_cpu();
         cpu.get_mut_mmu().init_memory(4);
@@ -3742,6 +3725,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn tick_operate() {
         let mut cpu = create_cpu();
         cpu.get_mut_mmu().init_memory(4);
@@ -3766,6 +3750,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn fetch() {
         // .fetch() reads four bytes from the memory
         // at the address the program counter points to.
@@ -3794,6 +3779,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn decode() {
         let mut cpu = create_cpu();
         // 0x13 is addi instruction
@@ -3802,11 +3788,15 @@ mod test_cpu {
             Err(_e) => panic!("Failed to decode"),
         };
         // .decode() returns error for invalid word data.
-        assert!(cpu.decode(0x0).is_err(), "Unexpectedly succeeded in decoding");
+        assert!(
+            cpu.decode(0x0).is_err(),
+            "Unexpectedly succeeded in decoding"
+        );
         // @TODO: Should I test all instructions?
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn uncompress() {
         let mut cpu = create_cpu();
         // .uncompress() doesn't directly return an instruction but
@@ -3819,6 +3809,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn wfi() {
         let wfi_instruction = 0x10500073;
         let mut cpu = create_cpu();
@@ -3853,6 +3844,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn interrupt() {
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
@@ -3894,6 +3886,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn exception() {
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
@@ -3921,6 +3914,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn hardocded_zero() {
         let mut cpu = create_cpu();
         cpu.get_mut_mmu().init_memory(8);
@@ -3951,6 +3945,7 @@ mod test_cpu {
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm)]
     fn disassemble_next_instruction() {
         let mut cpu = create_cpu();
         cpu.get_mut_mmu().init_memory(4);
@@ -3973,7 +3968,6 @@ mod test_cpu {
 }
 
 #[cfg(test)]
-
 mod test_decode_cache {
     use super::*;
 
@@ -4000,10 +3994,13 @@ mod test_decode_cache {
         };
 
         // Cache miss test
-        if let Some(_index) = cache.get(2) { panic!("Unexpected cache hit") };
+        if let Some(_index) = cache.get(2) {
+            panic!("Unexpected cache hit")
+        };
     }
 
     #[test]
+    #[allow(clippy::match_wild_err_arm, clippy::cast_possible_truncation)]
     fn lru() {
         let mut cache = DecodeCache::new();
         cache.insert(0, 1);
@@ -4013,16 +4010,20 @@ mod test_decode_cache {
             None => panic!("Unexpected cache miss"),
         };
 
-        for i in 1..DECODE_CACHE_ENTRY_NUM + 1 {
+        for i in 1..=DECODE_CACHE_ENTRY_NUM {
             cache.insert(i as u32, i + 1);
         }
 
         // The oldest entry should have been removed because of the overflow
-        if let Some(_index) = cache.get(0) { panic!("Unexpected cache hit") };
+        if let Some(_index) = cache.get(0) {
+            panic!("Unexpected cache hit")
+        };
 
         // With this .get(), the entry with the word "1" moves to the tail of the list
         // and the entry with the word "2" becomes the oldest entry.
-        if let Some(index) = cache.get(1) { assert_eq!(2, index) };
+        if let Some(index) = cache.get(1) {
+            assert_eq!(2, index);
+        };
 
         // The oldest entry with the word "2" will be removed due to the overflow
         cache.insert(
@@ -4030,6 +4031,8 @@ mod test_decode_cache {
             DECODE_CACHE_ENTRY_NUM + 2,
         );
 
-        if let Some(_index) = cache.get(2) { panic!("Unexpected cache hit") };
+        if let Some(_index) = cache.get(2) {
+            panic!("Unexpected cache hit")
+        };
     }
 }

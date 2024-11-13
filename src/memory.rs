@@ -1,3 +1,5 @@
+#![allow(clippy::unreadable_literal)]
+
 /// Emulates main memory.
 pub struct Memory {
     /// Memory content

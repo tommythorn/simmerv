@@ -1,4 +1,4 @@
-use terminal::Terminal;
+use crate::terminal::Terminal;
 
 /// Standard `Terminal`.
 pub struct DefaultTerminal {
@@ -27,7 +27,11 @@ impl Terminal for DefaultTerminal {
     }
 
     fn get_input(&mut self) -> u8 {
-        if !self.input_data.is_empty() { self.input_data.remove(0) } else { 0 }
+        if !self.input_data.is_empty() {
+            self.input_data.remove(0)
+        } else {
+            0
+        }
     }
 
     fn put_input(&mut self, value: u8) {
@@ -35,6 +39,10 @@ impl Terminal for DefaultTerminal {
     }
 
     fn get_output(&mut self) -> u8 {
-        if !self.output_data.is_empty() { self.output_data.remove(0) } else { 0 }
+        if !self.output_data.is_empty() {
+            self.output_data.remove(0)
+        } else {
+            0
+        }
     }
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::unreadable_literal)]
+
 /// DRAM base address. Offset from this base address
 /// is the address in main memory.
 pub const DRAM_BASE: u64 = 0x80000000;
@@ -8,13 +10,13 @@ extern crate fnv;
 
 use self::fnv::FnvHashMap;
 
-use cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType, Xlen};
-use device::clint::Clint;
-use device::plic::Plic;
-use device::uart::Uart;
-use device::virtio_block_disk::VirtioBlockDisk;
-use memory::Memory;
-use terminal::Terminal;
+use crate::cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType, Xlen};
+use crate::device::clint::Clint;
+use crate::device::plic::Plic;
+use crate::device::uart::Uart;
+use crate::device::virtio_block_disk::VirtioBlockDisk;
+use crate::memory::Memory;
+use crate::terminal::Terminal;
 
 /// Emulates Memory Management Unit. It holds the Main memory and peripheral
 /// devices, maps address to them, and accesses them depending on address.
@@ -754,6 +756,7 @@ impl Mmu {
         }
     }
 
+    #[allow(clippy::many_single_char_names)]
     fn traverse_page(
         &mut self,
         v_address: u64,

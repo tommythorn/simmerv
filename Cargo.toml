@@ -1,6 +1,7 @@
 [package]
 name = "riscv_emu_rust"
 version = "0.2.0"
+edition = "2021"
 description = "RISC-V emulator written in Rust"
 authors = ["Takahiro <hogehoge@gachapin.jp>", "Tommy Thorn <tommy-github2@thorn.ws>"]
 license = "MIT"
@@ -17,7 +18,11 @@ exclude = [
 members = [".", "cli", "wasm"]
 
 [lints.clippy]
-match-bool = "deny"
+pedantic = { level = "warn", priority = -2 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+unreadable-literal = "allow"
 
 [badges]
 travis-ci = { repository = "tommythorn/riscv-rust" }

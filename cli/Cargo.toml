@@ -1,9 +1,11 @@
 [package]
+edition = "2021"
 name = "riscv_emu_rust_cli"
 version = "0.1.0"
-authors = ["Takahiro"]
+authors = ["Takahiro", "Tommy Thorn <tommy-github2@thorn.ws>"]
+edition = "2021"
 
 [dependencies]
 getopts = "0.2"
-pancurses = "0.16.1"
+pancurses = "0.17.0"
 riscv_emu_rust = {path = "../"}

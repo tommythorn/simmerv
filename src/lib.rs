@@ -1,3 +1,5 @@
+#![allow(clippy::unreadable_literal)]
+
 // @TODO: temporal
 const TEST_MEMORY_CAPACITY: u64 = 1024 * 512;
 const PROGRAM_MEMORY_CAPACITY: u64 = 1024 * 1024 * 128; // big enough to run Linux and xv6
@@ -14,9 +16,9 @@ pub mod memory;
 pub mod mmu;
 pub mod terminal;
 
-use cpu::{Cpu, Xlen};
-use elf_analyzer::ElfAnalyzer;
-use terminal::Terminal;
+use crate::cpu::{Cpu, Xlen};
+use crate::elf_analyzer::ElfAnalyzer;
+use crate::terminal::Terminal;
 
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
@@ -53,8 +55,9 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `terminal`
+    #[must_use]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
-        Emulator {
+        Self {
             cpu: Cpu::new(terminal),
 
             symbol_map: FnvHashMap::default(),
@@ -69,7 +72,11 @@ impl Emulator {
     /// is [`riscv-tests`](https://github.com/riscv/riscv-tests).
     /// Otherwise calls `run_program()`.
     pub fn run(&mut self) {
-        if self.is_test { self.run_test() } else { self.run_program() };
+        if self.is_test {
+            self.run_test();
+        } else {
+            self.run_program();
+        }
     }
 
     /// Runs program set by `setup_program()`. The emulator won't stop forever.
@@ -104,10 +111,10 @@ impl Emulator {
             if endcode != 0 {
                 match endcode {
                     1 => self.put_bytes_to_terminal(
-                        format!("Test Passed with {:X}\n", endcode).as_bytes(),
+                        format!("Test Passed with {endcode:X}\n").as_bytes(),
                     ),
                     _ => self.put_bytes_to_terminal(
-                        format!("Test Failed with {:X}\n", endcode).as_bytes(),
+                        format!("Test Failed with {endcode:X}\n").as_bytes(),
                     ),
                 };
                 break;
@@ -153,7 +160,7 @@ impl Emulator {
         let mut symbol_table_section_headers = vec![];
         let mut string_table_section_headers = vec![];
 
-        for sh in section_headers.iter() {
+        for sh in &section_headers {
             match sh.sh_type {
                 1 => program_data_section_headers.push(sh),
                 2 => symbol_table_section_headers.push(sh),
@@ -226,13 +233,13 @@ impl Emulator {
         let header = analyzer.read_header();
         let section_headers = analyzer.read_section_headers(&header);
 
-        let mut program_data_section_headers = vec![];
+        //let mut program_data_section_headers = vec![];
         let mut symbol_table_section_headers = vec![];
         let mut string_table_section_headers = vec![];
 
-        for sh in section_headers.iter() {
+        for sh in &section_headers {
             match sh.sh_type {
-                1 => program_data_section_headers.push(sh),
+                //1 => program_data_section_headers.push(sh),
                 2 => symbol_table_section_headers.push(sh),
                 3 => string_table_section_headers.push(sh),
                 _ => {}
@@ -295,7 +302,8 @@ impl Emulator {
     }
 
     /// Returns immutable reference to `Cpu`.
-    pub fn get_cpu(&self) -> &Cpu {
+    #[must_use]
+    pub const fn get_cpu(&self) -> &Cpu {
         &self.cpu
     }
 
@@ -308,6 +316,7 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `s` Symbol strings
+    #[must_use]
     pub fn get_addredd_of_symbol(&self, s: &String) -> Option<u64> {
         self.symbol_map.get(s).copied()
     }
@@ -316,7 +325,7 @@ impl Emulator {
 #[cfg(test)]
 mod test_emulator {
     use super::*;
-    use terminal::DummyTerminal;
+    use crate::terminal::DummyTerminal;
 
     fn create_emu() -> Emulator {
         Emulator::new(Box::new(DummyTerminal::new()))

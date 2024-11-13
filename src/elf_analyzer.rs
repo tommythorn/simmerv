@@ -1,3 +1,5 @@
+#![allow(clippy::unreadable_literal, clippy::similar_names)]
+
 extern crate fnv;
 
 use self::fnv::FnvHashMap;

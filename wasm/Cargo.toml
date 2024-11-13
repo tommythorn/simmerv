@@ -1,10 +1,11 @@
 [package]
+edition = "2021"
 name = "riscv_emu_rust_wasm"
 version = "0.1.0"
 authors = ["Takahiro"]
 
 [dependencies]
-wasm-bindgen = "0.2.55"
+wasm-bindgen = "0.2.93"
 riscv_emu_rust = {path = "../"}
 
 [lib]

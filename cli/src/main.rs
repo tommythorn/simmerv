@@ -4,8 +4,8 @@ extern crate riscv_emu_rust;
 mod dummy_terminal;
 mod popup_terminal;
 
-use dummy_terminal::DummyTerminal;
-use popup_terminal::PopupTerminal;
+use crate::dummy_terminal::DummyTerminal;
+use crate::popup_terminal::PopupTerminal;
 use riscv_emu_rust::cpu::Xlen;
 use riscv_emu_rust::terminal::Terminal;
 use riscv_emu_rust::Emulator;
