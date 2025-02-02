@@ -31,8 +31,9 @@ pub struct Uart {
 
 impl Uart {
     /// Creates a new `Uart`. Input/Output data is transferred via `Terminal`.
+    #[must_use]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
-        Uart {
+        Self {
             clock: 0,
             rbr: 0,
             thr: 0,
@@ -97,11 +98,12 @@ impl Uart {
     /// drivers. I speculate some drivers assume "Edge-triggered" interrupt
     /// while drivers rarely rely on the behavior of "Level-triggered" interrupt
     /// which keeps interrupting while interrupt pending signal is asserted.
-    pub fn is_interrupting(&self) -> bool {
+    #[must_use]
+    pub const fn is_interrupting(&self) -> bool {
         self.interrupting
     }
 
-    fn update_iir(&mut self) {
+    const fn update_iir(&mut self) {
         let rx_ip = (self.ier & IER_RXINT_BIT) != 0 && self.rbr != 0;
         let thre_ip = (self.ier & IER_THREINT_BIT) != 0 && self.thr == 0;
 
@@ -119,7 +121,7 @@ impl Uart {
     ///
     /// # Arguments
     /// * `address`
-    pub fn load(&mut self, address: u64) -> u8 {
+    pub const fn load(&mut self, address: u64) -> u8 {
         //println!("UART Load AD:{:X}", address);
         match address {
             0x10000000 => {
@@ -154,7 +156,7 @@ impl Uart {
     /// # Arguments
     /// * `address`
     /// * `value`
-    pub fn store(&mut self, address: u64, value: u8) {
+    pub const fn store(&mut self, address: u64, value: u8) {
         //println!("UART Store AD:{:X} VAL:{:X}", address, value);
         match address {
             // Transfer Holding Register
@@ -189,7 +191,7 @@ impl Uart {
                 self.scr = value;
             }
             _ => {}
-        };
+        }
     }
 
     /// Returns mutable reference to `Terminal`.

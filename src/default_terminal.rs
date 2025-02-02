@@ -13,8 +13,9 @@ impl Default for DefaultTerminal {
 }
 
 impl DefaultTerminal {
-    pub fn new() -> Self {
-        DefaultTerminal {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
             input_data: vec![],
             output_data: vec![],
         }
@@ -27,10 +28,10 @@ impl Terminal for DefaultTerminal {
     }
 
     fn get_input(&mut self) -> u8 {
-        if !self.input_data.is_empty() {
-            self.input_data.remove(0)
-        } else {
+        if self.input_data.is_empty() {
             0
+        } else {
+            self.input_data.remove(0)
         }
     }
 
@@ -39,10 +40,10 @@ impl Terminal for DefaultTerminal {
     }
 
     fn get_output(&mut self) -> u8 {
-        if !self.output_data.is_empty() {
-            self.output_data.remove(0)
-        } else {
+        if self.output_data.is_empty() {
             0
+        } else {
+            self.output_data.remove(0)
         }
     }
 }

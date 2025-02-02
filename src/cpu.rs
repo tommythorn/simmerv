@@ -70,7 +70,7 @@ pub struct Cpu {
     x: [i64; 32],
     f: [f64; 32],
     pc: u64,
-    csr: [u64; CSR_CAPACITY],
+    csr: Box<[u64]>,
     mmu: Mmu,
     reservation: u64, // @TODO: Should support multiple address reservations
     is_reservation_set: bool,
@@ -233,7 +233,7 @@ impl Cpu {
             x: [0; 32],
             f: [0.0; 32],
             pc: 0,
-            csr: [0; CSR_CAPACITY],
+            csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
             mmu: Mmu::new(Xlen::Bit64, terminal),
             reservation: 0,
             is_reservation_set: false,
@@ -250,7 +250,7 @@ impl Cpu {
     ///
     /// # Arguments
     /// * `value`
-    pub fn update_pc(&mut self, value: u64) {
+    pub const fn update_pc(&mut self, value: u64) {
         self.pc = value;
     }
 
@@ -312,10 +312,7 @@ impl Cpu {
             return Ok(());
         }
 
-        let original_word = match self.fetch() {
-            Ok(word) => word,
-            Err(e) => return Err(e),
-        };
+        let original_word = self.fetch()?;
         let instruction_address = self.pc;
         let word = if (original_word & 0x3) == 0x3 {
             self.pc = self.pc.wrapping_add(4); // 32-bit length non-compressed instruction
@@ -500,7 +497,7 @@ impl Cpu {
                         }
                     }
                     PrivilegeMode::Reserved => panic!(),
-                };
+                }
             }
 
             // Interrupt can be maskable by xie csr register
@@ -553,7 +550,7 @@ impl Cpu {
                     }
                 }
                 _ => {}
-            };
+            }
         }
 
         // So, this trap should be taken
@@ -616,7 +613,7 @@ impl Cpu {
                 panic!("Not implemented yet");
             }
             PrivilegeMode::Reserved => panic!(), // shouldn't happen
-        };
+        }
         //println!("Trap! {:x} Clock:{:x}", cause, self.clock);
         true
     }
@@ -722,7 +719,7 @@ impl Cpu {
             _ => {
                 self.csr[address as usize] = value;
             }
-        };
+        }
     }
 
     fn _set_fcsr_nv(&mut self) {
@@ -1101,10 +1098,10 @@ impl Cpu {
                                         _ => unreachable!(),
                                     },
                                     _ => unreachable!(),
-                                };
+                                }
                             }
                             _ => unreachable!(),
-                        };
+                        }
                     }
                     5 => {
                         // C.J
@@ -1166,7 +1163,7 @@ impl Cpu {
                         return (imm2 << 25) | ((r + 8) << 20) | (1 << 12) | (imm1 << 7) | 0x63;
                     }
                     _ => unreachable!(),
-                };
+                }
             }
             2 => {
                 match funct3 {
@@ -1259,7 +1256,7 @@ impl Cpu {
                                 // @TODO: Supports Hinsts
                             }
                             _ => unreachable!(),
-                        };
+                        }
                     }
                     5 => {
                         // @TODO: Implement
@@ -1309,10 +1306,10 @@ impl Cpu {
                             | 0x23;
                     }
                     _ => unreachable!(),
-                };
+                }
             }
             _ => unreachable!(),
-        };
+        }
         0xffff_ffff // Return invalid value
     }
 
@@ -1356,7 +1353,7 @@ impl Cpu {
     }
 
     /// Returns mutable `Mmu`
-    pub fn get_mut_mmu(&mut self) -> &mut Mmu {
+    pub const fn get_mut_mmu(&mut self) -> &mut Mmu {
         &mut self.mmu
     }
 
@@ -1668,7 +1665,7 @@ fn dump_format_u(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> Str
     s
 }
 
-fn dump_empty(_cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) -> String {
+const fn dump_empty(_cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) -> String {
     String::new()
 }
 
@@ -1780,7 +1777,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1802,7 +1799,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1824,7 +1821,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1846,7 +1843,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1870,7 +1867,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp as i64;
             Ok(())
         },
@@ -1894,7 +1891,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = i64::from(tmp as i32);
             Ok(())
         },
@@ -1916,7 +1913,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1938,7 +1935,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1960,7 +1957,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -1979,7 +1976,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             cpu.x[f.rd] = tmp;
             Ok(())
         },
@@ -2111,7 +2108,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             Ok(())
         },
         disassemble: dump_format_csr,
@@ -2130,7 +2127,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             Ok(())
         },
         disassemble: dump_format_csr,
@@ -2150,7 +2147,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.write_csr(f.csr, cpu.unsigned_data(cpu.x[f.rd] | tmp)) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             Ok(())
         },
         disassemble: dump_format_csr,
@@ -2169,7 +2166,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.write_csr(f.csr, cpu.unsigned_data(cpu.x[f.rd] | (f.rs as i64))) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             Ok(())
         },
         disassemble: dump_format_csr,
@@ -2189,7 +2186,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.write_csr(f.csr, cpu.unsigned_data(tmp)) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             Ok(())
         },
         disassemble: dump_format_csr,
@@ -2208,7 +2205,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             match cpu.write_csr(f.csr, f.rs as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
-            };
+            }
             Ok(())
         },
         disassemble: dump_format_csr,
@@ -3706,12 +3703,12 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00108093) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         // Write compressed "addi x8, x0, 8" instruction
         match cpu.get_mut_mmu().store_word(DRAM_BASE + 4, 0x20) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
 
         cpu.tick();
 
@@ -3734,13 +3731,13 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0xc50513) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         assert_eq!(DRAM_BASE, cpu.read_pc());
         assert_eq!(0, cpu.read_register(10));
         match cpu.tick_operate() {
             Ok(()) => {}
             Err(_e) => panic!("tick_operate() unexpectedly did panic"),
-        };
+        }
         // .tick_operate() increments the program counter by 4 for
         // non-compressed instruction.
         assert_eq!(DRAM_BASE + 4, cpu.read_pc());
@@ -3762,19 +3759,19 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0xaaaaaaaa) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         match cpu.fetch() {
             Ok(data) => assert_eq!(0xaaaaaaaa, data),
             Err(_e) => panic!("Failed to fetch"),
-        };
+        }
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x55555555) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         match cpu.fetch() {
             Ok(data) => assert_eq!(0x55555555, data),
             Err(_e) => panic!("Failed to fetch"),
-        };
+        }
         // @TODO: Write test cases where Trap happens
     }
 
@@ -3786,7 +3783,7 @@ mod test_cpu {
         match cpu.decode(0x13) {
             Ok(inst) => assert_eq!(inst.name, "ADDI"),
             Err(_e) => panic!("Failed to decode"),
-        };
+        }
         // .decode() returns error for invalid word data.
         assert!(
             cpu.decode(0x0).is_err(),
@@ -3804,7 +3801,7 @@ mod test_cpu {
         match cpu.decode(cpu.uncompress(0x20)) {
             Ok(inst) => assert_eq!(inst.name, "ADDI"),
             Err(_e) => panic!("Failed to decode"),
-        };
+        }
         // @TODO: Should I test all compressed instructions?
     }
 
@@ -3817,14 +3814,14 @@ mod test_cpu {
         match cpu.decode(wfi_instruction) {
             Ok(inst) => assert_eq!(inst.name, "WFI"),
             Err(_e) => panic!("Failed to decode"),
-        };
+        }
         cpu.get_mut_mmu().init_memory(4);
         cpu.update_pc(DRAM_BASE);
         // write WFI instruction
         match cpu.get_mut_mmu().store_word(DRAM_BASE, wfi_instruction) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         cpu.tick();
         assert_eq!(DRAM_BASE + 4, cpu.read_pc());
         for _i in 0..10 {
@@ -3853,7 +3850,7 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         cpu.update_pc(DRAM_BASE);
 
         // Machine timer interrupt but mie in mstatus is not enabled yet
@@ -3895,7 +3892,7 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00000073) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         cpu.write_csr_raw(CSR_MTVEC_ADDRESS, handler_vector);
         cpu.update_pc(DRAM_BASE);
 
@@ -3924,12 +3921,12 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
         // Write non-compressed "addi x1, x1, 1" instruction
         match cpu.get_mut_mmu().store_word(DRAM_BASE + 4, 0x00108093) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
 
         // Test x0
         assert_eq!(0, cpu.read_register(0));
@@ -3955,7 +3952,7 @@ mod test_cpu {
         match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
-        };
+        }
 
         assert_eq!(
             "PC:0000000080000000 00100013 ADDI zero:0,zero:0,1",
@@ -3991,12 +3988,12 @@ mod test_decode_cache {
         match cache.get(1) {
             Some(index) => assert_eq!(2, index),
             None => panic!("Unexpected cache miss"),
-        };
+        }
 
         // Cache miss test
         if let Some(_index) = cache.get(2) {
             panic!("Unexpected cache hit")
-        };
+        }
     }
 
     #[test]
@@ -4008,7 +4005,7 @@ mod test_decode_cache {
         match cache.get(0) {
             Some(index) => assert_eq!(1, index),
             None => panic!("Unexpected cache miss"),
-        };
+        }
 
         for i in 1..=DECODE_CACHE_ENTRY_NUM {
             cache.insert(i as u32, i + 1);
@@ -4017,13 +4014,13 @@ mod test_decode_cache {
         // The oldest entry should have been removed because of the overflow
         if let Some(_index) = cache.get(0) {
             panic!("Unexpected cache hit")
-        };
+        }
 
         // With this .get(), the entry with the word "1" moves to the tail of the list
         // and the entry with the word "2" becomes the oldest entry.
         if let Some(index) = cache.get(1) {
             assert_eq!(2, index);
-        };
+        }
 
         // The oldest entry with the word "2" will be removed due to the overflow
         cache.insert(
@@ -4033,6 +4030,6 @@ mod test_decode_cache {
 
         if let Some(_index) = cache.get(2) {
             panic!("Unexpected cache hit")
-        };
+        }
     }
 }

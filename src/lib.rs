@@ -264,7 +264,7 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `content` File system content binary
-    pub fn setup_filesystem(&mut self, content: Vec<u8>) {
+    pub fn setup_filesystem(&mut self, content: &[u8]) {
         self.cpu.get_mut_mmu().init_disk(content);
     }
 
@@ -274,7 +274,7 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `content` DTB content binary
-    pub fn setup_dtb(&mut self, content: Vec<u8>) {
+    pub fn setup_dtb(&mut self, content: &[u8]) {
         self.cpu.get_mut_mmu().init_dtb(content);
     }
 

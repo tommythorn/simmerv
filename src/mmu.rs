@@ -134,7 +134,7 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `data` Filesystem binary content
-    pub fn init_disk(&mut self, data: Vec<u8>) {
+    pub fn init_disk(&mut self, data: &[u8]) {
         self.disk.init(data);
     }
 
@@ -142,7 +142,7 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `data` DTB binary content
-    pub fn init_dtb(&mut self, data: Vec<u8>) {
+    pub fn init_dtb(&mut self, data: &[u8]) {
         self.dtb[..data.len()].copy_from_slice(&data[..]);
         for i in data.len()..self.dtb.len() {
             self.dtb[i] = 0;

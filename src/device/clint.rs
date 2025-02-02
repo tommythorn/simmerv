@@ -19,8 +19,9 @@ impl Default for Clint {
 
 impl Clint {
     /// Creates a new `Clint`
-    pub fn new() -> Self {
-        Clint {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
             clock: 0,
             msip: 0,
             mtimecmp: 0,
@@ -33,7 +34,7 @@ impl Clint {
     ///
     /// # Arguments
     /// * `mip` CPU `mip` register. It can be updated if interrupt occurs.
-    pub fn tick(&mut self, mip: &mut u64) {
+    pub const fn tick(&mut self, mip: &mut u64) {
         self.clock = self.clock.wrapping_add(1);
         self.mtime = self.mtime.wrapping_add(1);
 
@@ -50,7 +51,9 @@ impl Clint {
     ///
     /// # Arguments
     /// * `address`
-    pub fn load(&self, address: u64) -> u8 {
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub const fn load(&self, address: u64) -> u8 {
         //println!("CLINT Load AD:{:X}", address);
         match address {
             // MSIP register 4 bytes
@@ -84,7 +87,8 @@ impl Clint {
     /// # Arguments
     /// * `address`
     /// * `value`
-    pub fn store(&mut self, address: u64, value: u8) {
+    #[allow(clippy::cast_lossless)]
+    pub const fn store(&mut self, address: u64, value: u8) {
         //println!("CLINT Store AD:{:X} VAL:{:X}", address, value);
         match address {
             // MSIP register 4 bytes. Upper 31 bits are hardwired to zero.
@@ -142,16 +146,17 @@ impl Clint {
                 self.mtime = (self.mtime & !(0xff << 56)) | ((value as u64) << 56);
             }
             _ => {}
-        };
+        }
     }
 
     /// Reads `mtime` register content
-    pub fn read_mtime(&self) -> u64 {
+    #[must_use]
+    pub const fn read_mtime(&self) -> u64 {
         self.mtime
     }
 
     /// Writes to `mtime` register content
-    pub fn write_mtime(&mut self, value: u64) {
+    pub const fn write_mtime(&mut self, value: u64) {
         self.mtime = value;
     }
 }

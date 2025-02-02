@@ -49,8 +49,9 @@ impl Default for VirtioBlockDisk {
 
 impl VirtioBlockDisk {
     /// Creates a new `VirtioBlockDisk`.
-    pub fn new() -> Self {
-        VirtioBlockDisk {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
             used_ring_index: 0,
             clock: 0,
             device_features: 0,
@@ -71,7 +72,7 @@ impl VirtioBlockDisk {
     }
 
     /// Indicates whether `VirtioBlockDisk` raises an interrupt signal
-    pub fn is_interrupting(&mut self) -> bool {
+    pub const fn is_interrupting(&mut self) -> bool {
         (self.interrupt_status & 0x1) == 1
     }
 
@@ -80,9 +81,10 @@ impl VirtioBlockDisk {
     ///
     /// # Arguments
     /// * `contents` filesystem content binary
-    pub fn init(&mut self, contents: Vec<u8>) {
+    #[allow(clippy::cast_lossless)]
+    pub fn init(&mut self, contents: &[u8]) {
         // @TODO: Optimize
-        for _i in 0..((contents.len() + 7) / 8) {
+        for _i in 0..contents.len().div_ceil(8) {
             self.contents.push(0);
         }
         for (i, item) in contents.iter().enumerate() {
@@ -116,7 +118,8 @@ impl VirtioBlockDisk {
     ///
     /// # Arguments
     /// * `address`
-    pub fn load(&mut self, address: u64) -> u8 {
+    #[allow(clippy::match_same_arms, clippy::cast_possible_truncation)]
+    pub const fn load(&mut self, address: u64) -> u8 {
         //println!("Disk Load AD:{:X}", address);
         match address {
             // Magic number: 0x74726976
@@ -182,6 +185,9 @@ impl VirtioBlockDisk {
     /// # Arguments
     /// * `address`
     /// * `value`
+    /// # Panics
+    /// Will panic if multi queue are attempted enabled (XXX should probably just ignore)
+    #[allow(clippy::cast_lossless, clippy::too_many_lines)]
     pub fn store(&mut self, address: u64, value: u8) {
         //println!("Disk Store AD:{:X} VAL:{:X}", address, value);
         match address {
@@ -241,9 +247,10 @@ impl VirtioBlockDisk {
             }
             0x10001033 => {
                 self.queue_select = (self.queue_select & !(0xff << 24)) | ((value as u32) << 24);
-                if self.queue_select != 0 {
-                    panic!("Virtio: No multi queue support yet.");
-                }
+                assert!(
+                    self.queue_select == 0,
+                    "Virtio: No multi queue support yet."
+                );
             }
             0x10001038 => {
                 self.queue_size = (self.queue_size & !0xff) | (value as u32);
@@ -300,7 +307,7 @@ impl VirtioBlockDisk {
                 if (value & 0x1) == 1 {
                     self.interrupt_status &= !0x1;
                 } else {
-                    panic!("Unknown ack {:X}", value);
+                    panic!("Unknown ack {value:X}");
                 }
             }
             0x10001070 => {
@@ -316,7 +323,7 @@ impl VirtioBlockDisk {
                 self.status = (self.status & !(0xff << 24)) | ((value as u32) << 24);
             }
             _ => {}
-        };
+        }
     }
 
     /// Fast path of transferring the data from disk to memory.
@@ -335,18 +342,15 @@ impl VirtioBlockDisk {
     ) {
         debug_assert!(
             (mem_address % 8) == 0,
-            "Memory address should be eight-byte aligned. {:X}",
-            mem_address
+            "Memory address should be eight-byte aligned. {mem_address:X}"
         );
         debug_assert!(
             (disk_address % 8) == 0,
-            "Disk address should be eight-byte aligned. {:X}",
-            disk_address
+            "Disk address should be eight-byte aligned. {disk_address:X}"
         );
         debug_assert!(
             (length % 8) == 0,
-            "Length should be eight-byte aligned. {:X}",
-            length
+            "Length should be eight-byte aligned. {length:X}"
         );
         for i in 0..(length / 8) {
             let disk_index = ((disk_address + i * 8) >> 3) as usize;

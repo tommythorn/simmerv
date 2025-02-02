@@ -31,8 +31,9 @@ impl Default for Plic {
 
 impl Plic {
     /// Creates a new `Plic`.
-    pub fn new() -> Self {
-        Plic {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
             clock: 0,
             irq: 0,
             enabled: 0,
@@ -116,13 +117,13 @@ impl Plic {
         }
     }
 
-    fn set_ip(&mut self, irq: u32) {
+    const fn set_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] |= 1 << irq;
         self.needs_update_irq = true;
     }
 
-    fn clear_ip(&mut self, irq: u32) {
+    const fn clear_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] &= !(1 << irq);
         self.needs_update_irq = true;
@@ -132,7 +133,9 @@ impl Plic {
     ///
     /// # Arguments
     /// * `address`
-    pub fn load(&self, address: u64) -> u8 {
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub const fn load(&self, address: u64) -> u8 {
         //println!("PLIC Load AD:{:X}", address);
         match address {
             0x0c000000..=0x0c000fff => {
@@ -170,7 +173,8 @@ impl Plic {
     /// # Arguments
     /// * `address`
     /// * `value`
-    pub fn store(&mut self, address: u64, value: u8) {
+    #[allow(clippy::cast_lossless)]
+    pub const fn store(&mut self, address: u64, value: u8) {
         //println!("PLIC Store AD:{:X} VAL:{:X}", address, value);
         match address {
             0x0c000000..=0x0c000fff => {
@@ -228,6 +232,6 @@ impl Plic {
                 self.clear_ip(value as u32);
             }
             _ => {}
-        };
+        }
     }
 }
