@@ -59,6 +59,16 @@ pub const MIP_SEIP: u64 = 0x200;
 const MIP_STIP: u64 = 0x020;
 const MIP_SSIP: u64 = 0x002;
 
+#[derive(Copy, Clone, Debug)]
+struct UopBundle {
+    entry: u64,
+    exit: u64, // First address *past* the entry covered by this
+    last_use_seqno: u64,
+}
+
+const UOP_CACHE_WAYS: usize = 8;
+const UOP_CACHE_DEPTH: usize = 1024;
+
 /// Emulates a RISC-V CPU core
 pub struct Cpu {
     clock: u64,
@@ -69,12 +79,20 @@ pub struct Cpu {
     // for 32-bit mode
     x: [i64; 32],
     f: [f64; 32],
+    seqno: u64,
     pc: u64,
+    prev_pc: u64,
     csr: Box<[u64]>,
     mmu: Mmu,
     reservation: Option<i64>,
     decode_cache: DecodeCache,
     unsigned_data_mask: u64,
+
+    building_uop_bundle: bool,
+    active_uop_bundle: UopBundle,
+    uop_cache: Box<[[UopBundle; UOP_CACHE_WAYS]]>,
+    n_insn_hit_opcache: usize,
+    n_insn_miss_opcache: usize,
 }
 
 #[derive(Clone)]
@@ -217,12 +235,118 @@ const fn get_trap_cause(trap: &Trap, xlen: &Xlen) -> u64 {
 }
 
 impl Cpu {
+    fn uop_cache_insert(&mut self, entry: u64, exit: u64) {
+        let index = (entry / 64) as usize & (UOP_CACHE_DEPTH - 1);
+
+        let (mut oldest_w, mut oldest_seqno) = (0, self.uop_cache[index][0].last_use_seqno);
+        for w in 1..UOP_CACHE_WAYS {
+            if self.uop_cache[index][w].last_use_seqno < oldest_seqno {
+                (oldest_w, oldest_seqno) = (w, self.uop_cache[index][w].last_use_seqno);
+            }
+        }
+
+        log::info!("UOP$ replacing {index:3}:{oldest_w} {{{:08x}, {:08x}, {}}} with {{{entry:08x}, {exit:08x}, {}}} (hits {}, miss {})",
+            self.uop_cache[index][oldest_w].entry,
+            self.uop_cache[index][oldest_w].exit,
+            self.uop_cache[index][oldest_w].last_use_seqno,
+            self.seqno,
+            self.n_insn_hit_opcache,
+            self.n_insn_miss_opcache,
+        );
+
+        self.uop_cache[index][oldest_w] = UopBundle {
+            entry,
+            exit,
+            last_use_seqno: self.seqno,
+        };
+    }
+
+    /// In which we simulate how a uop cache would perform
+    ///
+    /// We can be in two modes: executing out of a uop cache line or building a new entry.
+    fn uop_fetch(&mut self) {
+        let seqno = self.seqno;
+        self.seqno += 1;
+        let pc = self.pc;
+        let prev_pc = self.prev_pc;
+        self.prev_pc = pc;
+        let no_ctf = prev_pc + 2 == pc || prev_pc + 4 == pc; // XXX this is an inaccurate hack for now.
+
+        // Fast path: we are executing a uop_bundle and haven't left it
+        let UopBundle { entry, exit, .. } = self.active_uop_bundle;
+
+        if !self.building_uop_bundle && entry <= pc && pc <= exit && no_ctf {
+            self.n_insn_hit_opcache += 1;
+            log::debug!("UOP$ @{seqno} {pc:08x} hit #{}", self.n_insn_hit_opcache);
+            return;
+        }
+
+        // Are we still collecting a bundle?  (Note, we do _not_ check if we are running into an existing one)
+        if self.building_uop_bundle && entry <= pc && pc <= exit && no_ctf {
+            self.n_insn_miss_opcache += 1;
+            log::debug!(
+                "UOP$ @{seqno} {pc:08x} miss #{} (building)",
+                self.n_insn_miss_opcache
+            );
+            return;
+        }
+
+        // We exited the current bundle.  If we were building, insert it into the cache
+        if self.building_uop_bundle {
+            self.uop_cache_insert(entry, prev_pc);
+        }
+
+        // Look for a uop cache entry for pc
+        // Our cache ~ 128 KiB 4-way, thus each way is ~ 32 KiB
+        // An entry is 6 uop which is ~ 42 bit = 32 B => 1024 entries
+        // However it's indexed by I$ way (64B)
+        let index = (pc / 64) as usize & (UOP_CACHE_DEPTH - 1);
+        for w in 0..UOP_CACHE_WAYS {
+            if self.uop_cache[index][w].entry == pc {
+                self.active_uop_bundle = self.uop_cache[index][w];
+                self.uop_cache[index][w].last_use_seqno = self.seqno;
+                self.building_uop_bundle = false;
+                self.n_insn_hit_opcache += 1;
+                log::debug!(
+                    "UOP$ @{seqno} {pc:08x} hit #{} (new entry)",
+                    self.n_insn_hit_opcache
+                );
+                return;
+            }
+        }
+
+        // We are neither in a current entry nor did we find one in the cache,
+        // so begin a new one.
+        self.n_insn_miss_opcache += 1;
+        self.building_uop_bundle = true;
+        self.active_uop_bundle = UopBundle {
+            entry: pc,
+            exit: pc | 63, // End of cache line, will be changed
+            last_use_seqno: self.seqno,
+        };
+        log::debug!(
+            "UOP$ @{seqno} {pc:08x} miss #{}; start building a new entry {{{pc:08x}, {:08x}, {}}}",
+            self.n_insn_miss_opcache,
+            pc | 63,
+            seqno
+        );
+    }
+
     /// Creates a new `Cpu`.
     ///
     /// # Arguments
     /// * `Terminal`
     #[must_use]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
+        let uop_cache = vec![
+            [UopBundle {
+                entry: 0,
+                exit: 0,
+                last_use_seqno: 0,
+            }; UOP_CACHE_WAYS];
+            UOP_CACHE_DEPTH
+        ]
+        .into_boxed_slice();
         let mut cpu = Self {
             clock: 0,
             xlen: Xlen::Bit64,
@@ -230,12 +354,24 @@ impl Cpu {
             wfi: false,
             x: [0; 32],
             f: [0.0; 32],
+            seqno: 0,
+            prev_pc: 0,
             pc: 0,
             csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
             mmu: Mmu::new(Xlen::Bit64, terminal),
             reservation: None,
             decode_cache: DecodeCache::new(),
             unsigned_data_mask: 0xffff_ffff_ffff_ffff,
+
+            active_uop_bundle: UopBundle {
+                entry: 0,
+                exit: 0,
+                last_use_seqno: 0,
+            },
+            building_uop_bundle: false,
+            n_insn_hit_opcache: 0,
+            n_insn_miss_opcache: 0,
+            uop_cache,
         };
         cpu.x[0xb] = 0x1020; // I don't know why but Linux boot seems to require this initialization
         cpu.write_csr_raw(CSR_MISA_ADDRESS, 0x8000_0000_8014_312f);
@@ -615,6 +751,7 @@ impl Cpu {
     }
 
     fn fetch(&mut self) -> Result<u32, Trap> {
+        self.uop_fetch();
         let word = match self.mmu.fetch_word(self.pc) {
             Ok(word) => word,
             Err(e) => {

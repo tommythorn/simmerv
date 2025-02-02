@@ -81,6 +81,7 @@ impl Emulator {
 
     /// Runs program set by `setup_program()`. The emulator won't stop forever.
     pub fn run_program(&mut self) {
+        env_logger::builder().format_timestamp(None).init();
         loop {
             self.tick();
         }
