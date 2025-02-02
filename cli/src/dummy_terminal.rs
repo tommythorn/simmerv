@@ -22,9 +22,7 @@ impl Terminal for DummyTerminal {
             }
             Err(_e) => {}
         };
-        match stdout().flush() {
-            _ => {} // Ignoring error so far
-        };
+        let _ = stdout().flush();
     }
 
     fn get_input(&mut self) -> u8 {

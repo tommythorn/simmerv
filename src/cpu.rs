@@ -634,7 +634,7 @@ impl Cpu {
         privilege as u8 <= get_privilege_encoding(&self.privilege_mode)
     }
 
-    fn read_csr(&self, address: u16) -> Result<u64, Trap> {
+    const fn read_csr(&self, address: u16) -> Result<u64, Trap> {
         if self.has_csr_access_privilege(address) {
             Ok(self.read_csr_raw(address))
         } else {
@@ -668,7 +668,7 @@ impl Cpu {
     }
 
     // SSTATUS, SIE, and SIP are subsets of MSTATUS, MIE, and MIP
-    fn read_csr_raw(&self, address: u16) -> u64 {
+    const fn read_csr_raw(&self, address: u16) -> u64 {
         match address {
             // @TODO: Mask shuld consider of 32-bit mode
             CSR_FFLAGS_ADDRESS => self.csr[CSR_FCSR_ADDRESS as usize] & 0x1f,

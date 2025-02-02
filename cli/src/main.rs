@@ -114,8 +114,8 @@ fn main() -> std::io::Result<()> {
     let mut emulator = Emulator::new(get_terminal(terminal_type));
     emulator.setup_program(elf_contents);
 
-    match matches.opt_str("x") {
-        Some(x) => match x.as_str() {
+    if let Some(x) = matches.opt_str("x") {
+        match x.as_str() {
             "32" => {
                 println!("Force to 32-bit mode.");
                 emulator.update_xlen(Xlen::Bit32);
@@ -129,13 +129,12 @@ fn main() -> std::io::Result<()> {
                 // @TODO: throw error?
                 return Ok(());
             }
-        },
-        None => {}
+        }
     };
 
-    emulator.setup_filesystem(fs_contents);
+    emulator.setup_filesystem(&fs_contents);
     if has_dtb {
-        emulator.setup_dtb(dtb_contents);
+        emulator.setup_dtb(&dtb_contents);
     }
     if matches.opt_present("p") {
         emulator.enable_page_cache(true);

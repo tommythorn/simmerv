@@ -143,14 +143,15 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `data` Program binary
+    /// # Panics
+    /// Will panic if given a non-Elf file
     // @TODO: Make ElfAnalyzer and move the core logic there.
     // @TODO: Returns `Err` if the passed contend doesn't seem ELF file
+    #[allow(clippy::cast_possible_truncation)]
     pub fn setup_program(&mut self, data: Vec<u8>) {
         let analyzer = ElfAnalyzer::new(data);
 
-        if !analyzer.validate() {
-            panic!("This file does not seem ELF file");
-        }
+        assert!(analyzer.validate(), "This file does not seem ELF file");
 
         let header = analyzer.read_header();
         //let program_headers = analyzer._read_program_headers(&header);
@@ -180,9 +181,8 @@ impl Emulator {
             // Assuming symbols are in the first string table section.
             // @TODO: What if symbol can be in the second or later string table sections?
             let map = analyzer.create_symbol_map(&entries, string_table_section_headers[0]);
-            for key in map.keys() {
-                self.symbol_map
-                    .insert(key.to_string(), *map.get(key).unwrap());
+            for (key, value) in map {
+                self.symbol_map.insert(key, value);
             }
         }
 
@@ -223,12 +223,12 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `content` Program binary
+    /// # Panics
+    /// Panics on non-Elf files
     pub fn load_program_for_symbols(&mut self, content: Vec<u8>) {
         let analyzer = ElfAnalyzer::new(content);
 
-        if !analyzer.validate() {
-            panic!("This file does not seem ELF file");
-        }
+        assert!(analyzer.validate(), "This file does not seem ELF file");
 
         let header = analyzer.read_header();
         let section_headers = analyzer.read_section_headers(&header);
@@ -252,9 +252,8 @@ impl Emulator {
             // Assuming symbols are in the first string table section.
             // @TODO: What if symbol can be in the second or later string table sections?
             let map = analyzer.create_symbol_map(&entries, string_table_section_headers[0]);
-            for key in map.keys() {
-                self.symbol_map
-                    .insert(key.to_string(), *map.get(key).unwrap());
+            for (key, value) in map {
+                self.symbol_map.insert(key, value);
             }
         }
     }
@@ -338,45 +337,45 @@ mod test_emulator {
 
     #[test]
     #[ignore]
-    fn run() {}
+    const fn run() {}
 
     #[test]
     #[ignore]
-    fn run_program() {}
+    const fn run_program() {}
 
     #[test]
     #[ignore]
-    fn run_test() {}
+    const fn run_test() {}
 
     #[test]
     #[ignore]
-    fn tick() {}
+    const fn tick() {}
 
     #[test]
     #[ignore]
-    fn setup_program() {}
+    const fn setup_program() {}
 
     #[test]
     #[ignore]
-    fn load_program_for_symbols() {}
+    const fn load_program_for_symbols() {}
 
     #[test]
     #[ignore]
-    fn setup_filesystem() {}
+    const fn setup_filesystem() {}
 
     #[test]
     #[ignore]
-    fn setup_dtb() {}
+    const fn setup_dtb() {}
 
     #[test]
     #[ignore]
-    fn update_xlen() {}
+    const fn update_xlen() {}
 
     #[test]
     #[ignore]
-    fn enable_page_cache() {}
+    const fn enable_page_cache() {}
 
     #[test]
     #[ignore]
-    fn get_addredd_of_symbol() {}
+    const fn get_addredd_of_symbol() {}
 }

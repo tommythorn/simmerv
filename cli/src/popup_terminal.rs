@@ -23,11 +23,7 @@ impl Terminal for PopupTerminal {
     fn get_input(&mut self) -> u8 {
         let stdout: Stdout = io::stdout();
         stdout.lock().flush().unwrap();
-        if let Some(ch) = self.input.get_key() {
-            ch
-        } else {
-            0
-        }
+        self.input.get_key().unwrap_or_default()
     }
 
     // Wasm specific methods. No use.

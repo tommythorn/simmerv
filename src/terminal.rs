@@ -30,8 +30,9 @@ impl Default for DummyTerminal {
 }
 
 impl DummyTerminal {
-    pub fn new() -> Self {
-        DummyTerminal {}
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {}
     }
 }
 

@@ -86,7 +86,7 @@ impl WasmRiscv {
     /// # Arguments
     /// * `content` File system content binary
     pub fn setup_filesystem(&mut self, content: Vec<u8>) {
-        self.emulator.setup_filesystem(content);
+        self.emulator.setup_filesystem(&content);
     }
 
     /// Sets up device tree. The emulator has default device tree configuration.
@@ -96,7 +96,7 @@ impl WasmRiscv {
     /// # Arguments
     /// * `content` DTB content binary
     pub fn setup_dtb(&mut self, content: Vec<u8>) {
-        self.emulator.setup_dtb(content);
+        self.emulator.setup_dtb(&content);
     }
 
     /// Runs program set by `setup_program()`. The emulator won't stop forever

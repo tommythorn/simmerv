@@ -1,5 +1,4 @@
 use std::io::{self, Read, Stdin};
-use termios;
 
 pub struct NonblockNoEcho {
     stdin: i32,

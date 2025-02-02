@@ -7,28 +7,28 @@ use self::fnv::FnvHashMap;
 /// ELF header
 pub struct Header {
     pub e_width: u8, // 32 or 64
-    _e_class: u8,
-    _e_endian: u8,
-    _e_elf_version: u8,
-    _e_osabi: u8,
-    _e_abi_version: u8,
-    _e_type: u16,
-    _e_machine: u16,
-    _e_version: u32,
+    pub e_class: u8,
+    pub e_endian: u8,
+    pub e_elf_version: u8,
+    pub e_osabi: u8,
+    pub e_abi_version: u8,
+    pub e_type: u16,
+    pub e_machine: u16,
+    pub e_version: u32,
     pub e_entry: u64,
-    _e_phoff: u64,
-    e_shoff: u64,
-    _e_flags: u32,
-    _e_ehsize: u16,
-    _e_phentsize: u16,
-    _e_phnum: u16,
-    _e_shentsize: u16,
-    e_shnum: u16,
-    _e_shstrndx: u16,
+    pub e_phoff: u64,
+    pub e_shoff: u64,
+    pub e_flags: u32,
+    pub e_ehsize: u16,
+    pub e_phentsize: u16,
+    pub e_phnum: u16,
+    pub e_shentsize: u16,
+    pub e_shnum: u16,
+    pub e_shstrndx: u16,
 }
 
 /// ELF program header
-pub struct _ProgramHeader {
+pub struct ProgramHeader {
     _p_type: u32,
     _p_flags: u32,
     _p_offset: u64,
@@ -55,12 +55,12 @@ pub struct SectionHeader {
 
 /// ELF symbol table entry
 pub struct SymbolEntry {
-    st_name: u32,
-    st_info: u8,
-    _st_other: u8,
-    _st_shndx: u16,
-    st_value: u64,
-    _st_size: u64,
+    pub st_name: u32,
+    pub st_info: u8,
+    pub st_other: u8,
+    pub st_shndx: u16,
+    pub st_value: u64,
+    pub st_size: u64,
 }
 
 /// ELF file analyzer
@@ -73,12 +73,14 @@ impl ElfAnalyzer {
     ///
     /// # Arguments
     /// * `data` ELF file content binary
-    pub fn new(data: Vec<u8>) -> Self {
-        ElfAnalyzer { data }
+    #[must_use]
+    pub const fn new(data: Vec<u8>) -> Self {
+        Self { data }
     }
 
     /// Checks if ELF file content is valid
     // @TODO: Validate more precisely
+    #[must_use]
     pub fn validate(&self) -> bool {
         // check ELF magic number
         if self.data.len() < 4
@@ -93,13 +95,16 @@ impl ElfAnalyzer {
     }
 
     /// Reads ELF header
+    /// # Panics
+    /// Elf files with unknown `e_class` will panic
+    #[must_use]
     pub fn read_header(&self) -> Header {
         let e_class = self.read_byte(4);
 
         let e_width = match e_class {
             1 => 32,
             2 => 64,
-            _ => panic!("Unknown e_class:{:X}", e_class),
+            _ => panic!("Unknown e_class:{e_class:X}"),
         };
 
         let e_endian = self.read_byte(5);
@@ -118,43 +123,34 @@ impl ElfAnalyzer {
         let e_version = self.read_word(offset);
         offset += 4;
 
-        let e_entry = match e_width {
-            64 => {
-                let data = self.read_doubleword(offset);
-                offset += 8;
-                data
-            }
-            _ => {
-                let data = self.read_word(offset);
-                offset += 4;
-                data as u64
-            }
+        let e_entry = if e_width == 64 {
+            let data = self.read_doubleword(offset);
+            offset += 8;
+            data
+        } else {
+            let data = self.read_word(offset);
+            offset += 4;
+            u64::from(data)
         };
 
-        let e_phoff = match e_width {
-            64 => {
-                let data = self.read_doubleword(offset);
-                offset += 8;
-                data
-            }
-            _ => {
-                let data = self.read_word(offset);
-                offset += 4;
-                data as u64
-            }
+        let e_phoff = if e_width == 64 {
+            let data = self.read_doubleword(offset);
+            offset += 8;
+            data
+        } else {
+            let data = self.read_word(offset);
+            offset += 4;
+            u64::from(data)
         };
 
-        let e_shoff = match e_width {
-            64 => {
-                let data = self.read_doubleword(offset);
-                offset += 8;
-                data
-            }
-            _ => {
-                let data = self.read_word(offset);
-                offset += 4;
-                data as u64
-            }
+        let e_shoff = if e_width == 64 {
+            let data = self.read_doubleword(offset);
+            offset += 8;
+            data
+        } else {
+            let data = self.read_word(offset);
+            offset += 4;
+            u64::from(data)
         };
 
         let e_flags = self.read_word(offset);
@@ -201,24 +197,24 @@ impl ElfAnalyzer {
 
         Header {
             e_width,
-            _e_class: e_class,
-            _e_endian: e_endian,
-            _e_elf_version: e_elf_version,
-            _e_osabi: e_osabi,
-            _e_abi_version: e_abi_version,
-            _e_type: e_type,
-            _e_machine: e_machine,
-            _e_version: e_version,
+            e_class,
+            e_endian,
+            e_elf_version,
+            e_osabi,
+            e_abi_version,
+            e_type,
+            e_machine,
+            e_version,
             e_entry,
-            _e_phoff: e_phoff,
+            e_phoff,
             e_shoff,
-            _e_flags: e_flags,
-            _e_ehsize: e_ehsize,
-            _e_phentsize: e_phentsize,
-            _e_phnum: e_phnum,
-            _e_shentsize: e_shentsize,
+            e_flags,
+            e_ehsize,
+            e_phentsize,
+            e_phnum,
+            e_shentsize,
             e_shnum,
-            _e_shstrndx: e_shstrndx,
+            e_shstrndx,
         }
     }
 
@@ -226,10 +222,14 @@ impl ElfAnalyzer {
     ///
     /// # Arguments
     /// * `header`
-    pub fn _read_program_headers(&self, header: &Header) -> Vec<_ProgramHeader> {
+    /// # Panics
+    ///
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[must_use]
+    pub fn _read_program_headers(&self, header: &Header) -> Vec<ProgramHeader> {
         let mut headers = Vec::new();
-        let mut offset = header._e_phoff as usize;
-        for _i in 0..header._e_phnum {
+        let mut offset = header.e_phoff as usize;
+        for _i in 0..header.e_phnum {
             let p_type = self.read_word(offset);
             offset += 4;
 
@@ -248,9 +248,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let p_vaddr = match header.e_width {
@@ -262,9 +262,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let p_paddr = match header.e_width {
@@ -276,9 +276,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let p_filesz = match header.e_width {
@@ -290,9 +290,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let p_memsz = match header.e_width {
@@ -304,9 +304,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             if header.e_width == 32 {
@@ -323,26 +323,12 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
-            /*
-            println!("");
-            println!("Program:{:X}", i);
-            println!("p_type:{:X}", p_type);
-            println!("p_flags:{:X}", p_flags);
-            println!("p_offset:{:X}", p_offset);
-            println!("p_vaddr:{:X}", p_vaddr);
-            println!("p_paddr:{:X}", p_paddr);
-            println!("p_filesz:{:X}", p_filesz);
-            println!("p_memsz:{:X}", p_memsz);
-            println!("p_align:{:X}", p_align);
-            println!("p_align:{:X}", p_align);
-            */
-
-            headers.push(_ProgramHeader {
+            headers.push(ProgramHeader {
                 _p_type: p_type,
                 _p_flags: p_flags,
                 _p_offset: p_offset,
@@ -361,6 +347,8 @@ impl ElfAnalyzer {
     ///
     /// # Arguments
     /// * `header`
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[must_use]
     pub fn read_section_headers(&self, header: &Header) -> Vec<SectionHeader> {
         let mut headers = Vec::new();
         let mut offset = header.e_shoff as usize;
@@ -380,9 +368,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let sh_addr = match header.e_width {
@@ -394,9 +382,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let sh_offset = match header.e_width {
@@ -408,9 +396,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let sh_size = match header.e_width {
@@ -422,9 +410,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let sh_link = self.read_word(offset);
@@ -442,9 +430,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             let sh_entsize = match header.e_width {
@@ -456,9 +444,9 @@ impl ElfAnalyzer {
                 32 => {
                     let data = self.read_word(offset);
                     offset += 4;
-                    data as u64
+                    u64::from(data)
                 }
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             /*
@@ -498,6 +486,8 @@ impl ElfAnalyzer {
     /// # Arguments
     /// * `Terminal`
     /// * `symbol_table_section_headers`
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn read_symbol_entries(
         &self,
         header: &Header,
@@ -513,16 +503,16 @@ impl ElfAnalyzer {
             let entry_size = match header.e_width {
                 64 => 24,
                 32 => 16,
-                _ => panic!("Not happen"),
+                _ => unreachable!(),
             };
 
             for _j in 0..(sh_size / entry_size) {
                 let st_name;
                 let st_info;
-                let _st_other;
-                let _st_shndx;
+                let st_other;
+                let st_shndx;
                 let st_value;
-                let _st_size;
+                let st_size;
 
                 match header.e_width {
                     64 => {
@@ -532,38 +522,38 @@ impl ElfAnalyzer {
                         st_info = self.read_byte(offset);
                         offset += 1;
 
-                        _st_other = self.read_byte(offset);
+                        st_other = self.read_byte(offset);
                         offset += 1;
 
-                        _st_shndx = self.read_halfword(offset);
+                        st_shndx = self.read_halfword(offset);
                         offset += 2;
 
                         st_value = self.read_doubleword(offset);
                         offset += 8;
 
-                        _st_size = self.read_doubleword(offset);
+                        st_size = self.read_doubleword(offset);
                         offset += 8;
                     }
                     32 => {
                         st_name = self.read_word(offset);
                         offset += 4;
 
-                        st_value = self.read_word(offset) as u64;
+                        st_value = u64::from(self.read_word(offset));
                         offset += 4;
 
-                        _st_size = self.read_word(offset) as u64;
+                        st_size = u64::from(self.read_word(offset));
                         offset += 4;
 
                         st_info = self.read_byte(offset);
                         offset += 1;
 
-                        _st_other = self.read_byte(offset);
+                        st_other = self.read_byte(offset);
                         offset += 1;
 
-                        _st_shndx = self.read_halfword(offset);
+                        st_shndx = self.read_halfword(offset);
                         offset += 2;
                     }
-                    _ => panic!("No happen"),
+                    _ => unreachable!(),
                 };
 
                 /*
@@ -580,10 +570,10 @@ impl ElfAnalyzer {
                 entries.push(SymbolEntry {
                     st_name,
                     st_info,
-                    _st_other,
-                    _st_shndx,
+                    st_other,
+                    st_shndx,
                     st_value,
-                    _st_size,
+                    st_size,
                 });
             }
         }
@@ -595,6 +585,7 @@ impl ElfAnalyzer {
     /// # Arguments
     /// * `section_header` The header of the string table section
     /// * `index` Offset in the string table section
+    #[allow(clippy::cast_possible_truncation)]
     fn read_strings(&self, section_header: &SectionHeader, index: u64) -> String {
         let sh_offset = section_header.sh_offset;
         let sh_size = section_header.sh_size;
@@ -621,6 +612,7 @@ impl ElfAnalyzer {
     /// # Arguments
     /// * `entries` Symbol entries
     /// * `string_table_section_header` The header of the string table section
+    #[must_use]
     pub fn create_symbol_map(
         &self,
         entries: &Vec<SymbolEntry>,
@@ -633,7 +625,7 @@ impl ElfAnalyzer {
                 continue;
             }
 
-            let symbol = self.read_strings(string_table_section_header, st.st_name as u64);
+            let symbol = self.read_strings(string_table_section_header, u64::from(st.st_name));
 
             if !symbol.is_empty() {
                 //println!("{} {:0x}", symbol, st.st_value);
@@ -649,6 +641,8 @@ impl ElfAnalyzer {
     /// # Arguments
     /// * `program_data_section_headers`
     /// * `string_table_section_headers`
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn find_tohost_addr(
         &self,
         program_data_section_headers: &Vec<&SectionHeader>,
@@ -657,7 +651,7 @@ impl ElfAnalyzer {
         let tohost_values = [0x2e, 0x74, 0x6f, 0x68, 0x6f, 0x73, 0x74, 0x00]; // ".tohost\null"
         for sh in program_data_section_headers {
             let sh_addr = sh.sh_addr;
-            let sh_name = sh.sh_name as u64;
+            let sh_name = u64::from(sh.sh_name);
             // Find all string sections so far.
             // @TODO: Is there a way to know which string table section
             //        sh_name of program data section points to?
@@ -686,6 +680,7 @@ impl ElfAnalyzer {
     ///
     /// # Arguments
     /// * `offset`
+    #[must_use]
     pub fn read_byte(&self, offset: usize) -> u8 {
         self.data[offset]
     }
@@ -697,7 +692,7 @@ impl ElfAnalyzer {
     fn read_halfword(&self, offset: usize) -> u16 {
         let mut data = 0;
         for i in 0..2 {
-            data |= (self.read_byte(offset + i) as u16) << (8 * i);
+            data |= u16::from(self.read_byte(offset + i)) << (8 * i);
         }
         data
     }
@@ -709,7 +704,7 @@ impl ElfAnalyzer {
     fn read_word(&self, offset: usize) -> u32 {
         let mut data = 0;
         for i in 0..4 {
-            data |= (self.read_byte(offset + i) as u32) << (8 * i);
+            data |= u32::from(self.read_byte(offset + i)) << (8 * i);
         }
         data
     }
@@ -721,7 +716,7 @@ impl ElfAnalyzer {
     fn read_doubleword(&self, offset: usize) -> u64 {
         let mut data = 0;
         for i in 0..8 {
-            data |= (self.read_byte(offset + i) as u64) << (8 * i);
+            data |= u64::from(self.read_byte(offset + i)) << (8 * i);
         }
         data
     }

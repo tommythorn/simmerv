@@ -14,8 +14,9 @@ impl Default for Memory {
 
 impl Memory {
     /// Creates a new `Memory`
-    pub fn new() -> Self {
-        Memory { data: vec![] }
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { data: vec![] }
     }
 
     /// Initializes memory content.
@@ -33,6 +34,8 @@ impl Memory {
     ///
     /// # Arguments
     /// * `address`
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn read_byte(&self, address: u64) -> u8 {
         let index = (address >> 3) as usize;
         let pos = (address % 8) * 8;
@@ -43,6 +46,8 @@ impl Memory {
     ///
     /// # Arguments
     /// * `address`
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn read_halfword(&self, address: u64) -> u16 {
         if (address % 2) == 0 {
             let index = (address >> 3) as usize;
@@ -57,6 +62,8 @@ impl Memory {
     ///
     /// # Arguments
     /// * `address`
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn read_word(&self, address: u64) -> u32 {
         if (address % 4) == 0 {
             let index = (address >> 3) as usize;
@@ -71,13 +78,14 @@ impl Memory {
     ///
     /// # Arguments
     /// * `address`
+    #[must_use]
     pub fn read_doubleword(&self, address: u64) -> u64 {
         if (address % 8) == 0 {
             let index = (address >> 3) as usize;
             self.data[index]
         } else if (address % 4) == 0 {
-            (self.read_word(address) as u64)
-                | ((self.read_word(address.wrapping_add(4)) as u64) << 4)
+            u64::from(self.read_word(address))
+                | (u64::from(self.read_word(address.wrapping_add(4))) << 4)
         } else {
             self.read_bytes(address, 8)
         }
@@ -88,10 +96,11 @@ impl Memory {
     /// # Arguments
     /// * `address`
     /// * `width` up to eight
+    #[must_use]
     pub fn read_bytes(&self, address: u64, width: u64) -> u64 {
         let mut data = 0_u64;
         for i in 0..width {
-            data |= (self.read_byte(address.wrapping_add(i)) as u64) << (i * 8);
+            data |= u64::from(self.read_byte(address.wrapping_add(i))) << (i * 8);
         }
         data
     }
@@ -104,7 +113,7 @@ impl Memory {
     pub fn write_byte(&mut self, address: u64, value: u8) {
         let index = (address >> 3) as usize;
         let pos = (address % 8) * 8;
-        self.data[index] = (self.data[index] & !(0xff << pos)) | ((value as u64) << pos);
+        self.data[index] = (self.data[index] & !(0xff << pos)) | (u64::from(value) << pos);
     }
 
     /// Writes two bytes to memory.
@@ -116,9 +125,9 @@ impl Memory {
         if (address % 2) == 0 {
             let index = (address >> 3) as usize;
             let pos = (address % 8) * 8;
-            self.data[index] = (self.data[index] & !(0xffff << pos)) | ((value as u64) << pos);
+            self.data[index] = (self.data[index] & !(0xffff << pos)) | (u64::from(value) << pos);
         } else {
-            self.write_bytes(address, value as u64, 2);
+            self.write_bytes(address, u64::from(value), 2);
         }
     }
 
@@ -131,9 +140,10 @@ impl Memory {
         if (address % 4) == 0 {
             let index = (address >> 3) as usize;
             let pos = (address % 8) * 8;
-            self.data[index] = (self.data[index] & !(0xffffffff << pos)) | ((value as u64) << pos);
+            self.data[index] =
+                (self.data[index] & !(0xffffffff << pos)) | (u64::from(value) << pos);
         } else {
-            self.write_bytes(address, value as u64, 4);
+            self.write_bytes(address, u64::from(value), 4);
         }
     }
 
@@ -160,6 +170,7 @@ impl Memory {
     /// * `address`
     /// * `value`
     /// * `width` up to eight
+    #[allow(clippy::cast_possible_truncation)]
     pub fn write_bytes(&mut self, address: u64, value: u64, width: u64) {
         for i in 0..width {
             self.write_byte(address.wrapping_add(i), (value >> (i * 8)) as u8);
@@ -170,7 +181,8 @@ impl Memory {
     ///
     /// # Arguments
     /// * `address`
+    #[must_use]
     pub fn validate_address(&self, address: u64) -> bool {
-        (address as usize) < self.data.len()
+        address < self.data.len() as u64
     }
 }
