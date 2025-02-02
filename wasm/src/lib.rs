@@ -1,6 +1,3 @@
-extern crate riscv_emu_rust;
-extern crate wasm_bindgen;
-
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
@@ -142,8 +139,8 @@ impl WasmRiscv {
     /// * `max_cycles` See the above description
     pub fn run_until_breakpoints(&mut self, breakpoints: Vec<u64>, max_cycles: u32) -> bool {
         let mut table = HashMap::new();
-        for i in 0..breakpoints.len() {
-            table.insert(breakpoints[i], true);
+        for breakpoint in breakpoints {
+            table.insert(breakpoint, true);
         }
         for _i in 0..max_cycles {
             self.emulator.tick();
@@ -152,7 +149,7 @@ impl WasmRiscv {
                 return true;
             }
         }
-        return false;
+        false
     }
 
     /// Disassembles an instruction Program Counter points to.
@@ -160,8 +157,8 @@ impl WasmRiscv {
     pub fn disassemble_next_instruction(&mut self) {
         let s = self.emulator.get_mut_cpu().disassemble_next_instruction();
         let bytes = s.as_bytes();
-        for i in 0..bytes.len() {
-            self.emulator.get_mut_terminal().put_byte(bytes[i]);
+        for &b in bytes {
+            self.emulator.get_mut_terminal().put_byte(b);
         }
     }
 

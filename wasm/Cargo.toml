@@ -5,7 +5,7 @@ version = "0.1.0"
 authors = ["Takahiro"]
 
 [dependencies]
-wasm-bindgen = "0.2.93"
+wasm-bindgen = "*"
 riscv_emu_rust = {path = "../"}
 
 [lib]
