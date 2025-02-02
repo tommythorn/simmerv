@@ -72,9 +72,7 @@ pub struct Cpu {
     pc: u64,
     csr: Box<[u64]>,
     mmu: Mmu,
-    reservation: u64, // @TODO: Should support multiple address reservations
-    is_reservation_set: bool,
-    _dump_flag: bool,
+    reservation: Option<i64>,
     decode_cache: DecodeCache,
     unsigned_data_mask: u64,
 }
@@ -235,9 +233,7 @@ impl Cpu {
             pc: 0,
             csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
             mmu: Mmu::new(Xlen::Bit64, terminal),
-            reservation: 0,
-            is_reservation_set: false,
-            _dump_flag: false,
+            reservation: None,
             decode_cache: DecodeCache::new(),
             unsigned_data_mask: 0xffff_ffff_ffff_ffff,
         };
@@ -2768,8 +2764,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             // @TODO: Implement properly
             cpu.x[f.rd] = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
                 Ok(data) => {
-                    cpu.is_reservation_set = true;
-                    cpu.reservation = cpu.x[f.rs1] as u64; // Is virtual address ok?
+                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
                     data as i64
                 }
                 Err(e) => return Err(e),
@@ -2787,8 +2782,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             // @TODO: Implement properly
             cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
                 Ok(data) => {
-                    cpu.is_reservation_set = true;
-                    cpu.reservation = cpu.x[f.rs1] as u64; // Is virtual address ok?
+                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
                     i64::from(data as i32)
                 }
                 Err(e) => return Err(e),
@@ -3055,13 +3049,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.is_reservation_set && cpu.reservation == (cpu.x[f.rs1] as u64) {
+            cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
                 match cpu
                     .mmu
                     .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
                 {
                     Ok(()) => {
-                        cpu.is_reservation_set = false;
+                        cpu.reservation = None;
                         0
                     }
                     Err(e) => return Err(e),
@@ -3080,10 +3074,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.is_reservation_set && cpu.reservation == (cpu.x[f.rs1] as u64) {
+            cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
                 match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
                     Ok(()) => {
-                        cpu.is_reservation_set = false;
+                        cpu.reservation = None;
                         0
                     }
                     Err(e) => return Err(e),
