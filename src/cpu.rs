@@ -62,11 +62,11 @@ const MIP_SSIP: u64 = 0x002;
 #[derive(Copy, Clone, Debug)]
 struct UopBundle {
     entry: u64,
-    exit: u64, // First address *past* the entry covered by this
+    exit: u64, // address of last instruction included in this entry
     last_use_seqno: u64,
 }
 
-const UOP_CACHE_WAYS: usize = 8;
+const UOP_CACHE_WAYS: usize = 4;
 const UOP_CACHE_DEPTH: usize = 1024;
 
 /// Emulates a RISC-V CPU core
