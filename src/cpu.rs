@@ -4,6 +4,7 @@
 extern crate fnv;
 
 use self::fnv::FnvHashMap;
+use num_derive::FromPrimitive;
 
 use crate::mmu::{AddressingMode, Mmu};
 use crate::terminal::Terminal;
@@ -83,7 +84,7 @@ pub enum Xlen {
     Bit64, // @TODO: Support Bit128
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum PrivilegeMode {
     User,
@@ -97,9 +98,9 @@ pub struct Trap {
     pub value: u64, // Trap type specific value
 }
 
-#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum TrapType {
-    InstructionAddressMisaligned,
+    InstructionAddressMisaligned = 0,
     InstructionAccessFault,
     IllegalInstruction,
     Breakpoint,
@@ -109,28 +110,24 @@ pub enum TrapType {
     StoreAccessFault,
     EnvironmentCallFromUMode,
     EnvironmentCallFromSMode,
-    EnvironmentCallFromMMode,
+    // Reserved
+    EnvironmentCallFromMMode = 11,
     InstructionPageFault,
     LoadPageFault,
-    StorePageFault,
-    UserSoftwareInterrupt,
-    SupervisorSoftwareInterrupt,
-    MachineSoftwareInterrupt,
-    UserTimerInterrupt,
-    SupervisorTimerInterrupt,
-    MachineTimerInterrupt,
-    UserExternalInterrupt,
-    SupervisorExternalInterrupt,
-    MachineExternalInterrupt,
-}
+    // Reserved
+    StorePageFault = 15,
 
-const fn _get_privilege_mode_name(mode: &PrivilegeMode) -> &'static str {
-    match mode {
-        PrivilegeMode::User => "User",
-        PrivilegeMode::Supervisor => "Supervisor",
-        PrivilegeMode::Reserved => "Reserved",
-        PrivilegeMode::Machine => "Machine",
-    }
+    UserSoftwareInterrupt = 100,
+    SupervisorSoftwareInterrupt = 101,
+    MachineSoftwareInterrupt = 103,
+
+    UserTimerInterrupt = 104,
+    SupervisorTimerInterrupt = 105,
+    MachineTimerInterrupt = 107,
+
+    UserExternalInterrupt = 108,
+    SupervisorExternalInterrupt = 109,
+    MachineExternalInterrupt = 111,
 }
 
 // bigger number is higher privilege level
@@ -152,35 +149,7 @@ pub fn get_privilege_mode(encoding: u64) -> PrivilegeMode {
         0 => PrivilegeMode::User,
         1 => PrivilegeMode::Supervisor,
         3 => PrivilegeMode::Machine,
-        _ => panic!("Unknown privilege uncoding"),
-    }
-}
-
-const fn _get_trap_type_name(trap_type: &TrapType) -> &'static str {
-    match trap_type {
-        TrapType::InstructionAddressMisaligned => "InstructionAddressMisaligned",
-        TrapType::InstructionAccessFault => "InstructionAccessFault",
-        TrapType::IllegalInstruction => "IllegalInstruction",
-        TrapType::Breakpoint => "Breakpoint",
-        TrapType::LoadAddressMisaligned => "LoadAddressMisaligned",
-        TrapType::LoadAccessFault => "LoadAccessFault",
-        TrapType::StoreAddressMisaligned => "StoreAddressMisaligned",
-        TrapType::StoreAccessFault => "StoreAccessFault",
-        TrapType::EnvironmentCallFromUMode => "EnvironmentCallFromUMode",
-        TrapType::EnvironmentCallFromSMode => "EnvironmentCallFromSMode",
-        TrapType::EnvironmentCallFromMMode => "EnvironmentCallFromMMode",
-        TrapType::InstructionPageFault => "InstructionPageFault",
-        TrapType::LoadPageFault => "LoadPageFault",
-        TrapType::StorePageFault => "StorePageFault",
-        TrapType::UserSoftwareInterrupt => "UserSoftwareInterrupt",
-        TrapType::SupervisorSoftwareInterrupt => "SupervisorSoftwareInterrupt",
-        TrapType::MachineSoftwareInterrupt => "MachineSoftwareInterrupt",
-        TrapType::UserTimerInterrupt => "UserTimerInterrupt",
-        TrapType::SupervisorTimerInterrupt => "SupervisorTimerInterrupt",
-        TrapType::MachineTimerInterrupt => "MachineTimerInterrupt",
-        TrapType::UserExternalInterrupt => "UserExternalInterrupt",
-        TrapType::SupervisorExternalInterrupt => "SupervisorExternalInterrupt",
-        TrapType::MachineExternalInterrupt => "MachineExternalInterrupt",
+        _ => panic!("Unknown privilege encoding"),
     }
 }
 
@@ -189,30 +158,10 @@ const fn get_trap_cause(trap: &Trap, xlen: &Xlen) -> u64 {
         Xlen::Bit32 => 0x8000_0000_u64,
         Xlen::Bit64 => 0x8000_0000_0000_0000_u64,
     };
-    match trap.trap_type {
-        TrapType::InstructionAddressMisaligned => 0,
-        TrapType::InstructionAccessFault => 1,
-        TrapType::IllegalInstruction => 2,
-        TrapType::Breakpoint => 3,
-        TrapType::LoadAddressMisaligned => 4,
-        TrapType::LoadAccessFault => 5,
-        TrapType::StoreAddressMisaligned => 6,
-        TrapType::StoreAccessFault => 7,
-        TrapType::EnvironmentCallFromUMode => 8,
-        TrapType::EnvironmentCallFromSMode => 9,
-        TrapType::EnvironmentCallFromMMode => 11,
-        TrapType::InstructionPageFault => 12,
-        TrapType::LoadPageFault => 13,
-        TrapType::StorePageFault => 15,
-        TrapType::UserSoftwareInterrupt => interrupt_bit,
-        TrapType::SupervisorSoftwareInterrupt => interrupt_bit + 1,
-        TrapType::MachineSoftwareInterrupt => interrupt_bit + 3,
-        TrapType::UserTimerInterrupt => interrupt_bit + 4,
-        TrapType::SupervisorTimerInterrupt => interrupt_bit + 5,
-        TrapType::MachineTimerInterrupt => interrupt_bit + 7,
-        TrapType::UserExternalInterrupt => interrupt_bit + 8,
-        TrapType::SupervisorExternalInterrupt => interrupt_bit + 9,
-        TrapType::MachineExternalInterrupt => interrupt_bit + 11,
+    if (trap.trap_type as u64) < (TrapType::UserSoftwareInterrupt as u64) {
+        trap.trap_type as u64
+    } else {
+        trap.trap_type as u64 - TrapType::UserSoftwareInterrupt as u64 + interrupt_bit
     }
 }
 
@@ -472,28 +421,16 @@ impl Cpu {
             // 3. Interrupt is enabled if xIE in xstatus is 1 where x is privilege level
             // and new privilege level equals to current privilege level
 
-            if new_privilege_encoding < current_privilege_encoding {
+            if new_privilege_encoding < current_privilege_encoding
+                || current_privilege_encoding == new_privilege_encoding
+                    && 0 == match self.privilege_mode {
+                        PrivilegeMode::Machine => current_mie,
+                        PrivilegeMode::Supervisor => current_sie,
+                        PrivilegeMode::User => current_uie,
+                        PrivilegeMode::Reserved => panic!(),
+                    }
+            {
                 return false;
-            }
-            if current_privilege_encoding == new_privilege_encoding {
-                match self.privilege_mode {
-                    PrivilegeMode::Machine => {
-                        if current_mie == 0 {
-                            return false;
-                        }
-                    }
-                    PrivilegeMode::Supervisor => {
-                        if current_sie == 0 {
-                            return false;
-                        }
-                    }
-                    PrivilegeMode::User => {
-                        if current_uie == 0 {
-                            return false;
-                        }
-                    }
-                    PrivilegeMode::Reserved => panic!(),
-                }
             }
 
             // Interrupt can be maskable by xie csr register

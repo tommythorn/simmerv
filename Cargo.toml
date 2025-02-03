@@ -29,3 +29,5 @@ travis-ci = { repository = "tommythorn/riscv-rust" }
 
 [dependencies]
 fnv = "1.0.7"
+num-traits = "*"
+num-derive = "*"

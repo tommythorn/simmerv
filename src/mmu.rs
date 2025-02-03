@@ -140,7 +140,7 @@ impl Mmu {
         self.disk.init(data);
     }
 
-    /// Overrides defalut Device tree configuration.
+    /// Overrides default Device tree configuration.
     ///
     /// # Arguments
     /// * `data` DTB binary content
@@ -394,8 +394,8 @@ impl Mmu {
         }
     }
 
-    /// Stores multiple bytes. This method takes virtual address and translates
-    /// into physical address inside.
+    /// Stores multiple bytes. This method takes a virtual address and translates
+    /// it into physical address inside.
     ///
     /// # Arguments
     /// * `v_address` Virtual address
@@ -849,24 +849,14 @@ impl Mmu {
             };
         }
 
-        match access_type {
-            MemoryAccessType::Execute => {
-                if x == 0 {
-                    return Err(());
-                }
-            }
-            MemoryAccessType::Read => {
-                if r == 0 {
-                    return Err(());
-                }
-            }
-            MemoryAccessType::Write => {
-                if w == 0 {
-                    return Err(());
-                }
-            }
-            MemoryAccessType::DontCare => {}
-        };
+        if match access_type {
+            MemoryAccessType::Execute => x == 0,
+            MemoryAccessType::Read => r == 0,
+            MemoryAccessType::Write => w == 0,
+            MemoryAccessType::DontCare => false,
+        } {
+            return Err(());
+        }
 
         let offset = v_address & 0xfff; // [11:0]
                                         // @TODO: Optimize
