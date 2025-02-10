@@ -78,10 +78,6 @@ const fn _get_addressing_mode_name(mode: &AddressingMode) -> &'static str {
     }
 }
 
-const fn get_effective_address(address: u64) -> u64 {
-    address
-}
-
 impl Mmu {
     /// Creates a new `Mmu`.
     ///
@@ -234,12 +230,11 @@ impl Mmu {
         if v_address & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            let effective_address = get_effective_address(v_address);
-            match self.translate_address(effective_address, &MemoryAccessType::Execute) {
+            match self.translate_address(v_address, &MemoryAccessType::Execute) {
                 Ok(p_address) => Ok(self.load_word_raw(p_address)),
                 Err(()) => Err(Trap {
                     trap_type: TrapType::InstructionPageFault,
-                    value: effective_address,
+                    value: v_address,
                 }),
             }
         } else {
@@ -262,8 +257,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn load(&mut self, v_address: u64) -> Result<u8, Trap> {
-        let effective_address = get_effective_address(v_address);
-        match self.translate_address(effective_address, &MemoryAccessType::Read) {
+        match self.translate_address(v_address, &MemoryAccessType::Read) {
             Ok(p_address) => Ok(self.load_raw(p_address)),
             Err(()) => Err(Trap {
                 trap_type: TrapType::LoadPageFault,
@@ -466,21 +460,20 @@ impl Mmu {
     /// * `p_address` Physical address
     #[allow(clippy::cast_possible_truncation)]
     fn load_raw(&mut self, p_address: u64) -> u8 {
-        let effective_address = get_effective_address(p_address);
         // @TODO: Mapping should be configurable with dtb
-        if effective_address >= DRAM_BASE {
-            self.memory.read_byte(effective_address)
+        if p_address >= DRAM_BASE {
+            self.memory.read_byte(p_address)
         } else {
-            match effective_address {
+            match p_address {
                 // I don't know why but dtb data seems to be stored from 0x1020 on Linux.
                 // It might be from self.x[0xb] initialization?
                 // And DTB size is arbitray.
-                0x00001020..=0x00001fff => self.dtb[effective_address as usize - 0x1020],
-                0x02000000..=0x0200ffff => self.clint.load(effective_address),
-                0x0C000000..=0x0fffffff => self.plic.load(effective_address),
-                0x10000000..=0x100000ff => self.uart.load(effective_address),
-                0x10001000..=0x10001FFF => self.disk.load(effective_address),
-                _ => panic!("Unknown memory mapping {effective_address:X}."),
+                0x00001020..=0x00001fff => self.dtb[p_address as usize - 0x1020],
+                0x02000000..=0x0200ffff => self.clint.load(p_address),
+                0x0C000000..=0x0fffffff => self.plic.load(p_address),
+                0x10000000..=0x100000ff => self.uart.load(p_address),
+                0x10001000..=0x10001FFF => self.disk.load(p_address),
+                _ => panic!("Unknown memory mapping {p_address:X}."),
             }
         }
     }
@@ -491,14 +484,13 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     fn load_halfword_raw(&mut self, p_address: u64) -> u16 {
-        let effective_address = get_effective_address(p_address);
-        if effective_address >= DRAM_BASE && effective_address.wrapping_add(1) > effective_address {
+        if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
             // Fast path. Directly load main memory at a time.
-            self.memory.read_halfword(effective_address)
+            self.memory.read_halfword(p_address)
         } else {
             let mut data = 0_u16;
             for i in 0..2 {
-                data |= u16::from(self.load_raw(effective_address.wrapping_add(i))) << (i * 8);
+                data |= u16::from(self.load_raw(p_address.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -510,13 +502,12 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     pub fn load_word_raw(&mut self, p_address: u64) -> u32 {
-        let effective_address = get_effective_address(p_address);
-        if effective_address >= DRAM_BASE && effective_address.wrapping_add(3) > effective_address {
-            self.memory.read_word(effective_address)
+        if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
+            self.memory.read_word(p_address)
         } else {
             let mut data = 0_u32;
             for i in 0..4 {
-                data |= u32::from(self.load_raw(effective_address.wrapping_add(i))) << (i * 8);
+                data |= u32::from(self.load_raw(p_address.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -528,13 +519,12 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     fn load_doubleword_raw(&mut self, p_address: u64) -> u64 {
-        let effective_address = get_effective_address(p_address);
-        if effective_address >= DRAM_BASE && effective_address.wrapping_add(7) > effective_address {
-            self.memory.read_doubleword(effective_address)
+        if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
+            self.memory.read_doubleword(p_address)
         } else {
             let mut data = 0_u64;
             for i in 0..8 {
-                data |= u64::from(self.load_raw(effective_address.wrapping_add(i))) << (i * 8);
+                data |= u64::from(self.load_raw(p_address.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -549,17 +539,16 @@ impl Mmu {
     /// # Panics
     /// Will panic on access to unsupported MMIO ranges (XXX this should just ignore them)
     pub fn store_raw(&mut self, p_address: u64, value: u8) {
-        let effective_address = get_effective_address(p_address);
         // @TODO: Mapping should be configurable with dtb
-        if effective_address >= DRAM_BASE {
-            self.memory.write_byte(effective_address, value);
+        if p_address >= DRAM_BASE {
+            self.memory.write_byte(p_address, value);
         } else {
-            match effective_address {
-                0x02000000..=0x0200ffff => self.clint.store(effective_address, value),
-                0x0c000000..=0x0fffffff => self.plic.store(effective_address, value),
-                0x10000000..=0x100000ff => self.uart.store(effective_address, value),
-                0x10001000..=0x10001FFF => self.disk.store(effective_address, value),
-                _ => panic!("Unknown memory mapping {effective_address:X}."),
+            match p_address {
+                0x02000000..=0x0200ffff => self.clint.store(p_address, value),
+                0x0c000000..=0x0fffffff => self.plic.store(p_address, value),
+                0x10000000..=0x100000ff => self.uart.store(p_address, value),
+                0x10001000..=0x10001FFF => self.disk.store(p_address, value),
+                _ => panic!("Unknown memory mapping {p_address:X}."),
             }
         };
     }
@@ -571,15 +560,11 @@ impl Mmu {
     /// * `p_address` Physical address
     /// * `value` data written
     fn store_halfword_raw(&mut self, p_address: u64, value: u16) {
-        let effective_address = get_effective_address(p_address);
-        if effective_address >= DRAM_BASE && effective_address.wrapping_add(1) > effective_address {
-            self.memory.write_halfword(effective_address, value);
+        if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
+            self.memory.write_halfword(p_address, value);
         } else {
             for i in 0..2 {
-                self.store_raw(
-                    effective_address.wrapping_add(i),
-                    ((value >> (i * 8)) & 0xff) as u8,
-                );
+                self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
             }
         }
     }
@@ -591,15 +576,11 @@ impl Mmu {
     /// * `p_address` Physical address
     /// * `value` data written
     fn store_word_raw(&mut self, p_address: u64, value: u32) {
-        let effective_address = get_effective_address(p_address);
-        if effective_address >= DRAM_BASE && effective_address.wrapping_add(3) > effective_address {
-            self.memory.write_word(effective_address, value);
+        if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
+            self.memory.write_word(p_address, value);
         } else {
             for i in 0..4 {
-                self.store_raw(
-                    effective_address.wrapping_add(i),
-                    ((value >> (i * 8)) & 0xff) as u8,
-                );
+                self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
             }
         }
     }
@@ -611,15 +592,11 @@ impl Mmu {
     /// * `p_address` Physical address
     /// * `value` data written
     fn store_doubleword_raw(&mut self, p_address: u64, value: u64) {
-        let effective_address = get_effective_address(p_address);
-        if effective_address >= DRAM_BASE && effective_address.wrapping_add(7) > effective_address {
-            self.memory.write_doubleword(effective_address, value);
+        if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
+            self.memory.write_doubleword(p_address, value);
         } else {
             for i in 0..8 {
-                self.store_raw(
-                    effective_address.wrapping_add(i),
-                    ((value >> (i * 8)) & 0xff) as u8,
-                );
+                self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
             }
         }
     }
@@ -635,11 +612,10 @@ impl Mmu {
     pub fn validate_address(&mut self, v_address: u64) -> Result<bool, ()> {
         // @TODO: Support other access types?
         let p_address = self.translate_address(v_address, &MemoryAccessType::DontCare)?;
-        let effective_address = get_effective_address(p_address);
-        let valid = if effective_address >= DRAM_BASE {
-            self.memory.validate_address(effective_address)
+        let valid = if p_address >= DRAM_BASE {
+            self.memory.validate_address(p_address)
         } else {
-            matches!(effective_address, 0x00001020..=0x00001fff |
+            matches!(p_address, 0x00001020..=0x00001fff |
 		     0x02000000..=0x0200ffff |
 		     0x0c000000..=0x0fffffff |
 		     0x10000000..=0x100000ff |
@@ -653,7 +629,7 @@ impl Mmu {
         v_address: u64,
         access_type: &MemoryAccessType,
     ) -> Result<u64, ()> {
-        let address = get_effective_address(v_address);
+        let address = v_address;
         let v_page = address & !0xfff;
         let cache = if self.page_cache_enabled {
             match access_type {
