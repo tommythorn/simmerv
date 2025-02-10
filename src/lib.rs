@@ -16,7 +16,7 @@ pub mod memory;
 pub mod mmu;
 pub mod terminal;
 
-use crate::cpu::{Cpu, Xlen};
+use crate::cpu::Cpu;
 use crate::elf_analyzer::ElfAnalyzer;
 use crate::terminal::Terminal;
 
@@ -188,13 +188,6 @@ impl Emulator {
 
         // Detected whether the elf file is riscv-tests.
         // Setting up CPU and Memory depending on it.
-
-        self.cpu.update_xlen(match header.e_width {
-            32 => Xlen::Bit32,
-            64 => Xlen::Bit64,
-            _ => panic!("No happen"),
-        });
-
         if self.tohost_addr != 0 {
             self.is_test = true;
             self.cpu.get_mut_mmu().init_memory(TEST_MEMORY_CAPACITY);
@@ -275,14 +268,6 @@ impl Emulator {
     /// * `content` DTB content binary
     pub fn setup_dtb(&mut self, content: &[u8]) {
         self.cpu.get_mut_mmu().init_dtb(content);
-    }
-
-    /// Updates XLEN (the width of an integer register in bits) in CPU.
-    ///
-    /// # Arguments
-    /// * `xlen`
-    pub fn update_xlen(&mut self, xlen: Xlen) {
-        self.cpu.update_xlen(xlen);
     }
 
     /// Enables or disables page cache optimization.

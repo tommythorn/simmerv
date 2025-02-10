@@ -1,10 +1,15 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::cast_possible_wrap)]
 
-extern crate fnv;
+// TODO
+// - Do not update pc until instruction has retired (fixes many TODOs)
+// - keep cycle outside CSR
+// - Don't check for interrupts and advance MMU every cycle
+// - Make Xlen a type parameter
 
-use self::fnv::FnvHashMap;
+use fnv::{self, FnvHashMap};
 use num_derive::FromPrimitive;
+use num_traits::FromPrimitive;
 
 use crate::mmu::{AddressingMode, Mmu};
 use crate::terminal::Terminal;
@@ -50,7 +55,7 @@ const _CSR_PMPADDR0_ADDRESS: u16 = 0x3b0;
 const _CSR_MCYCLE_ADDRESS: u16 = 0xb00;
 const CSR_CYCLE_ADDRESS: u16 = 0xc00;
 const CSR_TIME_ADDRESS: u16 = 0xc01;
-const _CSR_INSERT_ADDRESS: u16 = 0xc02;
+const _CSR_INSTRET_ADDRESS: u16 = 0xc02;
 const _CSR_MHARTID_ADDRESS: u16 = 0xf14;
 
 const MIP_MEIP: u64 = 0x800;
@@ -62,14 +67,13 @@ const MIP_SSIP: u64 = 0x002;
 
 /// Emulates a RISC-V CPU core
 pub struct Cpu {
-    clock: u64,
-    xlen: Xlen,
-    privilege_mode: PrivilegeMode,
-    wfi: bool,
     // using only lower 32bits of x, pc, and csr registers
     // for 32-bit mode
     x: [i64; 32],
     f: [f64; 32],
+    clock: u64,
+    privilege_mode: PrivilegeMode,
+    wfi: bool,
     pc: u64,
     csr: Box<[u64]>,
     mmu: Mmu,
@@ -78,13 +82,7 @@ pub struct Cpu {
     unsigned_data_mask: u64,
 }
 
-#[derive(Clone)]
-pub enum Xlen {
-    Bit32,
-    Bit64, // @TODO: Support Bit128
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 #[allow(dead_code)]
 pub enum PrivilegeMode {
     User,
@@ -131,13 +129,9 @@ pub enum TrapType {
 }
 
 // bigger number is higher privilege level
-const fn get_privilege_encoding(mode: &PrivilegeMode) -> u8 {
-    match mode {
-        PrivilegeMode::User => 0,
-        PrivilegeMode::Supervisor => 1,
-        PrivilegeMode::Reserved => panic!(),
-        PrivilegeMode::Machine => 3,
-    }
+const fn get_privilege_encoding(mode: PrivilegeMode) -> u8 {
+    assert!(!matches!(mode, PrivilegeMode::Reserved));
+    mode as u8
 }
 
 /// Returns `PrivilegeMode` from encoded privilege mode bits
@@ -145,19 +139,15 @@ const fn get_privilege_encoding(mode: &PrivilegeMode) -> u8 {
 /// On unknown modes crash
 #[must_use]
 pub fn get_privilege_mode(encoding: u64) -> PrivilegeMode {
-    match encoding {
-        0 => PrivilegeMode::User,
-        1 => PrivilegeMode::Supervisor,
-        3 => PrivilegeMode::Machine,
-        _ => panic!("Unknown privilege encoding"),
-    }
+    assert_ne!(encoding, 2);
+    let Some(m) = FromPrimitive::from_u64(encoding) else {
+	unreachable!();
+    };
+    m
 }
 
-const fn get_trap_cause(trap: &Trap, xlen: &Xlen) -> u64 {
-    let interrupt_bit = match xlen {
-        Xlen::Bit32 => 0x8000_0000_u64,
-        Xlen::Bit64 => 0x8000_0000_0000_0000_u64,
-    };
+const fn get_trap_cause(trap: &Trap) -> u64 {
+    let interrupt_bit = 0x8000_0000_0000_0000_u64;
     if (trap.trap_type as u64) < (TrapType::UserSoftwareInterrupt as u64) {
         trap.trap_type as u64
     } else {
@@ -174,14 +164,13 @@ impl Cpu {
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let mut cpu = Self {
             clock: 0,
-            xlen: Xlen::Bit64,
             privilege_mode: PrivilegeMode::Machine,
             wfi: false,
             x: [0; 32],
             f: [0.0; 32],
             pc: 0,
             csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
-            mmu: Mmu::new(Xlen::Bit64, terminal),
+            mmu: Mmu::new(terminal),
             reservation: None,
             decode_cache: DecodeCache::new(),
             unsigned_data_mask: 0xffff_ffff_ffff_ffff,
@@ -197,19 +186,6 @@ impl Cpu {
     /// * `value`
     pub const fn update_pc(&mut self, value: u64) {
         self.pc = value;
-    }
-
-    /// Updates XLEN, 32-bit or 64-bit
-    ///
-    /// # Arguments
-    /// * `xlen`
-    pub fn update_xlen(&mut self, xlen: Xlen) {
-        self.xlen = xlen.clone();
-        self.unsigned_data_mask = match xlen {
-            Xlen::Bit32 => 0xffff_ffff,
-            Xlen::Bit64 => 0xffff_ffff_ffff_ffff,
-        };
-        self.mmu.update_xlen(xlen);
     }
 
     /// Reads integer register content
@@ -355,8 +331,8 @@ impl Cpu {
 
     #[allow(clippy::similar_names, clippy::too_many_lines)]
     fn handle_trap(&mut self, trap: &Trap, instruction_address: u64, is_interrupt: bool) -> bool {
-        let current_privilege_encoding = u64::from(get_privilege_encoding(&self.privilege_mode));
-        let cause = get_trap_cause(trap, &self.xlen);
+        let current_privilege_encoding = u64::from(get_privilege_encoding(self.privilege_mode));
+        let cause = get_trap_cause(trap);
 
         // First, determine which privilege mode should handle the trap.
         // @TODO: Check if this logic is correct
@@ -379,7 +355,7 @@ impl Cpu {
         } else {
             PrivilegeMode::User
         };
-        let new_privilege_encoding = u64::from(get_privilege_encoding(&new_privilege_mode));
+        let new_privilege_encoding = u64::from(get_privilege_encoding(new_privilege_mode));
 
         let current_status = match self.privilege_mode {
             PrivilegeMode::Machine => self.read_csr_raw(CSR_MSTATUS_ADDRESS),
@@ -489,7 +465,7 @@ impl Cpu {
         // So, this trap should be taken
 
         self.privilege_mode = new_privilege_mode;
-        self.mmu.update_privilege_mode(self.privilege_mode.clone());
+        self.mmu.update_privilege_mode(self.privilege_mode);
         let csr_epc_address = match self.privilege_mode {
             PrivilegeMode::Machine => CSR_MEPC_ADDRESS,
             PrivilegeMode::Supervisor => CSR_SEPC_ADDRESS,
@@ -564,7 +540,7 @@ impl Cpu {
 
     const fn has_csr_access_privilege(&self, address: u16) -> bool {
         let privilege = (address >> 8) & 0x3; // the lowest privilege level that can access the CSR
-        privilege as u8 <= get_privilege_encoding(&self.privilege_mode)
+        privilege as u8 <= get_privilege_encoding(self.privilege_mode)
     }
 
     const fn read_csr(&self, address: u16) -> Result<u64, Trap> {
@@ -676,25 +652,16 @@ impl Cpu {
     }
 
     fn update_addressing_mode(&mut self, value: u64) {
-        let addressing_mode = match self.xlen {
-            Xlen::Bit32 => match value & 0x8000_0000 {
-                0 => AddressingMode::None,
-                _ => AddressingMode::SV32,
-            },
-            Xlen::Bit64 => match value >> 60 {
-                0 => AddressingMode::None,
-                8 => AddressingMode::SV39,
-                9 => AddressingMode::SV48,
-                _ => {
-                    println!("Unknown addressing_mode {:x}", value >> 60);
-                    panic!();
-                }
-            },
+        let addressing_mode = match value >> 60 {
+            0 => AddressingMode::None,
+            8 => AddressingMode::SV39,
+            9 => AddressingMode::SV48,
+            _ => {
+                println!("Unknown addressing_mode {:x}", value >> 60);
+                panic!();
+            }
         };
-        let ppn = match self.xlen {
-            Xlen::Bit32 => value & 0x0000_003f_ffff,
-            Xlen::Bit64 => value & 0x0fff_ffff_ffff,
-        };
+        let ppn = value & 0x0fff_ffff_ffff;
         self.mmu.update_addressing_mode(addressing_mode);
         self.mmu.update_ppn(ppn);
     }
@@ -702,10 +669,7 @@ impl Cpu {
     // @TODO: Rename to better name?
     #[allow(clippy::cast_possible_truncation)]
     const fn sign_extend(&self, value: i64) -> i64 {
-        match self.xlen {
-            Xlen::Bit32 => value as i32 as i64,
-            Xlen::Bit64 => value,
-        }
+        value
     }
 
     // @TODO: Rename to better name?
@@ -716,10 +680,7 @@ impl Cpu {
 
     // @TODO: Rename to better name?
     const fn most_negative(&self) -> i64 {
-        match self.xlen {
-            Xlen::Bit32 => i32::MIN as i64,
-            Xlen::Bit64 => i64::MIN,
-        }
+        i64::MIN
     }
 
     // @TODO: Optimize
@@ -2784,10 +2745,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULH",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = match cpu.xlen {
-                Xlen::Bit32 => cpu.sign_extend((cpu.x[f.rs1] * cpu.x[f.rs2]) >> 32),
-                Xlen::Bit64 => ((i128::from(cpu.x[f.rs1]) * i128::from(cpu.x[f.rs2])) >> 64) as i64,
-            };
+            cpu.x[f.rd] = ((i128::from(cpu.x[f.rs1]) * i128::from(cpu.x[f.rs2])) >> 64) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2798,16 +2756,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULHU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = match cpu.xlen {
-                Xlen::Bit32 => cpu.sign_extend(
-                    ((u64::from(cpu.x[f.rs1] as u32) * u64::from(cpu.x[f.rs2] as u32)) >> 32)
-                        as i64,
-                ),
-                Xlen::Bit64 => {
-                    (u128::from(cpu.x[f.rs1] as u64).wrapping_mul(u128::from(cpu.x[f.rs2] as u64))
-                        >> 64) as i64
-                }
-            };
+            cpu.x[f.rd] = (u128::from(cpu.x[f.rs1] as u64)
+                .wrapping_mul(u128::from(cpu.x[f.rs2] as u64))
+                >> 64) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2818,16 +2769,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULHSU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = match cpu.xlen {
-                Xlen::Bit32 => cpu.sign_extend(
-                    ((cpu.x[f.rs1] as i64).wrapping_mul(i64::from(cpu.x[f.rs2] as u32)) >> 32)
-                        as i64,
-                ),
-                Xlen::Bit64 => {
-                    ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64)
-                        as i64
-                }
-            };
+            cpu.x[f.rd] =
+                ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3075,10 +3018,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLLI",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let mask = match cpu.xlen {
-                Xlen::Bit32 => 0x1f,
-                Xlen::Bit64 => 0x3f,
-            };
+            let mask = 0x3f;
             let shamt = (word >> 20) & mask;
             cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] << shamt);
             Ok(())
@@ -3170,10 +3110,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRAI",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let mask = match cpu.xlen {
-                Xlen::Bit32 => 0x1f,
-                Xlen::Bit64 => 0x3f,
-            };
+            let mask = 0x3f;
             let shamt = (word >> 20) & mask;
             cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] >> shamt);
             Ok(())
@@ -3254,10 +3191,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRLI",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let mask = match cpu.xlen {
-                Xlen::Bit32 => 0x1f,
-                Xlen::Bit64 => 0x3f,
-            };
+            let mask = 0x3f;
             let shamt = (word >> 20) & mask;
             cpu.x[f.rd] = cpu.sign_extend((cpu.unsigned_data(cpu.x[f.rs1]) >> shamt) as i64);
             Ok(())
@@ -3270,10 +3204,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRLIW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let mask = match cpu.xlen {
-                Xlen::Bit32 => 0x1f,
-                Xlen::Bit64 => 0x3f,
-            };
+            let mask = 0x3f;
             let shamt = (word >> 20) & mask;
             cpu.x[f.rd] = i64::from(((cpu.x[f.rs1] as u32) >> shamt) as i32);
             Ok(())
@@ -3569,18 +3500,6 @@ mod test_cpu {
         assert_eq!(1, cpu.read_pc());
         cpu.update_pc(0xffffffffffffffff);
         assert_eq!(0xffffffffffffffff, cpu.read_pc());
-    }
-
-    #[test]
-    fn update_xlen() {
-        let mut cpu = create_cpu();
-        assert!(matches!(cpu.xlen, Xlen::Bit64));
-        cpu.update_xlen(Xlen::Bit32);
-        assert!(matches!(cpu.xlen, Xlen::Bit32));
-        cpu.update_xlen(Xlen::Bit64);
-        assert!(matches!(cpu.xlen, Xlen::Bit64));
-        // Note: cpu.update_xlen() updates cpu.mmu.xlen, too.
-        // The test for mmu.xlen should be in Mmu?
     }
 
     #[test]

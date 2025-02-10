@@ -10,7 +10,7 @@ extern crate fnv;
 
 use self::fnv::FnvHashMap;
 
-use crate::cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType, Xlen};
+use crate::cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType};
 use crate::device::clint::Clint;
 use crate::device::plic::Plic;
 use crate::device::uart::Uart;
@@ -26,7 +26,6 @@ use crate::terminal::Terminal;
 /// @TODO: Memory protection is not implemented yet. We should support.
 pub struct Mmu {
     clock: u64,
-    xlen: Xlen,
     ppn: u64,
     addressing_mode: AddressingMode,
     privilege_mode: PrivilegeMode,
@@ -60,7 +59,6 @@ pub struct Mmu {
 
 pub enum AddressingMode {
     None,
-    SV32,
     SV39,
     SV48, // @TODO: Implement
 }
@@ -75,7 +73,6 @@ enum MemoryAccessType {
 const fn _get_addressing_mode_name(mode: &AddressingMode) -> &'static str {
     match mode {
         AddressingMode::None => "None",
-        AddressingMode::SV32 => "SV32",
         AddressingMode::SV39 => "SV39",
         AddressingMode::SV48 => "SV48",
     }
@@ -88,7 +85,7 @@ impl Mmu {
     /// * `xlen`
     /// * `terminal`
     #[must_use]
-    pub fn new(xlen: Xlen, terminal: Box<dyn Terminal>) -> Self {
+    pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let mut dtb = vec![0; DTB_SIZE];
 
         // Load default device tree binary content
@@ -97,7 +94,6 @@ impl Mmu {
 
         Self {
             clock: 0,
-            xlen,
             ppn: 0,
             addressing_mode: AddressingMode::None,
             privilege_mode: PrivilegeMode::Machine,
@@ -113,15 +109,6 @@ impl Mmu {
             load_page_cache: FnvHashMap::default(),
             store_page_cache: FnvHashMap::default(),
         }
-    }
-
-    /// Updates XLEN, 32-bit or 64-bit
-    ///
-    /// # Arguments
-    /// * `xlen`
-    pub fn update_xlen(&mut self, xlen: Xlen) {
-        self.xlen = xlen;
-        self.clear_page_cache();
     }
 
     /// Initializes Main memory. This method is expected to be called only once.
@@ -217,10 +204,7 @@ impl Mmu {
     }
 
     const fn get_effective_address(&self, address: u64) -> u64 {
-        match self.xlen {
-            Xlen::Bit32 => address & 0xffffffff,
-            Xlen::Bit64 => address,
-        }
+        address
     }
 
     /// Fetches an instruction byte. This method takes virtual address
@@ -686,34 +670,6 @@ impl Mmu {
         } else {
             let p_address = match self.addressing_mode {
                 AddressingMode::None => Ok(address),
-                AddressingMode::SV32 => match self.privilege_mode {
-                    // @TODO: Optimize
-                    PrivilegeMode::Machine => match access_type {
-                        MemoryAccessType::Execute => Ok(address),
-                        // @TODO: Remove magic number
-                        _ => {
-                            if (self.mstatus >> 17) & 1 == 0 {
-                                Ok(address)
-                            } else {
-                                let privilege_mode = get_privilege_mode((self.mstatus >> 9) & 3);
-                                if matches!(privilege_mode, PrivilegeMode::Machine) {
-                                    Ok(address)
-                                } else {
-                                    let current_privilege_mode = self.privilege_mode.clone();
-                                    self.update_privilege_mode(privilege_mode);
-                                    let result = self.translate_address(v_address, access_type);
-                                    self.update_privilege_mode(current_privilege_mode);
-                                    result
-                                }
-                            }
-                        }
-                    },
-                    PrivilegeMode::User | PrivilegeMode::Supervisor => {
-                        let vpns = [(address >> 12) & 0x3ff, (address >> 22) & 0x3ff];
-                        self.traverse_page(address, 2 - 1, self.ppn, &vpns, access_type)
-                    }
-                    PrivilegeMode::Reserved => Ok(address),
-                },
                 AddressingMode::SV39 => match self.privilege_mode {
                     // @TODO: Optimize
                     // @TODO: Remove duplicated code with SV32
@@ -787,21 +743,15 @@ impl Mmu {
         access_type: &MemoryAccessType,
     ) -> Result<u64, ()> {
         let pagesize = 4096;
-        let ptesize = match self.addressing_mode {
-            AddressingMode::SV32 => 4,
-            _ => 8,
-        };
+        let ptesize = 8;
         let pte_address = parent_ppn * pagesize + vpns[level as usize] * ptesize;
         let pte = match self.addressing_mode {
-            AddressingMode::SV32 => u64::from(self.load_word_raw(pte_address)),
             _ => self.load_doubleword_raw(pte_address),
         };
         let ppn = match self.addressing_mode {
-            AddressingMode::SV32 => (pte >> 10) & 0x3fffff,
             _ => (pte >> 10) & 0xfffffffffff,
         };
         let ppns = match self.addressing_mode {
-            AddressingMode::SV32 => [(pte >> 10) & 0x3ff, (pte >> 20) & 0xfff, 0 /*dummy*/],
             AddressingMode::SV39 => [
                 (pte >> 10) & 0x1ff,
                 (pte >> 19) & 0x1ff,
@@ -843,10 +793,7 @@ impl Mmu {
                     MemoryAccessType::Write => 1 << 7,
                     _ => 0,
                 });
-            match self.addressing_mode {
-                AddressingMode::SV32 => self.store_word_raw(pte_address, new_pte as u32),
-                _ => self.store_doubleword_raw(pte_address, new_pte),
-            };
+            self.store_doubleword_raw(pte_address, new_pte);
         }
 
         if match access_type {
@@ -861,16 +808,6 @@ impl Mmu {
         let offset = v_address & 0xfff; // [11:0]
                                         // @TODO: Optimize
         let p_address = match self.addressing_mode {
-            AddressingMode::SV32 => match level {
-                1 => {
-                    if ppns[0] != 0 {
-                        return Err(());
-                    }
-                    (ppns[1] << 22) | (vpns[0] << 12) | offset
-                }
-                0 => (ppn << 12) | offset,
-                _ => panic!(), // Shouldn't happen
-            },
             _ => match level {
                 2 => {
                     if ppns[1] != 0 || ppns[0] != 0 {
