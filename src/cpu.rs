@@ -141,7 +141,7 @@ const fn get_privilege_encoding(mode: PrivilegeMode) -> u8 {
 pub fn get_privilege_mode(encoding: u64) -> PrivilegeMode {
     assert_ne!(encoding, 2);
     let Some(m) = FromPrimitive::from_u64(encoding) else {
-	unreachable!();
+        unreachable!();
     };
     m
 }
@@ -227,7 +227,7 @@ impl Cpu {
     // @TODO: Rename?
     fn tick_operate(&mut self) -> Result<(), Trap> {
         if self.wfi {
-            if (self.read_csr_raw(CSR_MIE_ADDRESS) & self.read_csr_raw(CSR_MIP_ADDRESS)) != 0 {
+            if self.read_csr_raw(CSR_MIE_ADDRESS) & self.read_csr_raw(CSR_MIP_ADDRESS) != 0 {
                 self.wfi = false;
             }
             return Ok(());
@@ -235,7 +235,7 @@ impl Cpu {
 
         let original_word = self.fetch()?;
         let instruction_address = self.pc;
-        let word = if (original_word & 0x3) == 0x3 {
+        let word = if original_word & 3 == 3 {
             self.pc = self.pc.wrapping_add(4); // 32-bit length non-compressed instruction
             original_word
         } else {
@@ -291,7 +291,7 @@ impl Cpu {
     #[allow(clippy::unused_self)]
     fn decode_and_get_instruction_index(&self, word: u32) -> Result<usize, ()> {
         for (i, inst) in INSTRUCTIONS.iter().enumerate() {
-            if (word & inst.mask) == inst.data {
+            if word & inst.mask == inst.data {
                 return Ok(i);
             }
         }
@@ -348,9 +348,9 @@ impl Cpu {
         };
         let pos = cause & 0xffff;
 
-        let new_privilege_mode = if ((mdeleg >> pos) & 1) == 0 {
+        let new_privilege_mode = if (mdeleg >> pos) & 1 == 0 {
             PrivilegeMode::Machine
-        } else if ((sdeleg >> pos) & 1) == 0 {
+        } else if (sdeleg >> pos) & 1 == 0 {
             PrivilegeMode::Supervisor
         } else {
             PrivilegeMode::User
@@ -497,7 +497,7 @@ impl Cpu {
         self.pc = self.read_csr_raw(csr_tvec_address);
 
         // Add 4 * cause if tvec has vector type address
-        if (self.pc & 0x3) != 0 {
+        if self.pc & 3 != 0 {
             self.pc = (self.pc & !0x3) + 4 * (cause & 0xffff);
         }
 
@@ -539,7 +539,7 @@ impl Cpu {
     }
 
     const fn has_csr_access_privilege(&self, address: u16) -> bool {
-        let privilege = (address >> 8) & 0x3; // the lowest privilege level that can access the CSR
+        let privilege = (address >> 8) & 3;
         privilege as u8 <= get_privilege_encoding(self.privilege_mode)
     }
 
@@ -667,20 +667,9 @@ impl Cpu {
     }
 
     // @TODO: Rename to better name?
-    #[allow(clippy::cast_possible_truncation)]
-    const fn sign_extend(&self, value: i64) -> i64 {
-        value
-    }
-
-    // @TODO: Rename to better name?
     #[allow(clippy::cast_sign_loss)]
     const fn unsigned_data(&self, value: i64) -> u64 {
         (value as u64) & self.unsigned_data_mask
-    }
-
-    // @TODO: Rename to better name?
-    const fn most_negative(&self) -> i64 {
-        i64::MIN
     }
 
     // @TODO: Optimize
@@ -1220,7 +1209,7 @@ impl Cpu {
             }
         };
 
-        let word = if (original_word & 0x3) == 0x3 {
+        let word = if original_word & 3 == 3 {
             original_word
         } else {
             original_word &= 0xffff;
@@ -1617,7 +1606,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADD",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]));
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1628,7 +1617,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADDI",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_add(f.imm));
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1882,7 +1871,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AND",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] & cpu.x[f.rs2]);
+            cpu.x[f.rd] = cpu.x[f.rs1] & cpu.x[f.rs2];
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1893,7 +1882,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ANDI",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] & f.imm);
+            cpu.x[f.rd] = cpu.x[f.rs1] & f.imm;
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1904,7 +1893,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AUIPC",
         operation: |cpu, word, address| {
             let f = parse_format_u(word);
-            cpu.x[f.rd] = cpu.sign_extend(address.wrapping_add(f.imm) as i64);
+            cpu.x[f.rd] = address.wrapping_add(f.imm) as i64;
             Ok(())
         },
         disassemble: dump_format_u,
@@ -1915,7 +1904,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BEQ",
         operation: |cpu, word, address| {
             let f = parse_format_b(word);
-            if cpu.sign_extend(cpu.x[f.rs1]) == cpu.sign_extend(cpu.x[f.rs2]) {
+            if cpu.x[f.rs1] == cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm);
             }
             Ok(())
@@ -1928,7 +1917,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BGE",
         operation: |cpu, word, address| {
             let f = parse_format_b(word);
-            if cpu.sign_extend(cpu.x[f.rs1]) >= cpu.sign_extend(cpu.x[f.rs2]) {
+            if cpu.x[f.rs1] >= cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm);
             }
             Ok(())
@@ -1954,7 +1943,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BLT",
         operation: |cpu, word, address| {
             let f = parse_format_b(word);
-            if cpu.sign_extend(cpu.x[f.rs1]) < cpu.sign_extend(cpu.x[f.rs2]) {
+            if cpu.x[f.rs1] < cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm);
             }
             Ok(())
@@ -1980,7 +1969,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BNE",
         operation: |cpu, word, address| {
             let f = parse_format_b(word);
-            if cpu.sign_extend(cpu.x[f.rs1]) != cpu.sign_extend(cpu.x[f.rs2]) {
+            if cpu.x[f.rs1] != cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm);
             }
             Ok(())
@@ -1998,7 +1987,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Err(e) => return Err(e),
             };
             let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = cpu.sign_extend(data);
+            cpu.x[f.rd] = data;
             match cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2017,7 +2006,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
-            cpu.x[f.rd] = cpu.sign_extend(data);
+            cpu.x[f.rd] = data;
             match cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2037,7 +2026,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Err(e) => return Err(e),
             };
             let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = cpu.sign_extend(data);
+            cpu.x[f.rd] = data;
             match cpu.write_csr(f.csr, cpu.unsigned_data(cpu.x[f.rd] | tmp)) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2056,7 +2045,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
-            cpu.x[f.rd] = cpu.sign_extend(data);
+            cpu.x[f.rd] = data;
             match cpu.write_csr(f.csr, cpu.unsigned_data(cpu.x[f.rd] | (f.rs as i64))) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2076,7 +2065,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Err(e) => return Err(e),
             };
             let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = cpu.sign_extend(data);
+            cpu.x[f.rd] = data;
             match cpu.write_csr(f.csr, cpu.unsigned_data(tmp)) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2095,7 +2084,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
-            cpu.x[f.rd] = cpu.sign_extend(data);
+            cpu.x[f.rd] = data;
             match cpu.write_csr(f.csr, f.rs as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2114,10 +2103,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let divisor = cpu.x[f.rs2];
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
-            } else if dividend == cpu.most_negative() && divisor == -1 {
+            } else if dividend == i64::MIN && divisor == -1 {
                 cpu.x[f.rd] = dividend;
             } else {
-                cpu.x[f.rd] = cpu.sign_extend(dividend.wrapping_div(divisor));
+                cpu.x[f.rd] = dividend.wrapping_div(divisor);
             }
             Ok(())
         },
@@ -2134,7 +2123,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
             } else {
-                cpu.x[f.rd] = cpu.sign_extend(dividend.wrapping_div(divisor) as i64);
+                cpu.x[f.rd] = dividend.wrapping_div(divisor) as i64;
             }
             Ok(())
         },
@@ -2542,7 +2531,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "JAL",
         operation: |cpu, word, address| {
             let f = parse_format_j(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.pc as i64);
+            cpu.x[f.rd] = cpu.pc as i64;
             cpu.pc = address.wrapping_add(f.imm);
             Ok(())
         },
@@ -2554,7 +2543,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "JALR",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            let tmp = cpu.sign_extend(cpu.pc as i64);
+            let tmp = cpu.pc as i64;
             cpu.pc = (cpu.x[f.rs1] as u64).wrapping_add(f.imm as u64);
             cpu.x[f.rd] = tmp;
             Ok(())
@@ -2734,7 +2723,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MUL",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_mul(cpu.x[f.rs2]));
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_mul(cpu.x[f.rs2]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2781,9 +2770,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(i64::from(
-                (cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32),
-            ));
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2814,7 +2801,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 3 => PrivilegeMode::Machine,
                 _ => panic!(), // Shouldn't happen
             };
-            cpu.mmu.update_privilege_mode(cpu.privilege_mode.clone());
+            cpu.mmu.update_privilege_mode(cpu.privilege_mode);
             Ok(())
         },
         disassemble: dump_empty,
@@ -2825,7 +2812,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "OR",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] | cpu.x[f.rs2]);
+            cpu.x[f.rd] = cpu.x[f.rs1] | cpu.x[f.rs2];
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2836,7 +2823,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ORI",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] | f.imm);
+            cpu.x[f.rd] = cpu.x[f.rs1] | f.imm;
             Ok(())
         },
         disassemble: dump_format_i,
@@ -2851,10 +2838,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let divisor = cpu.x[f.rs2];
             if divisor == 0 {
                 cpu.x[f.rd] = dividend;
-            } else if dividend == cpu.most_negative() && divisor == -1 {
+            } else if dividend == i64::MIN && divisor == -1 {
                 cpu.x[f.rd] = 0;
             } else {
-                cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_rem(cpu.x[f.rs2]));
+                cpu.x[f.rd] = cpu.x[f.rs1].wrapping_rem(cpu.x[f.rs2]);
             }
             Ok(())
         },
@@ -2869,8 +2856,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let dividend = cpu.unsigned_data(cpu.x[f.rs1]);
             let divisor = cpu.unsigned_data(cpu.x[f.rs2]);
             cpu.x[f.rd] = match divisor {
-                0 => cpu.sign_extend(dividend as i64),
-                _ => cpu.sign_extend(dividend.wrapping_rem(divisor) as i64),
+                0 => dividend as i64,
+                _ => dividend.wrapping_rem(divisor) as i64,
             };
             Ok(())
         },
@@ -3007,7 +2994,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLL",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_shl(cpu.x[f.rs2] as u32));
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shl(cpu.x[f.rs2] as u32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3020,7 +3007,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] << shamt);
+            cpu.x[f.rd] = cpu.x[f.rs1] << shamt;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3099,7 +3086,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRA",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_shr(cpu.x[f.rs2] as u32));
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shr(cpu.x[f.rs2] as u32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3112,7 +3099,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] >> shamt);
+            cpu.x[f.rd] = cpu.x[f.rs1] >> shamt;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3166,7 +3153,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 1 => PrivilegeMode::Supervisor,
                 _ => panic!(), // Shouldn't happen
             };
-            cpu.mmu.update_privilege_mode(cpu.privilege_mode.clone());
+            cpu.mmu.update_privilege_mode(cpu.privilege_mode);
             Ok(())
         },
         disassemble: dump_empty,
@@ -3177,10 +3164,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRL",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(
-                cpu.unsigned_data(cpu.x[f.rs1])
-                    .wrapping_shr(cpu.x[f.rs2] as u32) as i64,
-            );
+            cpu.x[f.rd] = cpu
+                .unsigned_data(cpu.x[f.rs1])
+                .wrapping_shr(cpu.x[f.rs2] as u32) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3193,7 +3179,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.sign_extend((cpu.unsigned_data(cpu.x[f.rs1]) >> shamt) as i64);
+            cpu.x[f.rd] = (cpu.unsigned_data(cpu.x[f.rs1]) >> shamt) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3228,7 +3214,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SUB",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]));
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3281,7 +3267,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "XOR",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] ^ cpu.x[f.rs2]);
+            cpu.x[f.rd] = cpu.x[f.rs1] ^ cpu.x[f.rs2];
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3292,7 +3278,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "XORI",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.sign_extend(cpu.x[f.rs1] ^ f.imm);
+            cpu.x[f.rd] = cpu.x[f.rs1] ^ f.imm;
             Ok(())
         },
         disassemble: dump_format_i,

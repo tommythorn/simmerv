@@ -78,6 +78,10 @@ const fn _get_addressing_mode_name(mode: &AddressingMode) -> &'static str {
     }
 }
 
+const fn get_effective_address(address: u64) -> u64 {
+    address
+}
+
 impl Mmu {
     /// Creates a new `Mmu`.
     ///
@@ -203,10 +207,6 @@ impl Mmu {
         self.clear_page_cache();
     }
 
-    const fn get_effective_address(&self, address: u64) -> u64 {
-        address
-    }
-
     /// Fetches an instruction byte. This method takes virtual address
     /// and translates into physical address inside.
     ///
@@ -234,7 +234,7 @@ impl Mmu {
         if v_address & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            let effective_address = self.get_effective_address(v_address);
+            let effective_address = get_effective_address(v_address);
             match self.translate_address(effective_address, &MemoryAccessType::Execute) {
                 Ok(p_address) => Ok(self.load_word_raw(p_address)),
                 Err(()) => Err(Trap {
@@ -262,7 +262,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn load(&mut self, v_address: u64) -> Result<u8, Trap> {
-        let effective_address = self.get_effective_address(v_address);
+        let effective_address = get_effective_address(v_address);
         match self.translate_address(effective_address, &MemoryAccessType::Read) {
             Ok(p_address) => Ok(self.load_raw(p_address)),
             Err(()) => Err(Trap {
@@ -466,7 +466,7 @@ impl Mmu {
     /// * `p_address` Physical address
     #[allow(clippy::cast_possible_truncation)]
     fn load_raw(&mut self, p_address: u64) -> u8 {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         // @TODO: Mapping should be configurable with dtb
         if effective_address >= DRAM_BASE {
             self.memory.read_byte(effective_address)
@@ -491,7 +491,7 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     fn load_halfword_raw(&mut self, p_address: u64) -> u16 {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         if effective_address >= DRAM_BASE && effective_address.wrapping_add(1) > effective_address {
             // Fast path. Directly load main memory at a time.
             self.memory.read_halfword(effective_address)
@@ -510,7 +510,7 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     pub fn load_word_raw(&mut self, p_address: u64) -> u32 {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         if effective_address >= DRAM_BASE && effective_address.wrapping_add(3) > effective_address {
             self.memory.read_word(effective_address)
         } else {
@@ -528,7 +528,7 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     fn load_doubleword_raw(&mut self, p_address: u64) -> u64 {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         if effective_address >= DRAM_BASE && effective_address.wrapping_add(7) > effective_address {
             self.memory.read_doubleword(effective_address)
         } else {
@@ -549,7 +549,7 @@ impl Mmu {
     /// # Panics
     /// Will panic on access to unsupported MMIO ranges (XXX this should just ignore them)
     pub fn store_raw(&mut self, p_address: u64, value: u8) {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         // @TODO: Mapping should be configurable with dtb
         if effective_address >= DRAM_BASE {
             self.memory.write_byte(effective_address, value);
@@ -571,7 +571,7 @@ impl Mmu {
     /// * `p_address` Physical address
     /// * `value` data written
     fn store_halfword_raw(&mut self, p_address: u64, value: u16) {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         if effective_address >= DRAM_BASE && effective_address.wrapping_add(1) > effective_address {
             self.memory.write_halfword(effective_address, value);
         } else {
@@ -591,7 +591,7 @@ impl Mmu {
     /// * `p_address` Physical address
     /// * `value` data written
     fn store_word_raw(&mut self, p_address: u64, value: u32) {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         if effective_address >= DRAM_BASE && effective_address.wrapping_add(3) > effective_address {
             self.memory.write_word(effective_address, value);
         } else {
@@ -611,7 +611,7 @@ impl Mmu {
     /// * `p_address` Physical address
     /// * `value` data written
     fn store_doubleword_raw(&mut self, p_address: u64, value: u64) {
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         if effective_address >= DRAM_BASE && effective_address.wrapping_add(7) > effective_address {
             self.memory.write_doubleword(effective_address, value);
         } else {
@@ -635,7 +635,7 @@ impl Mmu {
     pub fn validate_address(&mut self, v_address: u64) -> Result<bool, ()> {
         // @TODO: Support other access types?
         let p_address = self.translate_address(v_address, &MemoryAccessType::DontCare)?;
-        let effective_address = self.get_effective_address(p_address);
+        let effective_address = get_effective_address(p_address);
         let valid = if effective_address >= DRAM_BASE {
             self.memory.validate_address(effective_address)
         } else {
@@ -653,7 +653,7 @@ impl Mmu {
         v_address: u64,
         access_type: &MemoryAccessType,
     ) -> Result<u64, ()> {
-        let address = self.get_effective_address(v_address);
+        let address = get_effective_address(v_address);
         let v_page = address & !0xfff;
         let cache = if self.page_cache_enabled {
             match access_type {
@@ -684,7 +684,7 @@ impl Mmu {
                                 if matches!(privilege_mode, PrivilegeMode::Machine) {
                                     Ok(address)
                                 } else {
-                                    let current_privilege_mode = self.privilege_mode.clone();
+                                    let current_privilege_mode = self.privilege_mode;
                                     self.update_privilege_mode(privilege_mode);
                                     let result = self.translate_address(v_address, access_type);
                                     self.update_privilege_mode(current_privilege_mode);
@@ -745,19 +745,16 @@ impl Mmu {
         let pagesize = 4096;
         let ptesize = 8;
         let pte_address = parent_ppn * pagesize + vpns[level as usize] * ptesize;
-        let pte = match self.addressing_mode {
-            _ => self.load_doubleword_raw(pte_address),
-        };
-        let ppn = match self.addressing_mode {
-            _ => (pte >> 10) & 0xfffffffffff,
-        };
-        let ppns = match self.addressing_mode {
-            AddressingMode::SV39 => [
+        let pte = self.load_doubleword_raw(pte_address);
+        let ppn = (pte >> 10) & 0xfffffffffff;
+        let ppns = if matches!(self.addressing_mode, AddressingMode::SV39) {
+            [
                 (pte >> 10) & 0x1ff,
                 (pte >> 19) & 0x1ff,
                 (pte >> 28) & 0x3ffffff,
-            ],
-            _ => panic!(), // Shouldn't happen
+            ]
+        } else {
+            unreachable!()
         };
         let d = (pte >> 7) & 1;
         let a = (pte >> 6) & 1;
@@ -807,23 +804,21 @@ impl Mmu {
 
         let offset = v_address & 0xfff; // [11:0]
                                         // @TODO: Optimize
-        let p_address = match self.addressing_mode {
-            _ => match level {
-                2 => {
-                    if ppns[1] != 0 || ppns[0] != 0 {
-                        return Err(());
-                    }
-                    (ppns[2] << 30) | (vpns[1] << 21) | (vpns[0] << 12) | offset
+        let p_address = match level {
+            2 => {
+                if ppns[1] != 0 || ppns[0] != 0 {
+                    return Err(());
                 }
-                1 => {
-                    if ppns[0] != 0 {
-                        return Err(());
-                    }
-                    (ppns[2] << 30) | (ppns[1] << 21) | (vpns[0] << 12) | offset
+                (ppns[2] << 30) | (vpns[1] << 21) | (vpns[0] << 12) | offset
+            }
+            1 => {
+                if ppns[0] != 0 {
+                    return Err(());
                 }
-                0 => (ppn << 12) | offset,
-                _ => panic!(), // Shouldn't happen
-            },
+                (ppns[2] << 30) | (ppns[1] << 21) | (vpns[0] << 12) | offset
+            }
+            0 => (ppn << 12) | offset,
+            _ => panic!(), // Shouldn't happen
         };
 
         // println!("PA:{:X}", p_address);
