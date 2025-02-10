@@ -1248,7 +1248,7 @@ struct Instruction {
     mask: u32,
     data: u32, // @TODO: rename
     name: &'static str,
-    operation: fn(cpu: &mut Cpu, word: u32, address: u64) -> Result<(), Trap>,
+    operation: fn(addr: u64, word: u32) -> FnMut(&mut Cpu) -> Result<(), Trap>,
     disassemble: fn(cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> String,
 }
 
@@ -1602,10 +1602,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00000033,
         name: "ADD",
-        operation: |cpu, word, _address| {
+        operation: |_address, word| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
-            Ok(())
+	    Box::new(move |cpu| {
+		cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
+		Ok(())
+	    })
         },
         disassemble: dump_format_r,
     },
@@ -1613,10 +1615,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00000013,
         name: "ADDI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
-            Ok(())
+	    Box::new(move |cpu| {
+		cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
+		Ok(())
+	    })
         },
         disassemble: dump_format_i,
     },
