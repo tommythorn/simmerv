@@ -79,7 +79,6 @@ pub struct Cpu {
     mmu: Mmu,
     reservation: Option<i64>,
     decode_cache: DecodeCache,
-    unsigned_data_mask: u64,
 }
 
 #[derive(Clone, Copy, Debug, FromPrimitive)]
@@ -155,6 +154,12 @@ const fn get_trap_cause(trap: &Trap) -> u64 {
     }
 }
 
+// @TODO: Rename to better name?
+#[allow(clippy::cast_sign_loss)]
+const fn unsigned_data(value: i64) -> u64 {
+    value as u64
+}
+
 impl Cpu {
     /// Creates a new `Cpu`.
     ///
@@ -173,7 +178,6 @@ impl Cpu {
             mmu: Mmu::new(terminal),
             reservation: None,
             decode_cache: DecodeCache::new(),
-            unsigned_data_mask: 0xffff_ffff_ffff_ffff,
         };
         cpu.x[0xb] = 0x1020; // I don't know why but Linux boot seems to require this initialization
         cpu.write_csr_raw(CSR_MISA_ADDRESS, 0x8000_0000_8014_312f);
@@ -664,12 +668,6 @@ impl Cpu {
         let ppn = value & 0x0fff_ffff_ffff;
         self.mmu.update_addressing_mode(addressing_mode);
         self.mmu.update_ppn(ppn);
-    }
-
-    // @TODO: Rename to better name?
-    #[allow(clippy::cast_sign_loss)]
-    const fn unsigned_data(&self, value: i64) -> u64 {
-        (value as u64) & self.unsigned_data_mask
     }
 
     // @TODO: Optimize
@@ -1228,7 +1226,7 @@ impl Cpu {
             }
         };
 
-        let mut s = format!("PC:{:016x} ", self.unsigned_data(self.pc as i64));
+        let mut s = format!("PC:{:016x} ", self.pc);
         s += &format!("{original_word:08x} ");
         s += &format!("{} ", inst.name);
         s += &(inst.disassemble)(self, word, self.pc, true);
@@ -1930,7 +1928,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BGEU",
         operation: |cpu, word, address| {
             let f = parse_format_b(word);
-            if cpu.unsigned_data(cpu.x[f.rs1]) >= cpu.unsigned_data(cpu.x[f.rs2]) {
+            if unsigned_data(cpu.x[f.rs1]) >= unsigned_data(cpu.x[f.rs2]) {
                 cpu.pc = address.wrapping_add(f.imm);
             }
             Ok(())
@@ -1956,7 +1954,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BLTU",
         operation: |cpu, word, address| {
             let f = parse_format_b(word);
-            if cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(cpu.x[f.rs2]) {
+            if unsigned_data(cpu.x[f.rs1]) < unsigned_data(cpu.x[f.rs2]) {
                 cpu.pc = address.wrapping_add(f.imm);
             }
             Ok(())
@@ -2027,7 +2025,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             };
             let tmp = cpu.x[f.rs];
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, cpu.unsigned_data(cpu.x[f.rd] | tmp)) {
+            match cpu.write_csr(f.csr, unsigned_data(cpu.x[f.rd] | tmp)) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2046,7 +2044,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Err(e) => return Err(e),
             };
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, cpu.unsigned_data(cpu.x[f.rd] | (f.rs as i64))) {
+            match cpu.write_csr(f.csr, unsigned_data(cpu.x[f.rd] | (f.rs as i64))) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2066,7 +2064,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             };
             let tmp = cpu.x[f.rs];
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, cpu.unsigned_data(tmp)) {
+            match cpu.write_csr(f.csr, unsigned_data(tmp)) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2118,8 +2116,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "DIVU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let dividend = cpu.unsigned_data(cpu.x[f.rs1]);
-            let divisor = cpu.unsigned_data(cpu.x[f.rs2]);
+            let dividend = unsigned_data(cpu.x[f.rs1]);
+            let divisor = unsigned_data(cpu.x[f.rs2]);
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
             } else {
@@ -2135,8 +2133,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "DIVUW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let dividend = cpu.unsigned_data(cpu.x[f.rs1]) as u32;
-            let divisor = cpu.unsigned_data(cpu.x[f.rs2]) as u32;
+            let dividend = unsigned_data(cpu.x[f.rs1]) as u32;
+            let divisor = unsigned_data(cpu.x[f.rs2]) as u32;
             if divisor == 0 {
                 cpu.x[f.rd] = -1;
             } else {
@@ -2853,8 +2851,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "REMU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let dividend = cpu.unsigned_data(cpu.x[f.rs1]);
-            let divisor = cpu.unsigned_data(cpu.x[f.rs2]);
+            let dividend = unsigned_data(cpu.x[f.rs1]);
+            let divisor = unsigned_data(cpu.x[f.rs2]);
             cpu.x[f.rd] = match divisor {
                 0 => dividend as i64,
                 _ => dividend.wrapping_rem(divisor) as i64,
@@ -3063,7 +3061,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTIU",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from(cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(f.imm));
+            cpu.x[f.rd] = i64::from(unsigned_data(cpu.x[f.rs1]) < unsigned_data(f.imm));
             Ok(())
         },
         disassemble: dump_format_i,
@@ -3074,8 +3072,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] =
-                i64::from(cpu.unsigned_data(cpu.x[f.rs1]) < cpu.unsigned_data(cpu.x[f.rs2]));
+            cpu.x[f.rd] = i64::from(unsigned_data(cpu.x[f.rs1]) < unsigned_data(cpu.x[f.rs2]));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3164,9 +3161,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRL",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu
-                .unsigned_data(cpu.x[f.rs1])
-                .wrapping_shr(cpu.x[f.rs2] as u32) as i64;
+            cpu.x[f.rd] = unsigned_data(cpu.x[f.rs1]).wrapping_shr(cpu.x[f.rs2] as u32) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3179,7 +3174,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = (cpu.unsigned_data(cpu.x[f.rs1]) >> shamt) as i64;
+            cpu.x[f.rd] = (unsigned_data(cpu.x[f.rs1]) >> shamt) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
