@@ -67,13 +67,13 @@ impl VirtioBlockDisk {
             status: 0,
             interrupt_status: 0,
             notify_clocks: Vec::new(),
-            contents: vec![],
+            contents: vec![], // XXX Storing the image in memory is extremely limiting
         }
     }
 
     /// Indicates whether `VirtioBlockDisk` raises an interrupt signal
     pub const fn is_interrupting(&mut self) -> bool {
-        (self.interrupt_status & 0x1) == 1
+        self.interrupt_status & 1 == 1
     }
 
     /// Initializes filesystem content. The method is expected to be called
@@ -119,7 +119,7 @@ impl VirtioBlockDisk {
     /// # Arguments
     /// * `address`
     #[allow(clippy::match_same_arms, clippy::cast_possible_truncation)]
-    pub const fn load(&mut self, address: u64) -> u8 {
+    pub fn load(&mut self, address: u64) -> u8 {
         //println!("Disk Load AD:{:X}", address);
         match address {
             // Magic number: 0x74726976
@@ -167,15 +167,12 @@ impl VirtioBlockDisk {
             0x10001071 => (self.status >> 8) as u8,
             0x10001072 => (self.status >> 16) as u8,
             0x10001073 => (self.status >> 24) as u8,
-            // Configurations @TODO: Implement properly
-            0x10001100 => 0x00,
-            0x10001101 => 0x20,
-            0x10001102 => 0x03,
-            0x10001103 => 0,
-            0x10001104 => 0,
-            0x10001105 => 0,
-            0x10001106 => 0,
-            0x10001107 => 0,
+            // Configurations (The first 64-it is the number of sectors) @TODO: Implement properly
+            0x10001100..=0x10001107 => {
+                let n_secs = self.contents.len() / (512 / 8);
+                let n_secs_as_u8: [u8; 8] = n_secs.to_le_bytes();
+                n_secs_as_u8[address as usize & 7]
+            }
             _ => 0,
         }
     }
