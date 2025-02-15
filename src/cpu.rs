@@ -1519,7 +1519,7 @@ const fn parse_format_u(word: u32) -> FormatU {
     }
 }
 
-fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool)  {
+fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_u(word);
     *s += get_register_name(f.rd);
     if evaluate {
@@ -1529,8 +1529,7 @@ fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
 }
 
 #[allow(clippy::ptr_arg)] // Clippy can't tell that we can't change the function type
-const fn dump_empty(_s: &mut String, _cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) {
-}
+const fn dump_empty(_s: &mut String, _cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) {}
 
 fn get_register_name(num: usize) -> &'static str {
     match num {
@@ -1570,7 +1569,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 129;
+const INSTRUCTION_NUM: usize = 130;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -3548,6 +3547,32 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 "{address:08x}:{word:08x} fle.s {f1}, {f2} -> {} (rm {rm})",
                 cpu.x[f.rd]
             );
+
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc0300053,
+        name: "FCVT.LU.S",
+        operation: |cpu, word, address| {
+            let f = parse_format_r(word);
+            let rm = get_rm(cpu, address, word);
+
+            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
+
+            eprintln!(
+                "{address:08x}:{word:08x} fcvt.lu.s x{}, f{}={} (rm {rm})",
+                f.rd, f.rs1, f1
+            );
+
+            // XXX Picture an accurate implementation here and pay no attention to this
+            let r = f1 as u64;
+            if f.rd != 0 {
+                cpu.x[f.rd] = r as i64;
+            }
+            //cpu.csr[CSR_FCSR_ADDRESS as usize] |= u64::from(fflags); // FP flags are accumulative
 
             Ok(())
         },
