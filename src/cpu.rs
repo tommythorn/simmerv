@@ -9,12 +9,12 @@
 
 mod rvc;
 
+use crate::mmu::{AddressingMode, Mmu};
+use crate::terminal::Terminal;
 use fnv::{self, FnvHashMap};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-
-use crate::mmu::{AddressingMode, Mmu};
-use crate::terminal::Terminal;
+use std::fmt::Write as _;
 
 const CSR_CAPACITY: usize = 4096;
 
@@ -3531,7 +3531,6 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0xa0001053,
         name: "FLT.S",
         operation: |cpu, word, address| {
-
             let f = parse_format_r(word);
             let rm = get_rm(cpu, address, word);
 
@@ -3542,7 +3541,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 cpu.x[f.rd] = i64::from(f1 < f2);
             }
 
-            eprintln!("{address:08x}:{word:08x} flt.s {f1}, {f2} -> {} (rm {rm})", cpu.x[f.rd]);
+            eprintln!(
+                "{address:08x}:{word:08x} flt.s {f1}, {f2} -> {} (rm {rm})",
+                cpu.x[f.rd]
+            );
 
             Ok(())
         },
@@ -3553,7 +3555,6 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0xa0000053,
         name: "FLE.S",
         operation: |cpu, word, address| {
-
             let f = parse_format_r(word);
             let rm = get_rm(cpu, address, word);
 
@@ -3564,7 +3565,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 cpu.x[f.rd] = i64::from(f1 <= f2);
             }
 
-            eprintln!("{address:08x}:{word:08x} fle.s {f1}, {f2} -> {} (rm {rm})", cpu.x[f.rd]);
+            eprintln!(
+                "{address:08x}:{word:08x} fle.s {f1}, {f2} -> {} (rm {rm})",
+                cpu.x[f.rd]
+            );
 
             Ok(())
         },

@@ -167,7 +167,7 @@ impl Emulator {
                 2 => symbol_table_section_headers.push(sh),
                 3 => string_table_section_headers.push(sh),
                 _ => {}
-            };
+            }
         }
 
         // Find program data section named .tohost to detect if the elf file is riscv-tests
@@ -236,7 +236,7 @@ impl Emulator {
                 2 => symbol_table_section_headers.push(sh),
                 3 => string_table_section_headers.push(sh),
                 _ => {}
-            };
+            }
         }
 
         // Creates symbol - virtual address mapping
@@ -292,7 +292,7 @@ impl Emulator {
     }
 
     /// Returns mutable reference to `Cpu`.
-    pub fn get_mut_cpu(&mut self) -> &mut Cpu {
+    pub const fn get_mut_cpu(&mut self) -> &mut Cpu {
         &mut self.cpu
     }
 

@@ -190,7 +190,7 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `mstatus`
-    pub fn update_mstatus(&mut self, mstatus: u64) {
+    pub const fn update_mstatus(&mut self, mstatus: u64) {
         self.mstatus = mstatus;
     }
 
@@ -243,7 +243,7 @@ impl Mmu {
                 match self.fetch(v_address.wrapping_add(i)) {
                     Ok(byte) => data |= u32::from(byte) << (i * 8),
                     Err(e) => return Err(e),
-                };
+                }
             }
             Ok(data)
         }
@@ -301,7 +301,7 @@ impl Mmu {
                 match self.load(v_address.wrapping_add(i)) {
                     Ok(byte) => data |= u64::from(byte) << (i * 8),
                     Err(e) => return Err(e),
-                };
+                }
             }
             Ok(data)
         }
@@ -550,7 +550,7 @@ impl Mmu {
                 0x10001000..=0x10001FFF => self.disk.store(p_address, value),
                 _ => panic!("Unknown memory mapping {p_address:X}."),
             }
-        };
+        }
     }
 
     /// Stores two bytes to main memory or peripheral devices depending on
@@ -808,12 +808,12 @@ impl Mmu {
     }
 
     /// Returns mutable reference to `Clint`.
-    pub fn get_mut_clint(&mut self) -> &mut Clint {
+    pub const fn get_mut_clint(&mut self) -> &mut Clint {
         &mut self.clint
     }
 
     /// Returns mutable reference to `Uart`.
-    pub fn get_mut_uart(&mut self) -> &mut Uart {
+    pub const fn get_mut_uart(&mut self) -> &mut Uart {
         &mut self.uart
     }
 }
