@@ -1589,7 +1589,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 126;
+const INSTRUCTION_NUM: usize = 127;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -3498,6 +3498,29 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.f[f.rd] = r;
             cpu.csr[CSR_FCSR_ADDRESS as usize] |= u64::from(fflags); // FP flags are accumulative
 
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x18000053,
+        name: "FDIV.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let dividend = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
+            let divisor = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+            // Is this implementation correct?
+            let r = if divisor == 0.0 {
+                cpu.set_fcsr_dz();
+                f32::INFINITY
+            } else if divisor == -0.0 {
+                cpu.set_fcsr_dz();
+                f32::NEG_INFINITY
+            } else {
+                dividend / divisor
+            };
+            cpu.f[f.rd] = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from(r.to_bits()));
             Ok(())
         },
         disassemble: dump_format_r,
