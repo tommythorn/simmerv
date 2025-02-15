@@ -566,7 +566,7 @@ impl VirtioBlockDisk {
                                 memory.write_byte(desc_addr + i, data);
                             }
                         }
-                    };
+                    }
                 }
                 2 => {
                     // Third descriptor: Result status
@@ -578,7 +578,7 @@ impl VirtioBlockDisk {
                     memory.write_byte(desc_addr, 0); // 0 means succeeded
                 }
                 _ => {}
-            };
+            }
 
             desc_num += 1;
 

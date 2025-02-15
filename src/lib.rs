@@ -116,7 +116,7 @@ impl Emulator {
                     _ => self.put_bytes_to_terminal(
                         format!("Test Failed with {endcode:X}\n").as_bytes(),
                     ),
-                };
+                }
                 break;
             }
         }

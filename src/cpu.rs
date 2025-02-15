@@ -585,9 +585,8 @@ impl Cpu {
     // SSTATUS, SIE, and SIP are subsets of MSTATUS, MIE, and MIP
     const fn read_csr_raw(&self, address: u16) -> u64 {
         match address {
-            // @TODO: Mask shuld consider of 32-bit mode
             CSR_FFLAGS_ADDRESS => self.csr[CSR_FCSR_ADDRESS as usize] & 0x1f,
-            CSR_FRM_ADDRESS => (self.csr[CSR_FCSR_ADDRESS as usize] >> 5) & 0x7,
+            CSR_FRM_ADDRESS => (self.csr[CSR_FCSR_ADDRESS as usize] >> 5) & 7,
             CSR_SSTATUS_ADDRESS => self.csr[CSR_MSTATUS_ADDRESS as usize] & 0x8000_0003_000d_e162,
             CSR_SIE_ADDRESS => self.csr[CSR_MIE_ADDRESS as usize] & 0x222,
             CSR_SIP_ADDRESS => self.csr[CSR_MIP_ADDRESS as usize] & 0x222,
@@ -1590,7 +1589,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 125;
+const INSTRUCTION_NUM: usize = 126;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -3477,7 +3476,60 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         },
         disassemble: dump_format_r,
     },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xd0300053,
+        name: "FCVT.S.LU",
+        operation: |cpu, word, address| {
+            let f = parse_format_r(word);
+            let insn_rm = (word >> 12) & 7;
+
+            // XXX The FP handling is terrible; we need to extract fflags and frm, but for now we suffer
+            let frm = (cpu.csr[CSR_FCSR_ADDRESS as usize] as u32 >> 5) & 7;
+            let Some(rm) = get_insn_rm(frm, insn_rm) else {
+                todo!("{address:08x}:{word:08x} fcvt.s.lu illegal rounding mode (insn {insn_rm}, FPU {frm})");
+            };
+
+            //eprintln!("Behold! {address:08x}:{word:08x} fcvt.s.lu f{}, x{} ({}, insn {insn_rm}, FPU {frm})",
+            //          f.rd, f.rs1, cpu.x[f.rs1] as u64);
+
+            let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], rm);
+
+            cpu.f[f.rd] = r;
+            cpu.csr[CSR_FCSR_ADDRESS as usize] |= u64::from(fflags); // FP flags are accumulative
+
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
 ];
+
+// XXX We should give a proper Rust type for the rounding modes
+const fn get_insn_rm(frm: u32, rm: u32) -> Option<u32> {
+    let rm = if rm == 7 { frm } else { rm };
+    if 5 <= rm {
+        None
+    } else {
+        Some(rm)
+    }
+}
+
+// u64 -> f32
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+fn cvt_u64_sf32(a: i64, rm: u32) -> (f64, u32) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    if rm != 0 {
+        todo!("cvt_u64_sf32 is barely correct for rounding mode nearest, probably worse for {rm}");
+    }
+    let f = a as u64 as f32;
+    let f = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from(f.to_bits()));
+    let fflags = 0;
+    (f, fflags)
+}
 
 /// The number of results [`DecodeCache`](struct.DecodeCache.html) holds.
 /// You need to carefully choose the number. Too small number causes

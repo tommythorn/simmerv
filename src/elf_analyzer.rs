@@ -554,7 +554,7 @@ impl ElfAnalyzer {
                         offset += 2;
                     }
                     _ => unreachable!(),
-                };
+                }
 
                 /*
                 println!("Symbol: {}", _j);
