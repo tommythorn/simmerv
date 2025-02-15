@@ -1590,7 +1590,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 123;
+const INSTRUCTION_NUM: usize = 125;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -2261,10 +2261,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x00100073,
         name: "EBREAK",
-        operation: |_cpu, _word, _address| {
-            // @TODO: Implement
-            Ok(())
-        },
+        operation: |_cpu, _word, _address| todo!("Handling ebreak requires handling debug mode"),
         disassemble: dump_empty,
     },
     Instruction {
@@ -2292,6 +2289,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             cpu.f[f.rd] = cpu.f[f.rs1] + cpu.f[f.rs2];
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x00000053,
+        name: "FADD.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
+            let f2 = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+            cpu.f[f.rd] = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from((f1 + f2).to_bits()));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2895,6 +2905,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             };
             cpu.mmu.update_privilege_mode(cpu.privilege_mode);
             Ok(())
+        },
+        disassemble: dump_empty,
+    },
+    Instruction {
+        mask: 0xffffffff,
+        data: 0x7b200073,
+        name: "DRET",
+        operation: |_cpu, _word, _address| {
+            todo!("Handling dret requires handling all of debug mode")
         },
         disassemble: dump_empty,
     },
