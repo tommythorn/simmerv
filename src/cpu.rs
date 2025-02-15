@@ -7,6 +7,8 @@
 // - Don't check for interrupts and advance MMU every cycle
 // - Make Xlen a type parameter
 
+mod rvc;
+
 use fnv::{self, FnvHashMap};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -244,7 +246,7 @@ impl Cpu {
             original_word
         } else {
             self.pc = self.pc.wrapping_add(2); // 16-bit length compressed instruction
-            self.uncompress(original_word & 0xffff)
+            rvc::RVC64_EXPANDED[(original_word & 0xFFFF) as usize]
         };
 
         match self.decode(word) {
