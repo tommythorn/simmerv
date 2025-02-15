@@ -1589,7 +1589,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 127;
+const INSTRUCTION_NUM: usize = 129;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -3471,7 +3471,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = i64::from(tmp as i32);
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(tmp as i32);
+            }
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3482,13 +3484,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.LU",
         operation: |cpu, word, address| {
             let f = parse_format_r(word);
-            let insn_rm = (word >> 12) & 7;
-
-            // XXX The FP handling is terrible; we need to extract fflags and frm, but for now we suffer
-            let frm = (cpu.csr[CSR_FCSR_ADDRESS as usize] as u32 >> 5) & 7;
-            let Some(rm) = get_insn_rm(frm, insn_rm) else {
-                todo!("{address:08x}:{word:08x} fcvt.s.lu illegal rounding mode (insn {insn_rm}, FPU {frm})");
-            };
+            let rm = get_rm(cpu, address, word);
 
             //eprintln!("Behold! {address:08x}:{word:08x} fcvt.s.lu f{}, x{} ({}, insn {insn_rm}, FPU {frm})",
             //          f.rd, f.rs1, cpu.x[f.rs1] as u64);
@@ -3506,8 +3502,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x18000053,
         name: "FDIV.S",
-        operation: |cpu, word, _address| {
+        operation: |cpu, word, address| {
             let f = parse_format_r(word);
+            let rm = get_rm(cpu, address, word);
+
             let dividend = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
             let divisor = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
             // Is this implementation correct?
@@ -3520,7 +3518,54 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 dividend / divisor
             };
+
+            eprintln!("{address:08x}:{word:08x} fdiv.s {dividend}, {divisor} -> {r} (rm {rm})");
+
             cpu.f[f.rd] = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from(r.to_bits()));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0xa0001053,
+        name: "FLT.S",
+        operation: |cpu, word, address| {
+
+            let f = parse_format_r(word);
+            let rm = get_rm(cpu, address, word);
+
+            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
+            let f2 = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(f1 < f2);
+            }
+
+            eprintln!("{address:08x}:{word:08x} flt.s {f1}, {f2} -> {} (rm {rm})", cpu.x[f.rd]);
+
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0xa0000053,
+        name: "FLE.S",
+        operation: |cpu, word, address| {
+
+            let f = parse_format_r(word);
+            let rm = get_rm(cpu, address, word);
+
+            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
+            let f2 = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(f1 <= f2);
+            }
+
+            eprintln!("{address:08x}:{word:08x} fle.s {f1}, {f2} -> {} (rm {rm})", cpu.x[f.rd]);
+
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3528,6 +3573,23 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
 ];
 
 // XXX We should give a proper Rust type for the rounding modes
+#[allow(clippy::cast_possible_truncation)]
+fn get_rm(cpu: &Cpu, address: u64, word: u32) -> u32 {
+    let insn_rm = (word >> 12) & 7;
+
+    // XXX The FP handling is terrible; we need to extract fflags and frm, but for now we suffer
+    let frm = (cpu.csr[CSR_FCSR_ADDRESS as usize] as u32 >> 5) & 7;
+    let Some(rm) = get_insn_rm(frm, insn_rm) else {
+        todo!("{address:08x}:{word:08x} illegal rounding mode (insn {insn_rm}, FPU {frm})");
+    };
+
+    if rm != 0 {
+        todo!("FP is barely correct for rounding mode nearest, probably worse for {rm}");
+    }
+
+    rm
+}
+
 const fn get_insn_rm(frm: u32, rm: u32) -> Option<u32> {
     let rm = if rm == 7 { frm } else { rm };
     if 5 <= rm {
@@ -3539,15 +3601,12 @@ const fn get_insn_rm(frm: u32, rm: u32) -> Option<u32> {
 
 // u64 -> f32
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn cvt_u64_sf32(a: i64, rm: u32) -> (f64, u32) {
+fn cvt_u64_sf32(a: i64, _rm: u32) -> (f64, u32) {
     // XXX The correct implementation, see
     // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
     // is quite involved and thus slow.  Here we take a horrible
     // shortcut that ignores rounding modes and flags!
 
-    if rm != 0 {
-        todo!("cvt_u64_sf32 is barely correct for rounding mode nearest, probably worse for {rm}");
-    }
     let f = a as u64 as f32;
     let f = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from(f.to_bits()));
     let fflags = 0;
