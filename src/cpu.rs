@@ -1227,10 +1227,9 @@ impl Cpu {
             }
         };
 
-        let mut s = format!("PC:{:016x} ", self.pc);
-        s += &format!("{original_word:08x} ");
-        s += &format!("{} ", inst.name);
-        s += &(inst.disassemble)(self, word, self.pc, true);
+        let mut s = String::new();
+        let _ = write!(s, "PC:{:016x} {original_word:08x} {} ", self.pc, inst.name);
+        (inst.disassemble)(&mut s, self, word, self.pc, true);
         s
     }
 
@@ -1250,7 +1249,7 @@ struct Instruction {
     data: u32, // @TODO: rename
     name: &'static str,
     operation: fn(cpu: &mut Cpu, word: u32, address: u64) -> Result<(), Trap>,
-    disassemble: fn(cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> String,
+    disassemble: fn(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool),
 }
 
 struct FormatB {
@@ -1277,19 +1276,17 @@ const fn parse_format_b(word: u32) -> FormatB {
     }
 }
 
-fn dump_format_b(cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> String {
+fn dump_format_b(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) {
     let f = parse_format_b(word);
-    let mut s = String::new();
-    s += get_register_name(f.rs1);
+    *s += get_register_name(f.rs1);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    s += &format!(",{}", get_register_name(f.rs2));
+    *s += get_register_name(f.rs2);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
-    s += &format!(",{:x}", address.wrapping_add(f.imm));
-    s
+    let _ = write!(s, ",{:x}", address.wrapping_add(f.imm));
 }
 
 struct FormatCSR {
@@ -1306,23 +1303,21 @@ const fn parse_format_csr(word: u32) -> FormatCSR {
     }
 }
 
-fn dump_format_csr(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_csr(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_csr(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
     // @TODO: Use CSR name
-    s += &format!(",{:x}", f.csr);
+    let _ = write!(s, ",{:x}", f.csr);
     if evaluate {
-        s += &format!(":{:x}", cpu.read_csr_raw(f.csr));
+        let _ = write!(s, ":{:x}", cpu.read_csr_raw(f.csr));
     }
-    s += &format!(",{}", get_register_name(f.rs));
+    *s += get_register_name(f.rs);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs]);
     }
-    s
 }
 
 struct FormatI {
@@ -1346,34 +1341,30 @@ const fn parse_format_i(word: u32) -> FormatI {
     }
 }
 
-fn dump_format_i(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_i(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_i(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    s += &format!(",{}", get_register_name(f.rs1));
+    *s += get_register_name(f.rs1);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    s += &format!(",{:x}", f.imm);
-    s
+    let _ = write!(s, ",{:x}", f.imm);
 }
 
-fn dump_format_i_mem(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_i_mem(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_i(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    s += &format!(",{:x}({}", f.imm, get_register_name(f.rs1));
+    let _ = write!(s, ",{:x}({}", f.imm, get_register_name(f.rs1));
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    s += ")";
-    s
+    *s += ")";
 }
 
 struct FormatJ {
@@ -1398,15 +1389,13 @@ const fn parse_format_j(word: u32) -> FormatJ {
     }
 }
 
-fn dump_format_j(cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> String {
+fn dump_format_j(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) {
     let f = parse_format_j(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    s += &format!(",{:x}", address.wrapping_add(f.imm));
-    s
+    let _ = write!(s, ",{:x}", address.wrapping_add(f.imm));
 }
 
 struct FormatR {
@@ -1423,22 +1412,20 @@ const fn parse_format_r(word: u32) -> FormatR {
     }
 }
 
-fn dump_format_r(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_r(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    s += &format!(",{}", get_register_name(f.rs1));
+    *s += get_register_name(f.rs1);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    s += &format!(",{}", get_register_name(f.rs2));
+    *s += get_register_name(f.rs2);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
-    s
 }
 
 // has rs3
@@ -1458,26 +1445,24 @@ const fn parse_format_r2(word: u32) -> FormatR2 {
     }
 }
 
-fn dump_format_r2(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_r2(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_r2(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    s += &format!(",{}", get_register_name(f.rs1));
+    *s += get_register_name(f.rs1);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    s += &format!(",{}", get_register_name(f.rs2));
+    *s += get_register_name(f.rs2);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
-    s += &format!(",{}", get_register_name(f.rs3));
+    let _ = write!(s, ",{}", get_register_name(f.rs3));
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs3]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs3]);
     }
-    s
 }
 
 struct FormatS {
@@ -1502,19 +1487,17 @@ const fn parse_format_s(word: u32) -> FormatS {
     }
 }
 
-fn dump_format_s(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_s(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
     let f = parse_format_s(word);
-    let mut s = String::new();
-    s += get_register_name(f.rs2);
+    *s += get_register_name(f.rs2);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
-    s += &format!(",{:x}({}", f.imm, get_register_name(f.rs1));
+    let _ = write!(s, ",{:x}({}", f.imm, get_register_name(f.rs1));
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    s += ")";
-    s
+    *s += ")";
 }
 
 struct FormatU {
@@ -1536,19 +1519,17 @@ const fn parse_format_u(word: u32) -> FormatU {
     }
 }
 
-fn dump_format_u(cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> String {
+fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool)  {
     let f = parse_format_u(word);
-    let mut s = String::new();
-    s += get_register_name(f.rd);
+    *s += get_register_name(f.rd);
     if evaluate {
-        s += &format!(":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    s += &format!(",{:x}", f.imm);
-    s
+    let _ = write!(s, ",{:x}", f.imm);
 }
 
-const fn dump_empty(_cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) -> String {
-    String::new()
+#[allow(clippy::ptr_arg)] // Clippy can't tell that we can't change the function type
+const fn dump_empty(_s: &mut String, _cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) {
 }
 
 fn get_register_name(num: usize) -> &'static str {
@@ -2649,19 +2630,17 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.x[f.rd] = tmp;
             Ok(())
         },
-        disassemble: |cpu, word, _address, evaluate| {
+        disassemble: |s, cpu, word, _address, evaluate| {
             let f = parse_format_i(word);
-            let mut s = String::new();
-            s += get_register_name(f.rd);
+            *s += get_register_name(f.rd);
             if evaluate {
-                s += &format!(":{:x}", cpu.x[f.rd]);
+                let _ = write!(s, ":{:x}", cpu.x[f.rd]);
             }
-            s += &format!(",{:x}({}", f.imm, get_register_name(f.rs1));
+            let _ = write!(s, ",{:x}({}", f.imm, get_register_name(f.rs1));
             if evaluate {
-                s += &format!(":{:x}", cpu.x[f.rs1]);
+                let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
             }
-            s += ")";
-            s
+            *s += ")";
         },
     },
     Instruction {
