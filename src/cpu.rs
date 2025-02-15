@@ -1590,7 +1590,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 120;
+const INSTRUCTION_NUM: usize = 123;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -3332,16 +3332,6 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0xffffffff,
-        data: 0x00200073,
-        name: "URET",
-        operation: |_cpu, _word, _address| {
-            // @TODO: Implement
-            panic!("URET instruction is not implemented yet.");
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xffffffff,
         data: 0x10500073,
         name: "WFI",
         operation: |cpu, _word, _address| {
@@ -3371,6 +3361,102 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             Ok(())
         },
         disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xa000302f,
+        name: "AMOMAX.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            let max = if cpu.x[f.rs2] >= tmp {
+                cpu.x[f.rs2]
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max as u64) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xa000202f,
+        name: "AMOMAX.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i32,
+                Err(e) => return Err(e),
+            };
+            let max = if cpu.x[f.rs2] as i32 >= tmp {
+                cpu.x[f.rs2] as i32
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max as u32) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = i64::from(tmp);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xc000302f,
+        name: "AMOMINU.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let min = if cpu.x[f.rs2] as u64 <= tmp {
+                cpu.x[f.rs2] as u64
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp as i64;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xc000202f,
+        name: "AMOMINU.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let min = if cpu.x[f.rs2] as u32 <= tmp {
+                cpu.x[f.rs2] as u32
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = i64::from(tmp as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
     },
 ];
 
