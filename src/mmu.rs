@@ -476,8 +476,8 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store32(&mut self, v_address: i64, value: u32) -> Result<(), Trap> {
-        self.store_bytes(v_address as u64, u64::from(value), 8)
+    pub fn store32(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
+        self.store_bytes(v_address as u64, value as u64, 4)
     }
 
     /// Loads a byte from main memory or peripheral devices depending on

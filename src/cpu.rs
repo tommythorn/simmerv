@@ -2673,7 +2673,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_s(word);
             cpu.mmu
-                .store32(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2] as u32)
+                .store32(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
         },
         disassemble: dump_format_s,
     },
