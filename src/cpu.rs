@@ -7,11 +7,12 @@
 // - Don't check for interrupts and advance MMU every cycle
 // - Make Xlen a type parameter
 
+mod fp;
 mod rvc;
-
 use crate::mmu::{AddressingMode, Mmu};
 use crate::terminal::Terminal;
 use fnv::{self, FnvHashMap};
+pub use fp::RoundingMode;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::fmt::Write as _;
@@ -69,10 +70,13 @@ const MIP_SSIP: u64 = 0x002;
 
 /// Emulates a RISC-V CPU core
 pub struct Cpu {
-    // using only lower 32bits of x, pc, and csr registers
-    // for 32-bit mode
+    // Alignment for the first two is deliberate
     x: [i64; 32],
-    f: [f64; 32],
+    f: [i64; 32],
+    frm: RoundingMode,
+    fflags: u8,
+    fs: u8,
+
     clock: u64,
     privilege_mode: PrivilegeMode,
     wfi: bool,
@@ -170,11 +174,15 @@ impl Cpu {
     #[must_use]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let mut cpu = Self {
+            x: [0; 32],
+            f: [0; 32],
+            frm: RoundingMode::RoundNearestEven,
+            fflags: 0,
+            fs: 1,
+
             clock: 0,
             privilege_mode: PrivilegeMode::Machine,
             wfi: false,
-            x: [0; 32],
-            f: [0.0; 32],
             pc: 0,
             csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
             mmu: Mmu::new(terminal),
@@ -549,7 +557,7 @@ impl Cpu {
         privilege as u8 <= get_privilege_encoding(self.privilege_mode)
     }
 
-    const fn read_csr(&self, address: u16) -> Result<u64, Trap> {
+    fn read_csr(&self, address: u16) -> Result<u64, Trap> {
         if self.has_csr_access_privilege(address) {
             Ok(self.read_csr_raw(address))
         } else {
@@ -583,10 +591,12 @@ impl Cpu {
     }
 
     // SSTATUS, SIE, and SIP are subsets of MSTATUS, MIE, and MIP
-    const fn read_csr_raw(&self, address: u16) -> u64 {
+    #[allow(clippy::cast_sign_loss)]
+    fn read_csr_raw(&self, address: u16) -> u64 {
         match address {
-            CSR_FFLAGS_ADDRESS => self.csr[CSR_FCSR_ADDRESS as usize] & 0x1f,
-            CSR_FRM_ADDRESS => (self.csr[CSR_FCSR_ADDRESS as usize] >> 5) & 7,
+            CSR_FFLAGS_ADDRESS => u64::from(self.read_fflags()), // XXX exception if fs == 0
+            CSR_FRM_ADDRESS => self.read_frm() as u64,           // XXX exception if fs == 0
+            CSR_FCSR_ADDRESS => self.read_fcsr() as u64,         // XXX exception if fs == 0
             CSR_SSTATUS_ADDRESS => self.csr[CSR_MSTATUS_ADDRESS as usize] & 0x8000_0003_000d_e162,
             CSR_SIE_ADDRESS => self.csr[CSR_MIE_ADDRESS as usize] & 0x222,
             CSR_SIP_ADDRESS => self.csr[CSR_MIP_ADDRESS as usize] & 0x222,
@@ -596,15 +606,13 @@ impl Cpu {
     }
 
     fn write_csr_raw(&mut self, address: u16, value: u64) {
+        // XXX exception if fs == 0 for fflags, frm, fcsr
         match address {
-            CSR_FFLAGS_ADDRESS => {
-                self.csr[CSR_FCSR_ADDRESS as usize] &= !0x1f;
-                self.csr[CSR_FCSR_ADDRESS as usize] |= value & 0x1f;
-            }
-            CSR_FRM_ADDRESS => {
-                self.csr[CSR_FCSR_ADDRESS as usize] &= !0xe0;
-                self.csr[CSR_FCSR_ADDRESS as usize] |= (value << 5) & 0xe0;
-            }
+            CSR_FFLAGS_ADDRESS => self.write_fflags((value & 0xFF) as u8),
+            CSR_FRM_ADDRESS => self.write_frm(
+                FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
+            ), // XXX exception?
+            CSR_FCSR_ADDRESS => self.write_fcsr(value as i64),
             CSR_SSTATUS_ADDRESS => {
                 self.csr[CSR_MSTATUS_ADDRESS as usize] &= !0x8000_0003_000d_e162;
                 self.csr[CSR_MSTATUS_ADDRESS as usize] |= value & 0x8000_0003_000d_e162;
@@ -637,23 +645,23 @@ impl Cpu {
     }
 
     fn _set_fcsr_nv(&mut self) {
-        self.csr[CSR_FCSR_ADDRESS as usize] |= 0x10;
+        self.add_to_fflags(0x10);
     }
 
     fn set_fcsr_dz(&mut self) {
-        self.csr[CSR_FCSR_ADDRESS as usize] |= 0x8;
+        self.add_to_fflags(8);
     }
 
     fn _set_fcsr_of(&mut self) {
-        self.csr[CSR_FCSR_ADDRESS as usize] |= 0x4;
+        self.add_to_fflags(4);
     }
 
     fn _set_fcsr_uf(&mut self) {
-        self.csr[CSR_FCSR_ADDRESS as usize] |= 0x2;
+        self.add_to_fflags(2);
     }
 
     fn _set_fcsr_nx(&mut self) {
-        self.csr[CSR_FCSR_ADDRESS as usize] |= 0x1;
+        self.add_to_fflags(1);
     }
 
     fn update_addressing_mode(&mut self, value: u64) {
@@ -1241,6 +1249,79 @@ impl Cpu {
     /// Returns mutable `Terminal`
     pub fn get_mut_terminal(&mut self) -> &mut Box<dyn Terminal> {
         self.mmu.get_mut_uart().get_mut_terminal()
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn read_f32(&self, r: usize) -> f32 {
+        assert_ne!(self.fs, 0);
+        f32::from_bits(self.f[r] as u32)
+    }
+
+    fn write_f32(&mut self, r: usize, f: f32) {
+        assert_ne!(self.fs, 0);
+        self.f[r] = fp::NAN_BOX_F32 | i64::from(f.to_bits());
+        self.fs = 3;
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn read_f64(&self, r: usize) -> f64 {
+        assert_ne!(self.fs, 0);
+        f64::from_bits(self.f[r] as u64)
+    }
+
+    fn write_f64(&mut self, r: usize, f: f64) {
+        assert_ne!(self.fs, 0);
+        self.f[r] = f.to_bits() as i64;
+        self.fs = 3;
+    }
+
+    fn read_frm(&self) -> RoundingMode {
+        assert_ne!(self.fs, 0);
+        self.frm
+    }
+
+    fn write_frm(&mut self, frm: RoundingMode) {
+        assert_ne!(self.fs, 0);
+        self.frm = frm;
+    }
+
+    fn read_fflags(&self) -> u8 {
+        assert_ne!(self.fs, 0);
+        self.fflags
+    }
+
+    fn write_fflags(&mut self, fflags: u8) {
+        assert_ne!(self.fs, 0);
+        self.fflags = fflags;
+    }
+
+    fn add_to_fflags(&mut self, fflags: u8) {
+        assert_ne!(self.fs, 0);
+        self.fflags |= fflags;
+    }
+
+    fn read_fcsr(&self) -> i64 {
+        assert_ne!(self.fs, 0);
+        i64::from(self.fflags) | (self.frm as i64) << 5
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn write_fcsr(&mut self, v: i64) {
+        assert_ne!(self.fs, 0);
+        let frm = (v >> 5) & 7;
+        let Some(frm) = FromPrimitive::from_i64(frm) else {
+            todo!("What is the appropriate behavior on illegal values?");
+        };
+        self.fflags = (v & 31) as u8;
+        self.frm = frm;
+    }
+
+    fn get_insn_rm(&self, insn_rm_field: u32) -> Option<RoundingMode> {
+        if insn_rm_field == 7 {
+            Some(self.frm)
+        } else {
+            FromPrimitive::from_u32(insn_rm_field)
+        }
     }
 }
 
@@ -2278,9 +2359,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FADD.S",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
-            let f2 = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
-            cpu.f[f.rd] = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from((f1 + f2).to_bits()));
+            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) + cpu.read_f32(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2291,7 +2370,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.L",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.x[f.rs1] as f64;
+            cpu.write_f64(f.rd, cpu.x[f.rs1] as f64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2302,8 +2381,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.S",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            // Is this implementation correct?
-            cpu.f[f.rd] = f64::from(f32::from_bits(cpu.f[f.rs1].to_bits() as u32));
+            cpu.write_f64(f.rd, f64::from(cpu.read_f32(f.rs1)));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2314,7 +2392,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.W",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = f64::from(cpu.x[f.rs1] as i32);
+            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2325,7 +2403,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.WU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = f64::from(cpu.x[f.rs1] as u32);
+            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2336,8 +2414,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            // Is this implementation correct?
-            cpu.f[f.rd] = f64::from(cpu.f[f.rs1] as f32);
+            cpu.write_f32(f.rd, cpu.read_f64(f.rs1) as f32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2360,18 +2437,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FDIV.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let dividend = cpu.f[f.rs1];
-            let divisor = cpu.f[f.rs2];
+            let dividend = cpu.read_f64(f.rs1);
+            let divisor = cpu.read_f64(f.rs2);
             // Is this implementation correct?
-            if divisor == 0.0 {
-                cpu.f[f.rd] = f64::INFINITY;
+            let r = if divisor == 0.0 {
                 cpu.set_fcsr_dz();
+                f64::INFINITY
             } else if divisor == -0.0 {
-                cpu.f[f.rd] = f64::NEG_INFINITY;
                 cpu.set_fcsr_dz();
+                f64::NEG_INFINITY
             } else {
-                cpu.f[f.rd] = dividend / divisor;
-            }
+                dividend / divisor
+            };
+            cpu.write_f64(f.rd, r);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2403,7 +2481,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
 
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] == cpu.f[f.rs2]);
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) == cpu.read_f64(f.rs2));
             Ok(())
         },
         disassemble: dump_empty,
@@ -2414,13 +2492,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLD",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.f[f.rd] = match cpu
-                .mmu
-                .load_doubleword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
-            {
-                Ok(data) => f64::from_bits(data),
-                Err(e) => return Err(e),
-            };
+            // FP load/stores loads *bits* thus doesn't pass through f32/f64
+            // XXX This really should be `cpu.f[f.rd] = cpu.mmu.ld64(cpu.load_ea(f))?;`
+            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))?;
             Ok(())
         },
         disassemble: dump_format_i,
@@ -2453,10 +2527,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLW",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.f[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => f64::from_bits(i64::from(data as i32) as u64),
-                Err(e) => return Err(e),
-            };
+            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -2466,9 +2537,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0x02000043,
         name: "FMADD.D",
         operation: |cpu, word, _address| {
-            // @TODO: Update fcsr if needed?
             let f = parse_format_r2(word);
-            cpu.f[f.rd] = cpu.f[f.rs1].mul_add(cpu.f[f.rs2], cpu.f[f.rs3]);
+            // XXX Update fflags
+            cpu.write_f64(
+                f.rd,
+                cpu.read_f64(f.rs1)
+                    .mul_add(cpu.read_f64(f.rs2), cpu.read_f64(f.rs3)),
+            );
             Ok(())
         },
         disassemble: dump_format_r2,
@@ -2491,7 +2566,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.D.X",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = f64::from_bits(cpu.x[f.rs1] as u64);
+            cpu.write_f64(f.rd, f64::from_bits(cpu.x[f.rs1] as u64));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2502,7 +2577,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.X.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.f[f.rs1].to_bits() as i64;
+            cpu.x[f.rd] = cpu.f[f.rs1] as i64;
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2513,7 +2588,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.X.W",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1].to_bits() as i32);
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2524,7 +2599,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.W.X",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.f[f.rd] = f64::from_bits(u64::from(cpu.x[f.rs1] as u32));
+            cpu.f[f.rd] = fp::NAN_BOX_F32 | cpu.x[f.rs1];
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2546,10 +2621,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSD",
         operation: |cpu, word, _address| {
             let f = parse_format_s(word);
-            cpu.mmu.store_doubleword(
-                cpu.x[f.rs1].wrapping_add(f.imm) as u64,
-                cpu.f[f.rs2].to_bits(),
-            )
+            cpu.mmu
+                .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
         },
         disassemble: dump_format_s,
     },
@@ -2559,10 +2632,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJ.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let rs1_bits = cpu.f[f.rs1].to_bits();
-            let rs2_bits = cpu.f[f.rs2].to_bits();
-            let sign_bit = rs2_bits & 0x8000000000000000;
-            cpu.f[f.rd] = f64::from_bits(sign_bit | (rs1_bits & 0x7fffffffffffffff));
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
+            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2573,10 +2646,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJX.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let rs1_bits = cpu.f[f.rs1].to_bits();
-            let rs2_bits = cpu.f[f.rs2].to_bits();
-            let sign_bit = (rs1_bits ^ rs2_bits) & 0x8000000000000000;
-            cpu.f[f.rd] = f64::from_bits(sign_bit | (rs1_bits & 0x7fffffffffffffff));
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = (rs1_bits ^ rs2_bits) & (0x8000000000000000u64 as i64);
+            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2599,10 +2672,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSW",
         operation: |cpu, word, _address| {
             let f = parse_format_s(word);
-            cpu.mmu.store_word(
-                cpu.x[f.rs1].wrapping_add(f.imm) as u64,
-                cpu.f[f.rs2].to_bits() as u32,
-            )
+            cpu.mmu
+                .store32(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2] as u32)
         },
         disassemble: dump_format_s,
     },
@@ -3464,13 +3535,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let rm = get_rm(cpu, address, word);
 
-            //eprintln!("Behold! {address:08x}:{word:08x} fcvt.s.lu f{}, x{} ({}, insn {insn_rm}, FPU {frm})",
-            //          f.rd, f.rs1, cpu.x[f.rs1] as u64);
-
             let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], rm);
 
             cpu.f[f.rd] = r;
-            cpu.csr[CSR_FCSR_ADDRESS as usize] |= u64::from(fflags); // FP flags are accumulative
+            cpu.add_to_fflags(fflags);
 
             Ok(())
         },
@@ -3480,12 +3548,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x18000053,
         name: "FDIV.S",
-        operation: |cpu, word, address| {
+        operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let rm = get_rm(cpu, address, word);
+            //let rm = get_rm(cpu, address, word);
 
-            let dividend = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
-            let divisor = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+            let dividend = cpu.read_f32(f.rs1);
+            let divisor = cpu.read_f32(f.rs2);
             // Is this implementation correct?
             let r = if divisor == 0.0 {
                 cpu.set_fcsr_dz();
@@ -3497,9 +3565,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 dividend / divisor
             };
 
-            eprintln!("{address:08x}:{word:08x} fdiv.s {dividend}, {divisor} -> {r} (rm {rm})");
-
-            cpu.f[f.rd] = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from(r.to_bits()));
+            cpu.write_f32(f.rd, r);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3508,21 +3574,16 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa0001053,
         name: "FLT.S",
-        operation: |cpu, word, address| {
+        operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let rm = get_rm(cpu, address, word);
+            //let rm = get_rm(cpu, address, word);
 
-            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
-            let f2 = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+            let f1 = cpu.read_f32(f.rs1);
+            let f2 = cpu.read_f32(f.rs2);
 
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(f1 < f2);
             }
-
-            eprintln!(
-                "{address:08x}:{word:08x} flt.s {f1}, {f2} -> {} (rm {rm})",
-                cpu.x[f.rd]
-            );
 
             Ok(())
         },
@@ -3532,21 +3593,16 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa0000053,
         name: "FLE.S",
-        operation: |cpu, word, address| {
+        operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let rm = get_rm(cpu, address, word);
+            //let rm = get_rm(cpu, address, word);
 
-            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
-            let f2 = f32::from_bits(cpu.f[f.rs2].to_bits() as u32);
+            let f1 = cpu.read_f32(f.rs1);
+            let f2 = cpu.read_f32(f.rs2);
 
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(f1 <= f2);
             }
-
-            eprintln!(
-                "{address:08x}:{word:08x} fle.s {f1}, {f2} -> {} (rm {rm})",
-                cpu.x[f.rd]
-            );
 
             Ok(())
         },
@@ -3556,16 +3612,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc0300053,
         name: "FCVT.LU.S",
-        operation: |cpu, word, address| {
+        operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let rm = get_rm(cpu, address, word);
+            //let rm = get_rm(cpu, address, word);
 
-            let f1 = f32::from_bits(cpu.f[f.rs1].to_bits() as u32);
-
-            eprintln!(
-                "{address:08x}:{word:08x} fcvt.lu.s x{}, f{}={} (rm {rm})",
-                f.rd, f.rs1, f1
-            );
+            let f1 = cpu.read_f32(f.rs1);
 
             // XXX Picture an accurate implementation here and pay no attention to this
             let r = f1 as u64;
@@ -3582,43 +3633,32 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
 
 // XXX We should give a proper Rust type for the rounding modes
 #[allow(clippy::cast_possible_truncation)]
-fn get_rm(cpu: &Cpu, address: u64, word: u32) -> u32 {
+fn get_rm(cpu: &Cpu, address: u64, word: u32) -> RoundingMode {
     let insn_rm = (word >> 12) & 7;
 
     // XXX The FP handling is terrible; we need to extract fflags and frm, but for now we suffer
-    let frm = (cpu.csr[CSR_FCSR_ADDRESS as usize] as u32 >> 5) & 7;
-    let Some(rm) = get_insn_rm(frm, insn_rm) else {
-        todo!("{address:08x}:{word:08x} illegal rounding mode (insn {insn_rm}, FPU {frm})");
+    let frm = cpu.frm;
+    let Some(rm) = cpu.get_insn_rm(insn_rm) else {
+        todo!("{address:08x}:{word:08x} illegal rounding mode (insn {insn_rm}, FPU {frm:?})");
     };
 
-    if rm != 0 {
-        todo!("FP is barely correct for rounding mode nearest, probably worse for {rm}");
+    if rm != RoundingMode::RoundNearestEven {
+        todo!("FP is barely correct for rounding mode nearest, probably worse for {rm:?}");
     }
 
     rm
 }
 
-const fn get_insn_rm(frm: u32, rm: u32) -> Option<u32> {
-    let rm = if rm == 7 { frm } else { rm };
-    if 5 <= rm {
-        None
-    } else {
-        Some(rm)
-    }
-}
-
 // u64 -> f32
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn cvt_u64_sf32(a: i64, _rm: u32) -> (f64, u32) {
+fn cvt_u64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
     // XXX The correct implementation, see
     // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
     // is quite involved and thus slow.  Here we take a horrible
     // shortcut that ignores rounding modes and flags!
 
     let f = a as u64 as f32;
-    let f = f64::from_bits(0xFFFF_FFFF_0000_0000 | u64::from(f.to_bits()));
-    let fflags = 0;
-    (f, fflags)
+    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
 }
 
 /// The number of results [`DecodeCache`](struct.DecodeCache.html) holds.

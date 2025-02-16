@@ -351,6 +351,19 @@ impl Mmu {
         }
     }
 
+    /// Loads eight bytes as i64. This method takes virtual address and translates
+    /// into physical address inside.
+    ///
+    /// # Arguments
+    /// * `v_address` Virtual address
+    /// # Errors
+    /// Exceptions are returned as errors
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    pub fn load64(&mut self, v_address: i64) -> Result<i64, Trap> {
+        // XXX All addresses should be i64
+        Ok(self.load_bytes(v_address as u64, 8)? as i64)
+    }
+
     /// Store an byte. This method takes virtual address and translates
     /// into physical address inside.
     ///
@@ -451,6 +464,20 @@ impl Mmu {
     /// Exceptions are returned as errors
     pub fn store_doubleword(&mut self, v_address: u64, value: u64) -> Result<(), Trap> {
         self.store_bytes(v_address, value, 8)
+    }
+
+    /// # Errors
+    /// Exceptions are returned as errors
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn store64(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
+        self.store_bytes(v_address as u64, value as u64, 8)
+    }
+
+    /// # Errors
+    /// Exceptions are returned as errors
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn store32(&mut self, v_address: i64, value: u32) -> Result<(), Trap> {
+        self.store_bytes(v_address as u64, u64::from(value), 8)
     }
 
     /// Loads a byte from main memory or peripheral devices depending on
