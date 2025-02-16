@@ -1650,7 +1650,7 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 130;
+const INSTRUCTION_NUM: usize = 131;
 
 // @TODO: Reorder in often used order as
 #[allow(
@@ -2553,9 +2553,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0x12000053,
         name: "FMUL.D",
         operation: |cpu, word, _address| {
-            // @TODO: Update fcsr if needed?
+            // @TODO: Update fcsr
             let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.f[f.rs1] * cpu.f[f.rs2];
+            cpu.write_f64(f.rd, cpu.read_f64(f.rs1) * cpu.read_f64(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3625,6 +3625,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             }
             //cpu.csr[CSR_FCSR_ADDRESS as usize] |= u64::from(fflags); // FP flags are accumulative
 
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x10000053,
+        name: "FMUL.S",
+        operation: |cpu, word, _address| {
+            // @TODO: Update fcsr
+            let f = parse_format_r(word);
+            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) * cpu.read_f32(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
