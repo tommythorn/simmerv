@@ -2566,7 +2566,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.D.X",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.write_f64(f.rd, f64::from_bits(cpu.x[f.rs1] as u64));
+            cpu.f[f.rd] = cpu.x[f.rs1];
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2577,7 +2577,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.X.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.f[f.rs1] as i64;
+            cpu.x[f.rd] = cpu.f[f.rs1];
             Ok(())
         },
         disassemble: dump_format_r,
