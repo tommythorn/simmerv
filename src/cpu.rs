@@ -1366,7 +1366,7 @@ fn dump_format_b(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluat
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    *s += get_register_name(f.rs2);
+    let _ = write!(s, ",{}", get_register_name(f.rs2));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
@@ -1398,7 +1398,7 @@ fn dump_format_csr(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, eval
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.read_csr_raw(f.csr));
     }
-    *s += get_register_name(f.rs);
+    let _ = write!(s, ",{}", get_register_name(f.rs));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs]);
     }
@@ -1431,7 +1431,7 @@ fn dump_format_i(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    *s += get_register_name(f.rs1);
+    let _ = write!(s, ",{}", get_register_name(f.rs1));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
@@ -1509,7 +1509,7 @@ fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    *s += get_register_name(f.rs2);
+    let _ = write!(s, ",{}", get_register_name(f.rs2));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
@@ -1538,11 +1538,11 @@ fn dump_format_r2(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalu
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    *s += get_register_name(f.rs1);
+    let _ = write!(s, ",{}", get_register_name(f.rs1));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
-    *s += get_register_name(f.rs2);
+    let _ = write!(s, ",{}", get_register_name(f.rs2));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
