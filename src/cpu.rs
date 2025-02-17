@@ -1656,9 +1656,8 @@ fn get_register_name(num: usize) -> &'static str {
     }
 }
 
-const INSTRUCTION_NUM: usize = 132;
+const INSTRUCTION_NUM: usize = 162;
 
-// @TODO: Reorder in often used order as
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -1666,384 +1665,17 @@ const INSTRUCTION_NUM: usize = 132;
     clippy::float_cmp
 )]
 const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
+    // RV32I
     Instruction {
-        mask: 0xfe00707f,
-        data: 0x00000033,
-        name: "ADD",
+        mask: 0x0000007f,
+        data: 0x00000037,
+        name: "LUI",
         operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
+            let f = parse_format_u(word);
+            cpu.x[f.rd] = f.imm as i64;
             Ok(())
         },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00000013,
-        name: "ADDI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
-            Ok(())
-        },
-        disassemble: dump_format_i,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x0000001b,
-        name: "ADDIW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(f.imm) as i32);
-            Ok(())
-        },
-        disassemble: dump_format_i,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x0000003b,
-        name: "ADDW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]) as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x0000302f,
-        name: "AMOADD.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u64)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x0000202f,
-        name: "AMOADD.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => i64::from(data as i32),
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u32)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x2000302f,
-        name: "AMOXOR.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64 ^ tmp)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp as i64;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x2000202f,
-        name: "AMOXOR.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32 ^ tmp)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = i64::from(tmp as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x6000302f,
-        name: "AMOAND.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u64)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x6000202f,
-        name: "AMOAND.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => i64::from(data as i32),
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_word(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u32)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x8000302f,
-        name: "AMOMIN.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let min = if cpu.x[f.rs2] < tmp {
-                cpu.x[f.rs2]
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x8000202f,
-        name: "AMOMIN.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i32,
-                Err(e) => return Err(e),
-            };
-            let min = if (cpu.x[f.rs2] as i32) < tmp {
-                cpu.x[f.rs2] as i32
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min as u32) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = i64::from(tmp);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0xe000302f,
-        name: "AMOMAXU.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            let max = if cpu.x[f.rs2] as u64 >= tmp {
-                cpu.x[f.rs2] as u64
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp as i64;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0xe000202f,
-        name: "AMOMAXU.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            let max = if cpu.x[f.rs2] as u32 >= tmp {
-                cpu.x[f.rs2] as u32
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = i64::from(tmp as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x4000302f,
-        name: "AMOOR.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u64)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x4000202f,
-        name: "AMOOR.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => i64::from(data as i32),
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_word(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u32)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x0800302f,
-        name: "AMOSWAP.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            match cpu
-                .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
-            {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0x0800202f,
-        name: "AMOSWAP.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => i64::from(data as i32),
-                Err(e) => return Err(e),
-            };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x00007033,
-        name: "AND",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] & cpu.x[f.rs2];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00007013,
-        name: "ANDI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] & f.imm;
-            Ok(())
-        },
-        disassemble: dump_format_i,
+        disassemble: dump_format_u,
     },
     Instruction {
         mask: 0x0000007f,
@@ -2055,633 +1687,6 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             Ok(())
         },
         disassemble: dump_format_u,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00000063,
-        name: "BEQ",
-        operation: |cpu, word, address| {
-            let f = parse_format_b(word);
-            if cpu.x[f.rs1] == cpu.x[f.rs2] {
-                cpu.pc = address.wrapping_add(f.imm);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_b,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00005063,
-        name: "BGE",
-        operation: |cpu, word, address| {
-            let f = parse_format_b(word);
-            if cpu.x[f.rs1] >= cpu.x[f.rs2] {
-                cpu.pc = address.wrapping_add(f.imm);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_b,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00007063,
-        name: "BGEU",
-        operation: |cpu, word, address| {
-            let f = parse_format_b(word);
-            if unsigned_data(cpu.x[f.rs1]) >= unsigned_data(cpu.x[f.rs2]) {
-                cpu.pc = address.wrapping_add(f.imm);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_b,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00004063,
-        name: "BLT",
-        operation: |cpu, word, address| {
-            let f = parse_format_b(word);
-            if cpu.x[f.rs1] < cpu.x[f.rs2] {
-                cpu.pc = address.wrapping_add(f.imm);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_b,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00006063,
-        name: "BLTU",
-        operation: |cpu, word, address| {
-            let f = parse_format_b(word);
-            if unsigned_data(cpu.x[f.rs1]) < unsigned_data(cpu.x[f.rs2]) {
-                cpu.pc = address.wrapping_add(f.imm);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_b,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00001063,
-        name: "BNE",
-        operation: |cpu, word, address| {
-            let f = parse_format_b(word);
-            if cpu.x[f.rs1] != cpu.x[f.rs2] {
-                cpu.pc = address.wrapping_add(f.imm);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_b,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00003073,
-        name: "CSRRC",
-        operation: |cpu, word, _address| {
-            let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
-        },
-        disassemble: dump_format_csr,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00007073,
-        name: "CSRRCI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
-        },
-        disassemble: dump_format_csr,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00002073,
-        name: "CSRRS",
-        operation: |cpu, word, _address| {
-            let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, unsigned_data(cpu.x[f.rd] | tmp)) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
-        },
-        disassemble: dump_format_csr,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00006073,
-        name: "CSRRSI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, unsigned_data(cpu.x[f.rd] | (f.rs as i64))) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
-        },
-        disassemble: dump_format_csr,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00001073,
-        name: "CSRRW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, unsigned_data(tmp)) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
-        },
-        disassemble: dump_format_csr,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00005073,
-        name: "CSRRWI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, f.rs as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
-        },
-        disassemble: dump_format_csr,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x02004033,
-        name: "DIV",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1];
-            let divisor = cpu.x[f.rs2];
-            if divisor == 0 {
-                cpu.x[f.rd] = -1;
-            } else if dividend == i64::MIN && divisor == -1 {
-                cpu.x[f.rd] = dividend;
-            } else {
-                cpu.x[f.rd] = dividend.wrapping_div(divisor);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x02005033,
-        name: "DIVU",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let dividend = unsigned_data(cpu.x[f.rs1]);
-            let divisor = unsigned_data(cpu.x[f.rs2]);
-            if divisor == 0 {
-                cpu.x[f.rd] = -1;
-            } else {
-                cpu.x[f.rd] = dividend.wrapping_div(divisor) as i64;
-            }
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x0200503b,
-        name: "DIVUW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let dividend = unsigned_data(cpu.x[f.rs1]) as u32;
-            let divisor = unsigned_data(cpu.x[f.rs2]) as u32;
-            if divisor == 0 {
-                cpu.x[f.rd] = -1;
-            } else {
-                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x0200403b,
-        name: "DIVW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as i32;
-            let divisor = cpu.x[f.rs2] as i32;
-            if divisor == 0 {
-                cpu.x[f.rd] = -1;
-            } else if dividend == i32::MIN && divisor == -1 {
-                cpu.x[f.rd] = i64::from(dividend as i32);
-            } else {
-                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xffffffff,
-        data: 0x00100073,
-        name: "EBREAK",
-        operation: |_cpu, _word, _address| todo!("Handling ebreak requires handling debug mode"),
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xffffffff,
-        data: 0x00000073,
-        name: "ECALL",
-        operation: |cpu, _word, address| {
-            let exception_type = match cpu.privilege_mode {
-                PrivilegeMode::User => TrapType::EnvironmentCallFromUMode,
-                PrivilegeMode::Supervisor => TrapType::EnvironmentCallFromSMode,
-                PrivilegeMode::Machine => TrapType::EnvironmentCallFromMMode,
-                PrivilegeMode::Reserved => panic!("Unknown Privilege mode"),
-            };
-            Err(Trap {
-                trap_type: exception_type,
-                value: address,
-            })
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x02000053,
-        name: "FADD.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.f[f.rs1] + cpu.f[f.rs2];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x00000053,
-        name: "FADD.S",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) + cpu.read_f32(f.rs2));
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xd2200053,
-        name: "FCVT.D.L",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.write_f64(f.rd, cpu.x[f.rs1] as f64);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0x42000053,
-        name: "FCVT.D.S",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.write_f64(f.rd, f64::from(cpu.read_f32(f.rs1)));
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xd2000053,
-        name: "FCVT.D.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as i32));
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xd2100053,
-        name: "FCVT.D.WU",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as u32));
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0x40100053,
-        name: "FCVT.S.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.write_f32(f.rd, cpu.read_f64(f.rs1) as f32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xc2000053,
-        name: "FCVT.W.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            // Is this implementation correct?
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as u32 as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x1a000053,
-        name: "FDIV.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let dividend = cpu.read_f64(f.rs1);
-            let divisor = cpu.read_f64(f.rs2);
-            // Is this implementation correct?
-            let r = if divisor == 0.0 {
-                cpu.set_fcsr_dz();
-                f64::INFINITY
-            } else if divisor == -0.0 {
-                cpu.set_fcsr_dz();
-                f64::NEG_INFINITY
-            } else {
-                dividend / divisor
-            };
-            cpu.write_f64(f.rd, r);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x0000000f,
-        name: "FENCE",
-        operation: |_cpu, _word, _address| {
-            // Do nothing?
-            Ok(())
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x0000100f,
-        name: "FENCE.I",
-        operation: |_cpu, _word, _address| {
-            // Do nothing?
-            Ok(())
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0xa2002053,
-        name: "FEQ.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-
-            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) == cpu.read_f64(f.rs2));
-            Ok(())
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00003007,
-        name: "FLD",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            // FP load/stores loads *bits* thus doesn't pass through f32/f64
-            // XXX This really should be `cpu.f[f.rd] = cpu.mmu.ld64(cpu.load_ea(f))?;`
-            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))?;
-            Ok(())
-        },
-        disassemble: dump_format_i,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0xa2000053,
-        name: "FLE.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] <= cpu.f[f.rs2]);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0xa2001053,
-        name: "FLT.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] < cpu.f[f.rs2]);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00002007,
-        name: "FLW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
-            Ok(())
-        },
-        disassemble: dump_format_i_mem,
-    },
-    Instruction {
-        mask: 0x0600007f,
-        data: 0x02000043,
-        name: "FMADD.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r2(word);
-            // XXX Update fflags
-            cpu.write_f64(
-                f.rd,
-                cpu.read_f64(f.rs1)
-                    .mul_add(cpu.read_f64(f.rs2), cpu.read_f64(f.rs3)),
-            );
-            Ok(())
-        },
-        disassemble: dump_format_r2,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x12000053,
-        name: "FMUL.D",
-        operation: |cpu, word, _address| {
-            // @TODO: Update fcsr
-            let f = parse_format_r(word);
-            cpu.write_f64(f.rd, cpu.read_f64(f.rs1) * cpu.read_f64(f.rs2));
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0707f,
-        data: 0xf2000053,
-        name: "FMV.D.X",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.x[f.rs1];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0707f,
-        data: 0xe2000053,
-        name: "FMV.X.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.f[f.rs1];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0707f,
-        data: 0xe0000053,
-        name: "FMV.X.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0707f,
-        data: 0xf0000053,
-        name: "FMV.W.X",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.f[f.rd] = fp::NAN_BOX_F32 | cpu.x[f.rs1];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0600007f,
-        data: 0x0200004b,
-        name: "FNMSUB.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r2(word);
-            cpu.f[f.rd] = -(cpu.f[f.rs1] * cpu.f[f.rs2]) + cpu.f[f.rs3];
-            Ok(())
-        },
-        disassemble: dump_format_r2,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00003027,
-        name: "FSD",
-        operation: |cpu, word, _address| {
-            let f = parse_format_s(word);
-            cpu.mmu
-                .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
-        },
-        disassemble: dump_format_s,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x22000053,
-        name: "FSGNJ.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let rs1_bits = cpu.f[f.rs1];
-            let rs2_bits = cpu.f[f.rs2];
-            let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
-            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x22002053,
-        name: "FSGNJX.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let rs1_bits = cpu.f[f.rs1];
-            let rs2_bits = cpu.f[f.rs2];
-            let sign_bit = (rs1_bits ^ rs2_bits) & (0x8000000000000000u64 as i64);
-            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x0a000053,
-        name: "FSUB.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            // @TODO: Update fcsr if needed?
-            cpu.f[f.rd] = cpu.f[f.rs1] - cpu.f[f.rs2];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00002027,
-        name: "FSW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_s(word);
-            cpu.mmu
-                .store32(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
-        },
-        disassemble: dump_format_s,
     },
     Instruction {
         mask: 0x0000007f,
@@ -2721,6 +1726,84 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0x0000707f,
+        data: 0x00000063,
+        name: "BEQ",
+        operation: |cpu, word, address| {
+            let f = parse_format_b(word);
+            if cpu.x[f.rs1] == cpu.x[f.rs2] {
+                cpu.pc = address.wrapping_add(f.imm);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_b,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00001063,
+        name: "BNE",
+        operation: |cpu, word, address| {
+            let f = parse_format_b(word);
+            if cpu.x[f.rs1] != cpu.x[f.rs2] {
+                cpu.pc = address.wrapping_add(f.imm);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_b,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00004063,
+        name: "BLT",
+        operation: |cpu, word, address| {
+            let f = parse_format_b(word);
+            if cpu.x[f.rs1] < cpu.x[f.rs2] {
+                cpu.pc = address.wrapping_add(f.imm);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_b,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00005063,
+        name: "BGE",
+        operation: |cpu, word, address| {
+            let f = parse_format_b(word);
+            if cpu.x[f.rs1] >= cpu.x[f.rs2] {
+                cpu.pc = address.wrapping_add(f.imm);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_b,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00006063,
+        name: "BLTU",
+        operation: |cpu, word, address| {
+            let f = parse_format_b(word);
+            if unsigned_data(cpu.x[f.rs1]) < unsigned_data(cpu.x[f.rs2]) {
+                cpu.pc = address.wrapping_add(f.imm);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_b,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00007063,
+        name: "BGEU",
+        operation: |cpu, word, address| {
+            let f = parse_format_b(word);
+            if unsigned_data(cpu.x[f.rs1]) >= unsigned_data(cpu.x[f.rs2]) {
+                cpu.pc = address.wrapping_add(f.imm);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_b,
+    },
+    Instruction {
+        mask: 0x0000707f,
         data: 0x00000003,
         name: "LB",
         operation: |cpu, word, _address| {
@@ -2735,11 +1818,333 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0x0000707f,
+        data: 0x00001003,
+        name: "LH",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = match cpu
+                .mmu
+                .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
+            {
+                Ok(data) => i64::from(data as i16),
+                Err(e) => return Err(e),
+            };
+            Ok(())
+        },
+        disassemble: dump_format_i_mem,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00002003,
+        name: "LW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
+                Ok(data) => i64::from(data as i32),
+                Err(e) => return Err(e),
+            };
+            Ok(())
+        },
+        disassemble: dump_format_i_mem,
+    },
+    Instruction {
+        mask: 0x0000707f,
         data: 0x00004003,
         name: "LBU",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = match cpu.mmu.load(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
+                Ok(data) => i64::from(data),
+                Err(e) => return Err(e),
+            };
+            Ok(())
+        },
+        disassemble: dump_format_i_mem,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00005003,
+        name: "LHU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = match cpu
+                .mmu
+                .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
+            {
+                Ok(data) => i64::from(data),
+                Err(e) => return Err(e),
+            };
+            Ok(())
+        },
+        disassemble: dump_format_i_mem,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00000023,
+        name: "SB",
+        operation: |cpu, word, _address| {
+            let f = parse_format_s(word);
+            cpu.mmu
+                .store(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u8)
+        },
+        disassemble: dump_format_s,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00001023,
+        name: "SH",
+        operation: |cpu, word, _address| {
+            let f = parse_format_s(word);
+            cpu.mmu
+                .store_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u16)
+        },
+        disassemble: dump_format_s,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00002023,
+        name: "SW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_s(word);
+            cpu.mmu
+                .store_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u32)
+        },
+        disassemble: dump_format_s,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00000013,
+        name: "ADDI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00002013,
+        name: "SLTI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < f.imm);
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00003013,
+        name: "SLTIU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = i64::from(unsigned_data(cpu.x[f.rs1]) < unsigned_data(f.imm));
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00004013,
+        name: "XORI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = cpu.x[f.rs1] ^ f.imm;
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00006013,
+        name: "ORI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = cpu.x[f.rs1] | f.imm;
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00007013,
+        name: "ANDI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = cpu.x[f.rs1] & f.imm;
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    // RV32I SLLI subsumed by RV64I
+    // RV32I SRLI subsumed by RV64I
+    // RV32I SRAI subsumed by RV64I
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00000033,
+        name: "ADD",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x40000033,
+        name: "SUB",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00001033,
+        name: "SLL",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shl(cpu.x[f.rs2] as u32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00002033,
+        name: "SLT",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < cpu.x[f.rs2]);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00003033,
+        name: "SLTU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(unsigned_data(cpu.x[f.rs1]) < unsigned_data(cpu.x[f.rs2]));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00004033,
+        name: "XOR",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1] ^ cpu.x[f.rs2];
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00005033,
+        name: "SRL",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = unsigned_data(cpu.x[f.rs1]).wrapping_shr(cpu.x[f.rs2] as u32) as i64;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x40005033,
+        name: "SRA",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shr(cpu.x[f.rs2] as u32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00006033,
+        name: "OR",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1] | cpu.x[f.rs2];
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x00007033,
+        name: "AND",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = cpu.x[f.rs1] & cpu.x[f.rs2];
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x0000000f,
+        name: "FENCE", // Includes FENCE.TSO
+        operation: |_cpu, _word, _address| {
+            // Fence memory ops (we are currently TSO already)
+            Ok(())
+        },
+        disassemble: dump_empty,
+    },
+    Instruction {
+        mask: 0xffffffff,
+        data: 0x0100000f,
+        name: "PAUSE",
+        operation: |_cpu, _word, _address| {
+            // Nothing to do here, but it would be interesting to see
+            // it used.
+            todo!("pause");
+            //Ok(())
+        },
+        disassemble: dump_empty,
+    },
+    Instruction {
+        mask: 0xffffffff,
+        data: 0x00000073,
+        name: "ECALL",
+        operation: |cpu, _word, address| {
+            let exception_type = match cpu.privilege_mode {
+                PrivilegeMode::User => TrapType::EnvironmentCallFromUMode,
+                PrivilegeMode::Supervisor => TrapType::EnvironmentCallFromSMode,
+                PrivilegeMode::Machine => TrapType::EnvironmentCallFromMMode,
+                PrivilegeMode::Reserved => panic!("Unknown Privilege mode"),
+            };
+            Err(Trap {
+                trap_type: exception_type,
+                value: address,
+            })
+        },
+        disassemble: dump_empty,
+    },
+    Instruction {
+        mask: 0xffffffff,
+        data: 0x00100073,
+        name: "EBREAK",
+        operation: |_cpu, _word, _address| todo!("Handling ebreak requires handling debug mode"),
+        disassemble: dump_empty,
+    },
+    // RV64I
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00006003,
+        name: "LWU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
                 Ok(data) => i64::from(data),
                 Err(e) => return Err(e),
             };
@@ -2766,113 +2171,287 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0x0000707f,
-        data: 0x00001003,
-        name: "LH",
+        data: 0x00003023,
+        name: "SD",
         operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu
-                .mmu
-                .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
-            {
-                Ok(data) => i64::from(data as i16),
-                Err(e) => return Err(e),
-            };
-            Ok(())
+            let f = parse_format_s(word);
+            cpu.mmu
+                .store_doubleword(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u64)
         },
-        disassemble: dump_format_i_mem,
+        disassemble: dump_format_s,
     },
     Instruction {
-        mask: 0x0000707f,
-        data: 0x00005003,
-        name: "LHU",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu
-                .mmu
-                .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
-            {
-                Ok(data) => i64::from(data),
-                Err(e) => return Err(e),
-            };
-            Ok(())
-        },
-        disassemble: dump_format_i_mem,
-    },
-    Instruction {
-        mask: 0xf9f0707f,
-        data: 0x1000302f,
-        name: "LR.D",
+        mask: 0xfc00707f, // RV64I version!
+        data: 0x00001013,
+        name: "SLLI",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            // @TODO: Implement properly
-            cpu.x[f.rd] = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => {
-                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
-                    data as i64
-                }
-                Err(e) => return Err(e),
-            };
+            let mask = 0x3f;
+            let shamt = (word >> 20) & mask;
+            cpu.x[f.rd] = cpu.x[f.rs1] << shamt;
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xf9f0707f,
-        data: 0x1000202f,
-        name: "LR.W",
+        mask: 0xfc00707f,
+        data: 0x00005013,
+        name: "SRLI",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            // @TODO: Implement properly
-            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => {
-                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
-                    i64::from(data as i32)
-                }
-                Err(e) => return Err(e),
-            };
+            let mask = 0x3f;
+            let shamt = (word >> 20) & mask;
+            cpu.x[f.rd] = (unsigned_data(cpu.x[f.rs1]) >> shamt) as i64;
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0x0000007f,
-        data: 0x00000037,
-        name: "LUI",
+        mask: 0xfc00707f,
+        data: 0x40005013,
+        name: "SRAI",
         operation: |cpu, word, _address| {
-            let f = parse_format_u(word);
-            cpu.x[f.rd] = f.imm as i64;
+            let f = parse_format_r(word);
+            let mask = 0x3f;
+            let shamt = (word >> 20) & mask;
+            cpu.x[f.rd] = cpu.x[f.rs1] >> shamt;
             Ok(())
         },
-        disassemble: dump_format_u,
+        disassemble: dump_format_r,
     },
     Instruction {
         mask: 0x0000707f,
-        data: 0x00002003,
-        name: "LW",
+        data: 0x0000001b,
+        name: "ADDIW",
         operation: |cpu, word, _address| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => i64::from(data as i32),
-                Err(e) => return Err(e),
-            };
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(f.imm) as i32);
             Ok(())
         },
-        disassemble: dump_format_i_mem,
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0000101b,
+        name: "SLLIW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let shamt = f.rs2 as u32;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] << shamt) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfc00707f,
+        data: 0x0000501b,
+        name: "SRLIW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let mask = 0x3f;
+            let shamt = (word >> 20) & mask;
+            cpu.x[f.rd] = i64::from(((cpu.x[f.rs1] as u32) >> shamt) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfc00707f,
+        data: 0x4000501b,
+        name: "SRAIW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let shamt = (word >> 20) & 0x1f;
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32) >> shamt);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0000003b,
+        name: "ADDW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x4000003b,
+        name: "SUBW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0000103b,
+        name: "SLLW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shl(cpu.x[f.rs2] as u32) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0000503b,
+        name: "SRLW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shr(cpu.x[f.rs2] as u32) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x4000503b,
+        name: "SRAW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_shr(cpu.x[f.rs2] as u32));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // RV32/RV64 Zifencei
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x0000100f,
+        name: "FENCE.I",
+        operation: |_cpu, _word, _address| {
+            // Flush any cached instrutions.  We have none so far.
+            Ok(())
+        },
+        disassemble: dump_empty,
+    },
+    // RV32/RV64 Zicsr
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00001073,
+        name: "CSRRW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_csr(word);
+            let data = match cpu.read_csr(f.csr) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            let tmp = cpu.x[f.rs];
+            cpu.x[f.rd] = data;
+            match cpu.write_csr(f.csr, unsigned_data(tmp)) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            Ok(())
+        },
+        disassemble: dump_format_csr,
     },
     Instruction {
         mask: 0x0000707f,
-        data: 0x00006003,
-        name: "LWU",
+        data: 0x00002073,
+        name: "CSRRS",
         operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => i64::from(data),
+            let f = parse_format_csr(word);
+            let data = match cpu.read_csr(f.csr) {
+                Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
+            let tmp = cpu.x[f.rs];
+            cpu.x[f.rd] = data;
+            match cpu.write_csr(f.csr, unsigned_data(cpu.x[f.rd] | tmp)) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
             Ok(())
         },
-        disassemble: dump_format_i_mem,
+        disassemble: dump_format_csr,
     },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00003073,
+        name: "CSRRC",
+        operation: |cpu, word, _address| {
+            let f = parse_format_csr(word);
+            let data = match cpu.read_csr(f.csr) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            let tmp = cpu.x[f.rs];
+            cpu.x[f.rd] = data;
+            match cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            Ok(())
+        },
+        disassemble: dump_format_csr,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00005073,
+        name: "CSRRWI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_csr(word);
+            let data = match cpu.read_csr(f.csr) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            cpu.x[f.rd] = data;
+            match cpu.write_csr(f.csr, f.rs as u64) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            Ok(())
+        },
+        disassemble: dump_format_csr,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00006073,
+        name: "CSRRSI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_csr(word);
+            let data = match cpu.read_csr(f.csr) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            cpu.x[f.rd] = data;
+            match cpu.write_csr(f.csr, unsigned_data(cpu.x[f.rd] | (f.rs as i64))) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            Ok(())
+        },
+        disassemble: dump_format_csr,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00007073,
+        name: "CSRRCI",
+        operation: |cpu, word, _address| {
+            let f = parse_format_csr(word);
+            let data = match cpu.read_csr(f.csr) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            cpu.x[f.rd] = data;
+            match cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            Ok(())
+        },
+        disassemble: dump_format_csr,
+    },
+    // RV32M
     Instruction {
         mask: 0xfe00707f,
         data: 0x02000033,
@@ -2897,6 +2476,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0xfe00707f,
+        data: 0x02002033,
+        name: "MULHSU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] =
+                ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64) as i64;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
         data: 0x02003033,
         name: "MULHU",
         operation: |cpu, word, _address| {
@@ -2910,88 +2501,39 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0xfe00707f,
-        data: 0x02002033,
-        name: "MULHSU",
+        data: 0x02004033,
+        name: "DIV",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] =
-                ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64) as i64;
+            let dividend = cpu.x[f.rs1];
+            let divisor = cpu.x[f.rs2];
+            if divisor == 0 {
+                cpu.x[f.rd] = -1;
+            } else if dividend == i64::MIN && divisor == -1 {
+                cpu.x[f.rd] = dividend;
+            } else {
+                cpu.x[f.rd] = dividend.wrapping_div(divisor);
+            }
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
         mask: 0xfe00707f,
-        data: 0x0200003b,
-        name: "MULW",
+        data: 0x02005033,
+        name: "DIVU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32));
+            let dividend = unsigned_data(cpu.x[f.rs1]);
+            let divisor = unsigned_data(cpu.x[f.rs2]);
+            if divisor == 0 {
+                cpu.x[f.rd] = -1;
+            } else {
+                cpu.x[f.rd] = dividend.wrapping_div(divisor) as i64;
+            }
             Ok(())
         },
         disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xffffffff,
-        data: 0x30200073,
-        name: "MRET",
-        operation: |cpu, _word, _address| {
-            cpu.pc = match cpu.read_csr(CSR_MEPC_ADDRESS) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            let status = cpu.read_csr_raw(CSR_MSTATUS_ADDRESS);
-            let mpie = (status >> 7) & 1;
-            let mpp = (status >> 11) & 0x3;
-            let mprv = match get_privilege_mode(mpp) {
-                PrivilegeMode::Machine => (status >> 17) & 1,
-                _ => 0,
-            };
-            // Override MIE[3] with MPIE[7], set MPIE[7] to 1, set MPP[12:11] to 0
-            // and override MPRV[17]
-            let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
-            cpu.write_csr_raw(CSR_MSTATUS_ADDRESS, new_status);
-            cpu.privilege_mode = match mpp {
-                0 => PrivilegeMode::User,
-                1 => PrivilegeMode::Supervisor,
-                3 => PrivilegeMode::Machine,
-                _ => panic!(), // Shouldn't happen
-            };
-            cpu.mmu.update_privilege_mode(cpu.privilege_mode);
-            Ok(())
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xffffffff,
-        data: 0x7b200073,
-        name: "DRET",
-        operation: |_cpu, _word, _address| {
-            todo!("Handling dret requires handling all of debug mode")
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x00006033,
-        name: "OR",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] | cpu.x[f.rs2];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00006013,
-        name: "ORI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] | f.imm;
-            Ok(())
-        },
-        disassemble: dump_format_i,
     },
     Instruction {
         mask: 0xfe00707f,
@@ -3028,18 +2570,50 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         },
         disassemble: dump_format_r,
     },
+    // RV64M
     Instruction {
         mask: 0xfe00707f,
-        data: 0x0200703b,
-        name: "REMUW",
+        data: 0x0200003b,
+        name: "MULW",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as u32;
-            let divisor = cpu.x[f.rs2] as u32;
-            cpu.x[f.rd] = match divisor {
-                0 => i64::from(dividend as i32),
-                _ => i64::from(dividend.wrapping_rem(divisor) as i32),
-            };
+            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0200403b,
+        name: "DIVW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let dividend = cpu.x[f.rs1] as i32;
+            let divisor = cpu.x[f.rs2] as i32;
+            if divisor == 0 {
+                cpu.x[f.rd] = -1;
+            } else if dividend == i32::MIN && divisor == -1 {
+                cpu.x[f.rd] = i64::from(dividend as i32);
+            } else {
+                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0200503b,
+        name: "DIVUW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let dividend = unsigned_data(cpu.x[f.rs1]) as u32;
+            let divisor = unsigned_data(cpu.x[f.rs2]) as u32;
+            if divisor == 0 {
+                cpu.x[f.rd] = -1;
+            } else {
+                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
+            }
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3064,36 +2638,35 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0x0000707f,
-        data: 0x00000023,
-        name: "SB",
+        mask: 0xfe00707f,
+        data: 0x0200703b,
+        name: "REMUW",
         operation: |cpu, word, _address| {
-            let f = parse_format_s(word);
-            cpu.mmu
-                .store(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u8)
+            let f = parse_format_r(word);
+            let dividend = cpu.x[f.rs1] as u32;
+            let divisor = cpu.x[f.rs2] as u32;
+            cpu.x[f.rd] = match divisor {
+                0 => i64::from(dividend as i32),
+                _ => i64::from(dividend.wrapping_rem(divisor) as i32),
+            };
+            Ok(())
         },
-        disassemble: dump_format_s,
+        disassemble: dump_format_r,
     },
+    // RV32A
     Instruction {
-        mask: 0xf800707f,
-        data: 0x1800302f,
-        name: "SC.D",
+        mask: 0xf9f0707f,
+        data: 0x1000202f,
+        name: "LR.W",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
-                match cpu
-                    .mmu
-                    .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
-                {
-                    Ok(()) => {
-                        cpu.reservation = None;
-                        0
-                    }
-                    Err(e) => return Err(e),
+            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => {
+                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
+                    i64::from(data as i32)
                 }
-            } else {
-                1
+                Err(e) => return Err(e),
             };
             Ok(())
         },
@@ -3122,174 +2695,1306 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_format_r,
     },
     Instruction {
+        mask: 0xf800707f,
+        data: 0x0800202f,
+        name: "AMOSWAP.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => i64::from(data as i32),
+                Err(e) => return Err(e),
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x0000202f,
+        name: "AMOADD.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => i64::from(data as i32),
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u32)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x2000202f,
+        name: "AMOXOR.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32 ^ tmp)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = i64::from(tmp as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x6000202f,
+        name: "AMOAND.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => i64::from(data as i32),
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_word(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u32)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x4000202f,
+        name: "AMOOR.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => i64::from(data as i32),
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_word(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u32)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x8000202f,
+        name: "AMOMIN.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i32,
+                Err(e) => return Err(e),
+            };
+            let min = if (cpu.x[f.rs2] as i32) < tmp {
+                cpu.x[f.rs2] as i32
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min as u32) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = i64::from(tmp);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xa000202f,
+        name: "AMOMAX.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i32,
+                Err(e) => return Err(e),
+            };
+            let max = if cpu.x[f.rs2] as i32 >= tmp {
+                cpu.x[f.rs2] as i32
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max as u32) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = i64::from(tmp);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xc000202f,
+        name: "AMOMINU.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let min = if cpu.x[f.rs2] as u32 <= tmp {
+                cpu.x[f.rs2] as u32
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(tmp as i32);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xe000202f,
+        name: "AMOMAXU.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let max = if cpu.x[f.rs2] as u32 >= tmp {
+                cpu.x[f.rs2] as u32
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = i64::from(tmp as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // RV64A
+    Instruction {
+        mask: 0xf9f0707f,
+        data: 0x1000302f,
+        name: "LR.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            // @TODO: Implement properly
+            cpu.x[f.rd] = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => {
+                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
+                    data as i64
+                }
+                Err(e) => return Err(e),
+            };
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x1800302f,
+        name: "SC.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            // @TODO: Implement properly
+            cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
+                match cpu
+                    .mmu
+                    .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
+                {
+                    Ok(()) => {
+                        cpu.reservation = None;
+                        0
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                1
+            };
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x0800302f,
+        name: "AMOSWAP.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x0000302f,
+        name: "AMOADD.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u64)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x2000302f,
+        name: "AMOXOR.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64 ^ tmp)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp as i64;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x6000302f,
+        name: "AMOAND.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_doubleword(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u64)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x4000302f,
+        name: "AMOOR.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            match cpu
+                .mmu
+                .store_doubleword(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u64)
+            {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0x8000302f,
+        name: "AMOMIN.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            let min = if cpu.x[f.rs2] < tmp {
+                cpu.x[f.rs2]
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min as u64) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xa000302f,
+        name: "AMOMAX.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data as i64,
+                Err(e) => return Err(e),
+            };
+            let max = if cpu.x[f.rs2] >= tmp {
+                cpu.x[f.rs2]
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max as u64) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xc000302f,
+        name: "AMOMINU.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let min = if cpu.x[f.rs2] as u64 <= tmp {
+                cpu.x[f.rs2] as u64
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp as i64;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xf800707f,
+        data: 0xe000302f,
+        name: "AMOMAXU.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let max = if cpu.x[f.rs2] as u64 >= tmp {
+                cpu.x[f.rs2] as u64
+            } else {
+                tmp
+            };
+            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            cpu.x[f.rd] = tmp as i64;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // RV32F
+    Instruction {
         mask: 0x0000707f,
-        data: 0x00003023,
-        name: "SD",
+        data: 0x00002007,
+        name: "FLW",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
+            Ok(())
+        },
+        disassemble: dump_format_i_mem,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00002027,
+        name: "FSW",
         operation: |cpu, word, _address| {
             let f = parse_format_s(word);
             cpu.mmu
-                .store_doubleword(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u64)
+                .store32(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
         },
         disassemble: dump_format_s,
     },
     Instruction {
-        mask: 0xfe007fff,
-        data: 0x12000073,
-        name: "SFENCE.VMA",
-        operation: |_cpu, _word, _address| {
-            // Do nothing?
+        mask: 0x0600007f,
+        data: 0x00000043,
+        name: "FMADD.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            // XXX Update fflags
+            cpu.write_f32(
+                f.rd,
+                cpu.read_f32(f.rs1)
+                    .mul_add(cpu.read_f32(f.rs2), cpu.read_f32(f.rs3)),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x00000047,
+        name: "FMSUB.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            cpu.write_f32(
+                f.rd,
+                cpu.read_f32(f.rs1)
+                    .mul_add(cpu.read_f32(f.rs2), -cpu.read_f32(f.rs3)),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x0000004b,
+        name: "FNMSUB.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            cpu.write_f32(
+                f.rd,
+                -(cpu
+                    .read_f32(f.rs1)
+                    .mul_add(cpu.read_f32(f.rs2), -cpu.read_f32(f.rs3))),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x0000004f,
+        name: "FNMADD.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            cpu.write_f32(
+                f.rd,
+                -(cpu
+                    .read_f32(f.rs1)
+                    .mul_add(cpu.read_f32(f.rs2), cpu.read_f32(f.rs3))),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x00000053,
+        name: "FADD.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) + cpu.read_f32(f.rs2));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x08000053,
+        name: "FSUB.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) - cpu.read_f32(f.rs2));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x10000053,
+        name: "FMUL.S",
+        operation: |cpu, word, _address| {
+            // @TODO: Update fcsr
+            let f = parse_format_r(word);
+            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) * cpu.read_f32(f.rs2));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x18000053,
+        name: "FDIV.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            //let rm = cpu.get_rm(word);
+
+            let dividend = cpu.read_f32(f.rs1);
+            let divisor = cpu.read_f32(f.rs2);
+            // Is this implementation correct?
+            let r = if divisor == 0.0 {
+                cpu.set_fcsr_dz();
+                f32::INFINITY
+            } else if divisor == -0.0 {
+                cpu.set_fcsr_dz();
+                f32::NEG_INFINITY
+            } else {
+                dividend / divisor
+            };
+
+            cpu.write_f32(f.rd, r);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0x58000053,
+        name: "FSQRT.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f32(f.rd, cpu.read_f32(f.rs1).sqrt());
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x20000053,
+        name: "FSGNJ.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = rs2_bits & (0x80000000u64 as i64);
+            cpu.f[f.rd] = fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x20001053,
+        name: "FSGNJN.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = !rs2_bits & (0x80000000u64 as i64);
+            cpu.f[f.rd] = fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x20002053,
+        name: "FSGNJX.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = rs2_bits & (0x80000000u64 as i64);
+            cpu.f[f.rd] = fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x28000053,
+        name: "FMIN.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (f1, f2) = (cpu.read_f32(f.rs1), cpu.read_f32(f.rs2));
+            let r = if f1 < f2 { f1 } else { f2 };
+            cpu.write_f32(f.rd, r);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x28001053,
+        name: "FMAX.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (f1, f2) = (cpu.read_f32(f.rs1), cpu.read_f32(f.rs2));
+            let r = if f1 > f2 { f1 } else { f2 };
+            cpu.write_f32(f.rd, r);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc0000053,
+        name: "FCVT.W.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc0100053,
+        name: "FCVT.WU.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) as u32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0707f,
+        data: 0xe0000053,
+        name: "FMV.X.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as i32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0xa0002053,
+        name: "FEQ.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) == cpu.read_f32(f.rs2));
+            }
+
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0xa0001053,
+        name: "FLT.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) < cpu.read_f32(f.rs2));
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0xa0000053,
+        name: "FLE.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) <= cpu.read_f32(f.rs2));
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0707f,
+        data: 0xe0001053,
+        name: "FCLASS.S",
+        operation: |_cpu, word, _address| {
+            let _f = parse_format_r(word);
+            todo!("fclass.s");
+            //Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xd0000053,
+        name: "FCVT.S.W",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (r, fflags) = cvt_i32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            cpu.f[f.rd] = r;
+            cpu.add_to_fflags(fflags);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xd0100053,
+        name: "FCVT.S.WU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (r, fflags) = cvt_u32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            cpu.f[f.rd] = r;
+            cpu.add_to_fflags(fflags);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0707f,
+        data: 0xf0000053,
+        name: "FMV.W.X",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.f[f.rd] = fp::NAN_BOX_F32 | cpu.x[f.rs1];
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // RV64F
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc0200053,
+        name: "FCVT.L.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.read_f32(f.rs1) as i64;
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc0300053,
+        name: "FCVT.LU.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.read_f32(f.rs1) as u64 as i64;
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xd0200053,
+        name: "FCVT.S.L",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (r, fflags) = cvt_i64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            cpu.f[f.rd] = r;
+            cpu.add_to_fflags(fflags);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xd0300053,
+        name: "FCVT.S.LU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+
+            cpu.f[f.rd] = r;
+            cpu.add_to_fflags(fflags);
+
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // RV32D
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00003007,
+        name: "FLD",
+        operation: |cpu, word, _address| {
+            let f = parse_format_i(word);
+            // FP load/stores loads *bits* thus doesn't pass through f32/f64
+            // XXX This really should be `cpu.f[f.rd] = cpu.mmu.ld64(cpu.load_ea(f))?;`
+            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))?;
+            Ok(())
+        },
+        disassemble: dump_format_i,
+    },
+    Instruction {
+        mask: 0x0000707f,
+        data: 0x00003027,
+        name: "FSD",
+        operation: |cpu, word, _address| {
+            let f = parse_format_s(word);
+            cpu.mmu
+                .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
+        },
+        disassemble: dump_format_s,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x02000043,
+        name: "FMADD.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            // XXX Update fflags
+            cpu.write_f64(
+                f.rd,
+                cpu.read_f64(f.rs1)
+                    .mul_add(cpu.read_f64(f.rs2), cpu.read_f64(f.rs3)),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x02000047,
+        name: "FMSUB.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            cpu.write_f64(
+                f.rd,
+                cpu.read_f64(f.rs1)
+                    .mul_add(cpu.read_f64(f.rs2), -cpu.read_f64(f.rs3)),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x0200004b,
+        name: "FNMSUB.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            cpu.write_f64(
+                f.rd,
+                -(cpu
+                    .read_f64(f.rs1)
+                    .mul_add(cpu.read_f64(f.rs2), -cpu.read_f64(f.rs3))),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0x0600007f,
+        data: 0x0200004f,
+        name: "FNMADD.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r2(word);
+            cpu.write_f64(
+                f.rd,
+                -(cpu
+                    .read_f64(f.rs1)
+                    .mul_add(cpu.read_f64(f.rs2), cpu.read_f64(f.rs3))),
+            );
+            Ok(())
+        },
+        disassemble: dump_format_r2,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x02000053,
+        name: "FADD.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f64(f.rd, cpu.read_f64(f.rs1) + cpu.read_f64(f.rs2));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x0a000053,
+        name: "FSUB.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f64(f.rd, cpu.read_f64(f.rs1) - cpu.read_f64(f.rs2));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x12000053,
+        name: "FMUL.D",
+        operation: |cpu, word, _address| {
+            // @TODO: Update fcsr
+            let f = parse_format_r(word);
+            cpu.write_f64(f.rd, cpu.read_f64(f.rs1) * cpu.read_f64(f.rs2));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00007f,
+        data: 0x1a000053,
+        name: "FDIV.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let dividend = cpu.read_f64(f.rs1);
+            let divisor = cpu.read_f64(f.rs2);
+            // Is this implementation correct?
+            let r = if divisor == 0.0 {
+                cpu.set_fcsr_dz();
+                f64::INFINITY
+            } else if divisor == -0.0 {
+                cpu.set_fcsr_dz();
+                f64::NEG_INFINITY
+            } else {
+                dividend / divisor
+            };
+            cpu.write_f64(f.rd, r);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0x5a000053,
+        name: "FSQRT.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f64(f.rd, cpu.read_f64(f.rs1).sqrt());
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x22000053,
+        name: "FSGNJ.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
+            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x22001053,
+        name: "FSGNJN.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = !rs2_bits & (0x8000000000000000u64 as i64);
+            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x22002053,
+        name: "FSGNJX.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let rs1_bits = cpu.f[f.rs1];
+            let rs2_bits = cpu.f[f.rs2];
+            let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
+            cpu.f[f.rd] = sign_bit ^ rs1_bits;
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x2A000053,
+        name: "FMIN.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (f1, f2) = (cpu.read_f64(f.rs1), cpu.read_f64(f.rs2));
+            let r = if f1 < f2 { f1 } else { f2 };
+            cpu.write_f64(f.rd, r);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x2A001053,
+        name: "FMAX.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            let (f1, f2) = (cpu.read_f64(f.rs1), cpu.read_f64(f.rs2));
+            let r = if f1 > f2 { f1 } else { f2 };
+            cpu.write_f64(f.rd, r);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0x40100053,
+        name: "FCVT.S.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f32(f.rd, cpu.read_f64(f.rs1) as f32);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0x42000053,
+        name: "FCVT.D.S",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f64(f.rd, f64::from(cpu.read_f32(f.rs1)));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0xa2002053,
+        name: "FEQ.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) == cpu.read_f64(f.rs2));
             Ok(())
         },
         disassemble: dump_empty,
     },
     Instruction {
-        mask: 0x0000707f,
-        data: 0x00001023,
-        name: "SH",
-        operation: |cpu, word, _address| {
-            let f = parse_format_s(word);
-            cpu.mmu
-                .store_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u16)
-        },
-        disassemble: dump_format_s,
-    },
-    Instruction {
         mask: 0xfe00707f,
-        data: 0x00001033,
-        name: "SLL",
+        data: 0xa2001053,
+        name: "FLT.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shl(cpu.x[f.rs2] as u32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfc00707f,
-        data: 0x00001013,
-        name: "SLLI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let mask = 0x3f;
-            let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.x[f.rs1] << shamt;
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) < cpu.read_f64(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
         mask: 0xfe00707f,
-        data: 0x0000101b,
-        name: "SLLIW",
+        data: 0xa2000053,
+        name: "FLE.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let shamt = f.rs2 as u32;
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] << shamt) as i32);
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) <= cpu.read_f64(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfe00707f,
-        data: 0x0000103b,
-        name: "SLLW",
+        mask: 0xfff0707f,
+        data: 0xe2001053,
+        name: "FCLASS.D",
+        operation: |_cpu, word, _address| {
+            let _f = parse_format_r(word);
+            todo!("fclass.d");
+            //Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc2000053,
+        name: "FCVT.W.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shl(cpu.x[f.rs2] as u32) as i32);
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfe00707f,
-        data: 0x00002033,
-        name: "SLT",
+        mask: 0xfff0007f,
+        data: 0xc2100053,
+        name: "FCVT.WU.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < cpu.x[f.rs2]);
+            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as u32);
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0x0000707f,
-        data: 0x00002013,
-        name: "SLTI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < f.imm);
-            Ok(())
-        },
-        disassemble: dump_format_i,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00003013,
-        name: "SLTIU",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from(unsigned_data(cpu.x[f.rs1]) < unsigned_data(f.imm));
-            Ok(())
-        },
-        disassemble: dump_format_i,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x00003033,
-        name: "SLTU",
+        mask: 0xfff0007f,
+        data: 0xd2000053,
+        name: "FCVT.D.W",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(unsigned_data(cpu.x[f.rs1]) < unsigned_data(cpu.x[f.rs2]));
+            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as i32));
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfe00707f,
-        data: 0x40005033,
-        name: "SRA",
+        mask: 0xfff0007f,
+        data: 0xd2100053,
+        name: "FCVT.D.WU",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shr(cpu.x[f.rs2] as u32);
+            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as u32));
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // RV64D
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xc2200053,
+        name: "FCVT.L.D",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.read_f64(f.rs1) as i64;
+            }
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfc00707f,
-        data: 0x40005013,
-        name: "SRAI",
+        mask: 0xfff0007f,
+        data: 0xc2300053,
+        name: "FCVT.LU.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let mask = 0x3f;
-            let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.x[f.rs1] >> shamt;
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.read_f64(f.rs1) as u64 as i64;
+            }
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfc00707f,
-        data: 0x4000501b,
-        name: "SRAIW",
+        mask: 0xfff0707f,
+        data: 0xe2000053,
+        name: "FMV.X.D",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            let shamt = (word >> 20) & 0x1f;
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32) >> shamt);
+            cpu.x[f.rd] = cpu.f[f.rs1];
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfe00707f,
-        data: 0x4000503b,
-        name: "SRAW",
+        mask: 0xfff0007f,
+        data: 0xd2200053,
+        name: "FCVT.D.L",
         operation: |cpu, word, _address| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_shr(cpu.x[f.rs2] as u32));
+            cpu.write_f64(f.rd, cpu.x[f.rs1] as f64);
             Ok(())
         },
         disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0007f,
+        data: 0xd2300053,
+        name: "FCVT.D.LU",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.write_f64(f.rd, cpu.x[f.rs1] as u64 as f64);
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfff0707f,
+        data: 0xf2000053,
+        name: "FMV.D.X",
+        operation: |cpu, word, _address| {
+            let f = parse_format_r(word);
+            cpu.f[f.rd] = cpu.x[f.rs1];
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // Remaining (all system-level) that weren't listed in the instr-table
+    Instruction {
+        mask: 0xffffffff,
+        data: 0x7b200073,
+        name: "DRET",
+        operation: |_cpu, _word, _address| {
+            todo!("Handling dret requires handling all of debug mode")
+        },
+        disassemble: dump_empty,
+    },
+    Instruction {
+        mask: 0xffffffff,
+        data: 0x30200073,
+        name: "MRET",
+        operation: |cpu, _word, _address| {
+            cpu.pc = match cpu.read_csr(CSR_MEPC_ADDRESS) {
+                Ok(data) => data,
+                Err(e) => return Err(e),
+            };
+            let status = cpu.read_csr_raw(CSR_MSTATUS_ADDRESS);
+            let mpie = (status >> 7) & 1;
+            let mpp = (status >> 11) & 0x3;
+            let mprv = match get_privilege_mode(mpp) {
+                PrivilegeMode::Machine => (status >> 17) & 1,
+                _ => 0,
+            };
+            // Override MIE[3] with MPIE[7], set MPIE[7] to 1, set MPP[12:11] to 0
+            // and override MPRV[17]
+            let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
+            cpu.write_csr_raw(CSR_MSTATUS_ADDRESS, new_status);
+            cpu.privilege_mode = match mpp {
+                0 => PrivilegeMode::User,
+                1 => PrivilegeMode::Supervisor,
+                3 => PrivilegeMode::Machine,
+                _ => panic!(), // Shouldn't happen
+            };
+            cpu.mmu.update_privilege_mode(cpu.privilege_mode);
+            Ok(())
+        },
+        disassemble: dump_empty,
     },
     Instruction {
         mask: 0xffffffff,
@@ -3323,85 +4028,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_empty,
     },
     Instruction {
-        mask: 0xfe00707f,
-        data: 0x00005033,
-        name: "SRL",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = unsigned_data(cpu.x[f.rs1]).wrapping_shr(cpu.x[f.rs2] as u32) as i64;
+        mask: 0xfe007fff,
+        data: 0x12000073,
+        name: "SFENCE.VMA",
+        operation: |_cpu, _word, _address| {
+            // Do nothing?
             Ok(())
         },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfc00707f,
-        data: 0x00005013,
-        name: "SRLI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let mask = 0x3f;
-            let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = (unsigned_data(cpu.x[f.rs1]) >> shamt) as i64;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfc00707f,
-        data: 0x0000501b,
-        name: "SRLIW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let mask = 0x3f;
-            let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = i64::from(((cpu.x[f.rs1] as u32) >> shamt) as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x0000503b,
-        name: "SRLW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shr(cpu.x[f.rs2] as u32) as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x40000033,
-        name: "SUB",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x4000003b,
-        name: "SUBW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]) as i32);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00002023,
-        name: "SW",
-        operation: |cpu, word, _address| {
-            let f = parse_format_s(word);
-            cpu.mmu
-                .store_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u32)
-        },
-        disassemble: dump_format_s,
+        disassemble: dump_empty,
     },
     Instruction {
         mask: 0xffffffff,
@@ -3413,252 +4047,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         },
         disassemble: dump_empty,
     },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0x00004033,
-        name: "XOR",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] ^ cpu.x[f.rs2];
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0x0000707f,
-        data: 0x00004013,
-        name: "XORI",
-        operation: |cpu, word, _address| {
-            let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] ^ f.imm;
-            Ok(())
-        },
-        disassemble: dump_format_i,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0xa000302f,
-        name: "AMOMAX.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let max = if cpu.x[f.rs2] >= tmp {
-                cpu.x[f.rs2]
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0xa000202f,
-        name: "AMOMAX.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data as i32,
-                Err(e) => return Err(e),
-            };
-            let max = if cpu.x[f.rs2] as i32 >= tmp {
-                cpu.x[f.rs2] as i32
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max as u32) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = i64::from(tmp);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0xc000302f,
-        name: "AMOMINU.D",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            let min = if cpu.x[f.rs2] as u64 <= tmp {
-                cpu.x[f.rs2] as u64
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            cpu.x[f.rd] = tmp as i64;
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xf800707f,
-        data: 0xc000202f,
-        name: "AMOMINU.W",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
-                Ok(data) => data,
-                Err(e) => return Err(e),
-            };
-            let min = if cpu.x[f.rs2] as u32 <= tmp {
-                cpu.x[f.rs2] as u32
-            } else {
-                tmp
-            };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(tmp as i32);
-            }
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xd0300053,
-        name: "FCVT.S.LU",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
-
-            cpu.f[f.rd] = r;
-            cpu.add_to_fflags(fflags);
-
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x18000053,
-        name: "FDIV.S",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            //let rm = cpu.get_rm(word);
-
-            let dividend = cpu.read_f32(f.rs1);
-            let divisor = cpu.read_f32(f.rs2);
-            // Is this implementation correct?
-            let r = if divisor == 0.0 {
-                cpu.set_fcsr_dz();
-                f32::INFINITY
-            } else if divisor == -0.0 {
-                cpu.set_fcsr_dz();
-                f32::NEG_INFINITY
-            } else {
-                dividend / divisor
-            };
-
-            cpu.write_f32(f.rd, r);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0xa0001053,
-        name: "FLT.S",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            //let rm = cpu.get_rm(word);
-
-            let f1 = cpu.read_f32(f.rs1);
-            let f2 = cpu.read_f32(f.rs2);
-
-            if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(f1 < f2);
-            }
-
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00707f,
-        data: 0xa0000053,
-        name: "FLE.S",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            //let rm = cpu.get_rm(word);
-
-            let f1 = cpu.read_f32(f.rs1);
-            let f2 = cpu.read_f32(f.rs2);
-
-            if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(f1 <= f2);
-            }
-
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xc0300053,
-        name: "FCVT.LU.S",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            //let rm = cpu.get_rm(word);
-
-            let f1 = cpu.read_f32(f.rs1);
-
-            // XXX Picture an accurate implementation here and pay no attention to this
-            let r = f1 as u64;
-            if f.rd != 0 {
-                cpu.x[f.rd] = r as i64;
-            }
-            //cpu.csr[CSR_FCSR_ADDRESS as usize] |= u64::from(fflags); // FP flags are accumulative
-
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfe00007f,
-        data: 0x10000053,
-        name: "FMUL.S",
-        operation: |cpu, word, _address| {
-            // @TODO: Update fcsr
-            let f = parse_format_r(word);
-            cpu.write_f32(f.rd, cpu.read_f32(f.rs1) * cpu.read_f32(f.rs2));
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
-    Instruction {
-        mask: 0xfff0007f,
-        data: 0xd0100053,
-        name: "FCVT.S.WU",
-        operation: |cpu, word, _address| {
-            let f = parse_format_r(word);
-            let (r, fflags) = cvt_u32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
-            cpu.f[f.rd] = r;
-            cpu.add_to_fflags(fflags);
-            Ok(())
-        },
-        disassemble: dump_format_r,
-    },
 ];
+
+// i64 -> f32
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+fn cvt_i64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as f32;
+    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+}
 
 // u64 -> f32
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
@@ -3685,6 +4086,22 @@ fn cvt_u32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
     // shortcut that ignores rounding modes and flags!
 
     let f = a as u32 as f32;
+    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+}
+
+// i32 -> f32
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+fn cvt_i32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as i32 as f32;
     (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
 }
 
