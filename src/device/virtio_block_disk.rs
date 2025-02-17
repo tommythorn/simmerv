@@ -169,7 +169,7 @@ impl VirtioBlockDisk {
             0x10001073 => (self.status >> 24) as u8,
             // Configurations (The first 64-it is the number of sectors) @TODO: Implement properly
             0x10001100..=0x10001107 => {
-                let n_secs = self.contents.len() / (512 / 8);
+                let n_secs: u64 = (self.contents.len() / (512 / 8)) as u64;
                 let n_secs_as_u8: [u8; 8] = n_secs.to_le_bytes();
                 n_secs_as_u8[address as usize & 7]
             }
