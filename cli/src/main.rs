@@ -38,12 +38,6 @@ fn main() -> std::io::Result<()> {
     let program = args[0].clone();
 
     let mut opts = Options::new();
-    opts.optopt(
-        "x",
-        "xlen",
-        "Set bit mode. Default is auto detect from elf file",
-        "32|64",
-    );
     opts.optopt("f", "fs", "File system image file", "xv6/fs.img");
     opts.optopt("d", "dtb", "Device tree file", "linux/dtb");
     opts.optflag("n", "no_terminal", "No popup terminal");
