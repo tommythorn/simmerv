@@ -1,14 +1,25 @@
-# riscv-rust
+# Riscv-rust
 
-[![Build Status](https://travis-ci.org/tommythorn/riscv-rust.svg?branch=master)](https://travis-ci.org/tommythorn/riscv-rust)
-[![Crate](https://img.shields.io/crates/v/riscv_emu_rust.svg)](https://crates.io/crates/riscv_emu_rust)
-[![npm version](https://badge.fury.io/js/riscv_emu_rust_wasm.svg)](https://badge.fury.io/js/riscv_emu_rust_wasm)
+Riscv-rust is a [RISC-V](https://riscv.org/) processor and peripheral
+devices emulator project written in Rust and compilable to
+WebAssembly.
 
-riscv-rust is a [RISC-V](https://riscv.org/) processor and peripheral devices emulator project written in Rust and compiled to WebAssembly. You can import RISC-V emulator into your Rust or JavaScript project. Refer to the [Slides](https://docs.google.com/presentation/d/1qeR6KMSaJTR0ZSa2kLxgcBuc_zBo3l-kYbOpq1Wqmi0/edit?usp=sharing) for more detail.
+This is a substrantially enhanced fork of [Takahiro's riscv-rust
+original emulator](https://github.com/takahirox/riscv-rust).  This
+fork is already far more complete and is working towards near 100%
+correctness.  Ultimately, we also expect it to become substantially
+faster, but this work is delayed until this is sufficiently correct to
+run benchmarks and off-the-shelf Linux distributions.
+
+You can import RISC-V emulator into your Rust or JavaScript project.
+Refer to the
+[Slides](https://docs.google.com/presentation/d/1qeR6KMSaJTR0ZSa2kLxgcBuc_zBo3l-kYbOpq1Wqmi0/edit?usp=sharing)
+for more detail.
 
 ## Online Demo
 
-You can run Linux or xv6 on the emulator in your browser. [Online demo is here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
+You can run Linux or xv6 on the emulator in your browser. [Online demo
+is here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 ## Screenshots
 
@@ -31,33 +42,27 @@ You can run Linux or xv6 on the emulator in your browser. [Online demo is here](
 
 ## Instructions/Features support status
 
-- [x] RV32/64I
-- [x] RV32/64M
-- [x] RV32/64F (almost)
-- [x] RV32/64D (almost)
-- [ ] RV32/64Q
-- [x] RV32/64A (almost)
-- [x] RV64C/32C (almost)
-- [x] RV32/64Zifencei (almost)
-- [x] RV32/64Zicsr (almost)
-- [x] CSR (almost)
-- [x] SV32/39
-- [ ] SV48
-- [x] Privileged instructions (almost)
+- [x] RV64IMAC
+- [x] RV64FD (all-but fclass implemented, flags/rounding modes very lacking)
+- [x] RV64Zifencei
+- [x] RV64Zicsr
+- [x] CSR (almost?)
+- [x] Sv39
+- [ ] Sv48
+- [x] Privileged instructions
 - [ ] PMP
 
-etc...
-
-The emulator supports almost all instructions listed above but some instructions which are not used in Linux or xv6 are not implemented yet. Your contribution is very welcome.
+The emulator supports almost all instructions listed above but some
+instructions which are not used in Linux or xv6 are not implemented
+yet. Your contribution is very welcome.
 
 ## How to import into your Rust project
 
-The emulator module is released at [crates.io](https://crates.io/crates/riscv_emu_rust
-). Add the following line into Cargo.toml of your Rust project.
+Add the following line into Cargo.toml of your Rust project.
 
 ```
 [dependencies]
-riscv_emu_rust = "0.2.0"
+riscv_rust = { git = "https://github.com/tommythorn/rust-rust" }
 ```
 
 Refer to [Document](https://docs.rs/riscv_emu_rust/0.2.0/riscv_emu_rust/struct.Emulator.html) for the API.
@@ -88,7 +93,7 @@ Prerequirements
 
 ```sh
 $ cd riscv-rust/cli
-$ cargo run $path_to_riscv_tets/isa/rv32ui-p-add -n
+$ cargo run $path_to_riscv_tets/isa/rv64ui-p-add -n
 ```
 
 ## How to import and use WebAssembly RISC-V emulator in a web browser
@@ -103,11 +108,13 @@ See [wasm/npm](https://github.com/tommythorn/riscv-rust/tree/master/wasm/npm)
 
 ### Linux RISC-V port
 
-[Running 64- and 32-bit RISC-V Linux on QEMU](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html)
+[Running 64-bit RISC-V Linux on QEMU](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html)
 
 ### xv6-riscv
 
-[xv6-riscv](https://github.com/mit-pdos/xv6-riscv) is the RISC-V port of [xv6](https://pdos.csail.mit.edu/6.828/2019/xv6.html) which is UNIX V6 rewritten by MIT for x86 in the current C language.
+[xv6-riscv](https://github.com/mit-pdos/xv6-riscv) is the RISC-V port
+of [xv6](https://pdos.csail.mit.edu/6.828/2019/xv6.html) which is UNIX
+V6 rewritten by MIT for x86 in the current C language.
 
 ### Specifications
 
