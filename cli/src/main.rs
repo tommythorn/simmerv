@@ -1,20 +1,15 @@
-extern crate getopts;
-extern crate riscv_emu_rust;
-
 mod dummy_terminal;
 mod nonblocknoecho;
 mod popup_terminal;
 
 use crate::dummy_terminal::DummyTerminal;
 use crate::popup_terminal::PopupTerminal;
+use getopts::Options;
 use riscv_emu_rust::terminal::Terminal;
 use riscv_emu_rust::Emulator;
-
 use std::env;
 use std::fs::File;
 use std::io::Read;
-
-use getopts::Options;
 
 enum TerminalType {
     PopupTerminal,

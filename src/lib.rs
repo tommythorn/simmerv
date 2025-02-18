@@ -4,10 +4,6 @@
 const TEST_MEMORY_CAPACITY: u64 = 1024 * 512;
 const PROGRAM_MEMORY_CAPACITY: u64 = 1024 * 1024 * 512; // big enough to run Linux and xv6
 
-extern crate fnv;
-
-use self::fnv::FnvHashMap;
-
 pub mod cpu;
 pub mod default_terminal;
 pub mod device;
@@ -19,6 +15,8 @@ pub mod terminal;
 use crate::cpu::Cpu;
 use crate::elf_analyzer::ElfAnalyzer;
 use crate::terminal::Terminal;
+use fnv::FnvHashMap;
+pub use cpu::{Trap, TrapType};
 
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
@@ -95,40 +93,21 @@ impl Emulator {
         // @TODO: Send this message to terminal?
         println!("This elf file seems riscv-tests elf file. Running in test mode.");
         loop {
-            let disas = self.cpu.disassemble_next_instruction();
-            self.put_bytes_to_terminal(disas.as_bytes());
-            self.put_bytes_to_terminal(&[10]); // new line
+            let disass = self.cpu.disassemble_next_instruction();
+            eprintln!("{disass}");
 
             self.tick();
 
-            // It seems in riscv-tests ends with end code
-            // written to a certain physical memory address
-            // (0x80001000 in mose test cases) so checking
-            // the data in the address and terminating the test
-            // if non-zero data is written.
-            // End code 1 seems to mean pass.
+            // Riscv-tests terminats by writing the result * 2 + 1 to `tohost`
+            // Zero means pass, anything else encodes where it failed.
             let endcode = self.cpu.get_mut_mmu().load_word_raw(self.tohost_addr);
             if endcode != 0 {
                 match endcode {
-                    1 => self.put_bytes_to_terminal(
-                        format!("Test Passed with {endcode:X}\n").as_bytes(),
-                    ),
-                    _ => self.put_bytes_to_terminal(
-                        format!("Test Failed with {endcode:X}\n").as_bytes(),
-                    ),
+                    1 => eprintln!("Test Passed\n"),
+                    _ => eprintln!("Test Failed with {}\n", endcode / 2),
                 }
                 break;
             }
-        }
-    }
-
-    /// Helper method. Sends ascii code bytes to terminal.
-    ///
-    /// # Arguments
-    /// * `bytes`
-    fn put_bytes_to_terminal(&mut self, bytes: &[u8]) {
-        for b in bytes {
-            self.cpu.get_mut_terminal().put_byte(*b);
         }
     }
 

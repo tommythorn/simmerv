@@ -1259,7 +1259,7 @@ impl Cpu {
         let mut original_word = match self.mmu.fetch_word(self.pc) {
             Ok(data) => data,
             Err(_e) => {
-                return format!("PC:{:016x}, InstructionPageFault Trap!\n", self.pc);
+                return format!("{:016x} InstructionPageFault Trap!\n", self.pc);
             }
         };
 
@@ -1283,7 +1283,7 @@ impl Cpu {
         };
 
         let mut s = String::new();
-        let _ = write!(s, "PC:{:016x} {original_word:08x} {} ", self.pc, inst.name);
+        let _ = write!(s, "{:016x} {original_word:08x} {} ", self.pc, inst.name);
         (inst.disassemble)(&mut s, self, word, self.pc, true);
         s
     }
@@ -4658,7 +4658,7 @@ mod test_cpu {
         }
 
         assert_eq!(
-            "PC:0000000080000000 00100013 ADDI zero:0,zero:0,1",
+            "0000000080000000 00100013 ADDI zero:0,zero:0,1",
             cpu.disassemble_next_instruction()
         );
 
