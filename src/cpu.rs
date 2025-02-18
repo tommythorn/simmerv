@@ -5,7 +5,6 @@
 // - Do not update pc until instruction has retired (fixes many TODOs)
 // - keep cycle outside CSR
 // - Don't check for interrupts and advance MMU every cycle
-// - Make Xlen a type parameter
 
 mod fp;
 mod rvc;
@@ -16,6 +15,8 @@ pub use fp::RoundingMode;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::fmt::Write as _;
+
+pub const CONFIG_SW_MANAGED_A_AND_D: bool = false;
 
 const CSR_CAPACITY: usize = 4096;
 
@@ -68,6 +69,53 @@ pub const MIP_SEIP: u64 = 0x200;
 const MIP_STIP: u64 = 0x020;
 const MIP_SSIP: u64 = 0x002;
 
+// XXX Surely we can find a better way to handle the bitfields
+pub const MSTATUS_SPIE_SHIFT: u64 = 5;
+pub const MSTATUS_MPIE_SHIFT: u64 = 7;
+pub const MSTATUS_SPP_SHIFT: u64 = 8;
+pub const MSTATUS_VS_SHIFT: u64 = 9;
+pub const MSTATUS_MPP_SHIFT: u64 = 11;
+pub const MSTATUS_FS_SHIFT: u64 = 13;
+pub const MSTATUS_UXL_SHIFT: u64 = 32;
+pub const MSTATUS_SXL_SHIFT: u64 = 34;
+
+pub const MSTATUS_UIE: u64 = 1 << 0;
+pub const MSTATUS_SIE: u64 = 1 << 1;
+pub const MSTATUS_HIE: u64 = 1 << 2;
+pub const MSTATUS_MIE: u64 = 1 << 3;
+pub const MSTATUS_UPIE: u64 = 1 << 4;
+pub const MSTATUS_SPIE: u64 = 1 << MSTATUS_SPIE_SHIFT;
+pub const MSTATUS_HPIE: u64 = 1 << 6;
+pub const MSTATUS_MPIE: u64 = 1 << MSTATUS_MPIE_SHIFT;
+pub const MSTATUS_SPP: u64 = 1 << MSTATUS_SPP_SHIFT;
+pub const MSTATUS_VS: u64 = 3 << MSTATUS_VS_SHIFT;
+pub const MSTATUS_MPP: u64 = 3 << MSTATUS_MPP_SHIFT;
+pub const MSTATUS_FS: u64 = 3 << MSTATUS_FS_SHIFT;
+pub const MSTATUS_XS: u64 = 3 << 15;
+pub const MSTATUS_MPRV: u64 = 1 << 17;
+pub const MSTATUS_SUM: u64 = 1 << 18;
+pub const MSTATUS_MXR: u64 = 1 << 19;
+pub const MSTATUS_TVM: u64 = 1 << 20;
+pub const MSTATUS_TW: u64 = 1 << 21;
+pub const MSTATUS_TSR: u64 = 1 << 22;
+pub const MSTATUS_UXL_MASK: u64 = 3 << MSTATUS_UXL_SHIFT;
+pub const MSTATUS_SXL_MASK: u64 = 3 << MSTATUS_SXL_SHIFT;
+
+pub const SATP_PPN_SHIFT: u64 = 0;
+pub const SATP_ASID_SHIFT: u64 = 44;
+pub const SATP_MODE_SHIFT: u64 = 60;
+pub const SATP_PPN_MASK: u64 = (1 << SATP_ASID_SHIFT) - 1;
+pub const SATP_ASID_MASK: u64 = (1 << (SATP_MODE_SHIFT - SATP_ASID_SHIFT)) - 1;
+pub const SATP_MODE_MASK: u64 = (1 << (64 - SATP_MODE_SHIFT)) - 1;
+
+pub const SATP_MODE_BARE: u64 = 0;
+pub const SATP_MODE_SV39: u64 = 8;
+pub const SATP_MODE_SV48: u64 = 9;
+pub const SATP_MODE_SV57: u64 = 10;
+pub const SATP_MODE_SV64: u64 = 11;
+
+pub const PG_SHIFT: usize = 12; // 4K page size
+
 /// Emulates a RISC-V CPU core
 pub struct Cpu {
     // Alignment for the first two is deliberate
@@ -87,8 +135,8 @@ pub struct Cpu {
     decode_cache: DecodeCache,
 }
 
-#[derive(Clone, Copy, Debug, FromPrimitive)]
 #[allow(dead_code)]
+#[derive(Clone, Copy, Debug, FromPrimitive, PartialEq, Eq)]
 pub enum PrivilegeMode {
     User,
     Supervisor,
@@ -579,7 +627,7 @@ impl Cpu {
             */
             self.write_csr_raw(address, value);
             if address == CSR_SATP_ADDRESS {
-                self.update_addressing_mode(value);
+                self.update_satp(value);
             }
             Ok(())
         } else {
@@ -664,19 +712,18 @@ impl Cpu {
         self.add_to_fflags(1);
     }
 
-    fn update_addressing_mode(&mut self, value: u64) {
-        let addressing_mode = match value >> 60 {
-            0 => AddressingMode::None,
-            8 => AddressingMode::SV39,
-            9 => AddressingMode::SV48,
-            _ => {
-                println!("Unknown addressing_mode {:x}", value >> 60);
-                panic!();
-            }
+    fn update_satp(&mut self, satp: u64) {
+        let addressing_mode = match (satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK {
+            SATP_MODE_BARE => AddressingMode::None,
+            SATP_MODE_SV39 => AddressingMode::SV39,
+            SATP_MODE_SV48 => AddressingMode::SV48,
+            SATP_MODE_SV57 => todo!("Unsupported SATP mode SV57"),
+            SATP_MODE_SV64 => todo!("Unsupported SATP mode SV64"),
+            mode => todo!("Illegal SATP mode {mode:x}"),
         };
-        let ppn = value & 0x0fff_ffff_ffff;
         self.mmu.update_addressing_mode(addressing_mode);
-        self.mmu.update_ppn(ppn);
+        self.mmu
+            .update_ppn((satp >> SATP_PPN_SHIFT) & SATP_PPN_MASK);
     }
 
     // @TODO: Optimize

@@ -1,22 +1,23 @@
 #![allow(clippy::unreadable_literal)]
 
-/// DRAM base address. Offset from this base address
-/// is the address in main memory.
-pub const DRAM_BASE: u64 = 0x80000000;
-
-const DTB_SIZE: usize = 0xfe0;
-
-extern crate fnv;
-
-use self::fnv::FnvHashMap;
-
-use crate::cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType};
+use crate::cpu::{
+    PrivilegeMode, Trap, TrapType, CONFIG_SW_MANAGED_A_AND_D, MSTATUS_MPP_SHIFT, MSTATUS_MPRV,
+    MSTATUS_MXR, MSTATUS_SUM, PG_SHIFT,
+};
 use crate::device::clint::Clint;
 use crate::device::plic::Plic;
 use crate::device::uart::Uart;
 use crate::device::virtio_block_disk::VirtioBlockDisk;
 use crate::memory::Memory;
 use crate::terminal::Terminal;
+use fnv::FnvHashMap;
+use num_traits::FromPrimitive;
+
+/// DRAM base address. Offset from this base address
+/// is the address in main memory.
+pub const DRAM_BASE: u64 = 0x80000000;
+
+const DTB_SIZE: usize = 0xfe0;
 
 /// Emulates Memory Management Unit. It holds the Main memory and peripheral
 /// devices, maps address to them, and accesses them depending on address.
@@ -57,12 +58,14 @@ pub struct Mmu {
     store_page_cache: FnvHashMap<u64, u64>,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum AddressingMode {
     None,
     SV39,
     SV48, // @TODO: Implement
 }
 
+#[derive(Copy, Clone, PartialEq, Debug)]
 enum MemoryAccessType {
     Execute,
     Read,
@@ -70,13 +73,10 @@ enum MemoryAccessType {
     DontCare,
 }
 
-const fn _get_addressing_mode_name(mode: &AddressingMode) -> &'static str {
-    match mode {
-        AddressingMode::None => "None",
-        AddressingMode::SV39 => "SV39",
-        AddressingMode::SV48 => "SV48",
-    }
-}
+pub const PTE_V_MASK: u64 = 1 << 0;
+pub const PTE_U_MASK: u64 = 1 << 4;
+pub const PTE_A_MASK: u64 = 1 << 6;
+pub const PTE_D_MASK: u64 = 1 << 7;
 
 impl Mmu {
     /// Creates a new `Mmu`.
@@ -209,7 +209,7 @@ impl Mmu {
     /// # Arguments
     /// * `v_address` Virtual address
     fn fetch(&mut self, v_address: u64) -> Result<u8, Trap> {
-        match self.translate_address(v_address, &MemoryAccessType::Execute) {
+        match self.translate_address(v_address, MemoryAccessType::Execute) {
             Ok(p_address) => Ok(self.load_raw(p_address)),
             Err(()) => Err(Trap {
                 trap_type: TrapType::InstructionPageFault,
@@ -230,7 +230,7 @@ impl Mmu {
         if v_address & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            match self.translate_address(v_address, &MemoryAccessType::Execute) {
+            match self.translate_address(v_address, MemoryAccessType::Execute) {
                 Ok(p_address) => Ok(self.load_word_raw(p_address)),
                 Err(()) => Err(Trap {
                     trap_type: TrapType::InstructionPageFault,
@@ -257,7 +257,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn load(&mut self, v_address: u64) -> Result<u8, Trap> {
-        match self.translate_address(v_address, &MemoryAccessType::Read) {
+        match self.translate_address(v_address, MemoryAccessType::Read) {
             Ok(p_address) => Ok(self.load_raw(p_address)),
             Err(()) => Err(Trap {
                 trap_type: TrapType::LoadPageFault,
@@ -278,7 +278,7 @@ impl Mmu {
             "Width must be 1, 2, 4, or 8. {width:X}"
         );
         if v_address & 0xfff <= 0x1000 - width {
-            match self.translate_address(v_address, &MemoryAccessType::Read) {
+            match self.translate_address(v_address, MemoryAccessType::Read) {
                 Ok(p_address) => {
                     // Fast path. All bytes fetched are in the same page so
                     // translating an address only once.
@@ -373,7 +373,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn store(&mut self, v_address: u64, value: u8) -> Result<(), Trap> {
-        match self.translate_address(v_address, &MemoryAccessType::Write) {
+        match self.translate_address(v_address, MemoryAccessType::Write) {
             Ok(p_address) => {
                 self.store_raw(p_address, value);
                 Ok(())
@@ -401,7 +401,7 @@ impl Mmu {
             "Width must be 1, 2, 4, or 8. {width:X}"
         );
         if v_address & 0xfff <= 0x1000 - width {
-            match self.translate_address(v_address, &MemoryAccessType::Write) {
+            match self.translate_address(v_address, MemoryAccessType::Write) {
                 Ok(p_address) => {
                     // Fast path. All bytes fetched are in the same page so
                     // translating an address only once.
@@ -638,7 +638,7 @@ impl Mmu {
     #[allow(clippy::result_unit_err)] // @TODO: broken mess of Result usage
     pub fn validate_address(&mut self, v_address: u64) -> Result<bool, ()> {
         // @TODO: Support other access types?
-        let p_address = self.translate_address(v_address, &MemoryAccessType::DontCare)?;
+        let p_address = self.translate_address(v_address, MemoryAccessType::DontCare)?;
         let valid = if p_address >= DRAM_BASE {
             self.memory.validate_address(p_address)
         } else {
@@ -653,11 +653,11 @@ impl Mmu {
 
     fn translate_address(
         &mut self,
-        v_address: u64,
-        access_type: &MemoryAccessType,
+        address: u64,
+        access_type: MemoryAccessType,
     ) -> Result<u64, ()> {
-        let address = v_address;
         let v_page = address & !0xfff;
+
         let cache = if self.page_cache_enabled {
             match access_type {
                 MemoryAccessType::Execute => self.fetch_page_cache.get(&v_page),
@@ -668,164 +668,161 @@ impl Mmu {
         } else {
             None
         };
+
         if let Some(p_page) = cache {
-            Ok(p_page | (address & 0xfff))
-        } else {
-            let p_address = match self.addressing_mode {
-                AddressingMode::None => Ok(address),
-                AddressingMode::SV39 => match self.privilege_mode {
-                    // @TODO: Optimize
-                    // @TODO: Remove duplicated code with SV32
-                    PrivilegeMode::Machine => match access_type {
-                        MemoryAccessType::Execute => Ok(address),
-                        // @TODO: Remove magic number
-                        _ => {
-                            if (self.mstatus >> 17) & 1 == 0 {
-                                Ok(address)
-                            } else {
-                                let privilege_mode = get_privilege_mode((self.mstatus >> 9) & 3);
-                                if matches!(privilege_mode, PrivilegeMode::Machine) {
-                                    Ok(address)
-                                } else {
-                                    let current_privilege_mode = self.privilege_mode;
-                                    self.update_privilege_mode(privilege_mode);
-                                    let result = self.translate_address(v_address, access_type);
-                                    self.update_privilege_mode(current_privilege_mode);
-                                    result
-                                }
-                            }
-                        }
-                    },
-                    PrivilegeMode::User | PrivilegeMode::Supervisor => {
-                        let vpns = [
-                            (address >> 12) & 0x1ff,
-                            (address >> 21) & 0x1ff,
-                            (address >> 30) & 0x1ff,
-                        ];
-                        self.traverse_page(address, 3 - 1, self.ppn, &vpns, access_type)
-                    }
-                    PrivilegeMode::Reserved => Ok(address),
-                },
-                AddressingMode::SV48 => {
-                    panic!("AddressingMode SV48 is not supported yet.");
-                }
-            };
-            if self.page_cache_enabled {
-                match p_address {
-                    Ok(p_address) => {
-                        let p_page = p_address & !0xfff;
-                        match access_type {
-                            MemoryAccessType::Execute => {
-                                self.fetch_page_cache.insert(v_page, p_page)
-                            }
-                            MemoryAccessType::Read => self.load_page_cache.insert(v_page, p_page),
-                            MemoryAccessType::Write => self.store_page_cache.insert(v_page, p_page),
-                            MemoryAccessType::DontCare => None,
-                        };
-                        Ok(p_address)
-                    }
-                    Err(()) => Err(()),
-                }
-            } else {
-                p_address
+            return Ok(p_page | (address & 0xfff));
+        }
+
+        let translation = self.translate_address_slow(address, access_type);
+
+        if self.page_cache_enabled {
+            if let Ok(p_address) = translation {
+                let p_page = p_address & !0xfff;
+                let _ = match access_type {
+                    MemoryAccessType::Execute => self.fetch_page_cache.insert(v_page, p_page),
+                    MemoryAccessType::Read => self.load_page_cache.insert(v_page, p_page),
+                    MemoryAccessType::Write => self.store_page_cache.insert(v_page, p_page),
+                    MemoryAccessType::DontCare => None,
+                };
             }
         }
+
+        translation
     }
 
-    #[allow(
-        clippy::many_single_char_names,
-        clippy::too_many_lines,
-        clippy::cast_possible_truncation
-    )]
-    fn traverse_page(
+    #[allow(clippy::cast_possible_wrap)]
+    fn translate_address_slow(
         &mut self,
-        v_address: u64,
-        level: u8,
-        parent_ppn: u64,
-        vpns: &[u64],
-        access_type: &MemoryAccessType,
+        address: u64,
+        access_type: MemoryAccessType,
     ) -> Result<u64, ()> {
-        let pagesize = 4096;
-        let ptesize = 8;
-        let pte_address = parent_ppn * pagesize + vpns[level as usize] * ptesize;
-        let pte = self.load_doubleword_raw(pte_address);
-        let ppn = (pte >> 10) & 0xfffffffffff;
-        let ppns = if matches!(self.addressing_mode, AddressingMode::SV39) {
-            [
-                (pte >> 10) & 0x1ff,
-                (pte >> 19) & 0x1ff,
-                (pte >> 28) & 0x3ffffff,
-            ]
-        } else {
-            unreachable!()
-        };
-        let d = (pte >> 7) & 1;
-        let a = (pte >> 6) & 1;
-        let x = (pte >> 3) & 1;
-        let w = (pte >> 2) & 1;
-        let r = (pte >> 1) & 1;
-        let v = pte & 1;
-
-        // println!("VA:{:X} Level:{:X} PTE_AD:{:X} PTE:{:X} PPPN:{:X} PPN:{:X} PPN1:{:X} PPN0:{:X}", v_address, level, pte_address, pte, parent_ppn, ppn, ppns[1], ppns[0]);
-
-        if v == 0 || (r == 0 && w == 1) {
-            return Err(());
-        }
-
-        if r == 0 && x == 0 {
-            return match level {
-                0 => Err(()),
-                _ => self.traverse_page(v_address, level - 1, ppn, vpns, access_type),
-            };
-        }
-
-        // Leaf page found
-
-        if a == 0
-            || (match access_type {
-                MemoryAccessType::Write => d == 0,
-                _ => false,
-            })
+        let effective_priv = if self.mstatus & MSTATUS_MPRV != 0
+            && access_type != MemoryAccessType::Execute
         {
-            let new_pte = pte
-                | (1 << 6)
-                | (match access_type {
-                    MemoryAccessType::Write => 1 << 7,
-                    _ => 0,
-                });
-            self.store_doubleword_raw(pte_address, new_pte);
-        }
-
-        if match access_type {
-            MemoryAccessType::Execute => x == 0,
-            MemoryAccessType::Read => r == 0,
-            MemoryAccessType::Write => w == 0,
-            MemoryAccessType::DontCare => false,
-        } {
-            return Err(());
-        }
-
-        let offset = v_address & 0xfff; // [11:0]
-                                        // @TODO: Optimize
-        let p_address = match level {
-            2 => {
-                if ppns[1] != 0 || ppns[0] != 0 {
-                    return Err(());
-                }
-                (ppns[2] << 30) | (vpns[1] << 21) | (vpns[0] << 12) | offset
-            }
-            1 => {
-                if ppns[0] != 0 {
-                    return Err(());
-                }
-                (ppns[2] << 30) | (ppns[1] << 21) | (vpns[0] << 12) | offset
-            }
-            0 => (ppn << 12) | offset,
-            _ => panic!(), // Shouldn't happen
+            // Use previous privilege
+            let Some(prv) = FromPrimitive::from_u64((self.mstatus >> MSTATUS_MPP_SHIFT) & 3) else {
+                unreachable!();
+            };
+            prv
+        } else {
+            self.privilege_mode
         };
 
-        // println!("PA:{:X}", p_address);
-        Ok(p_address)
+        if matches!(effective_priv, PrivilegeMode::Machine)
+            || matches!(self.addressing_mode, AddressingMode::None)
+        {
+            return Ok(address);
+        }
+
+        // Sv39 (Sv48 in future)
+        let levels = match self.addressing_mode {
+            AddressingMode::SV39 => 3,
+            AddressingMode::SV48 => 4,
+            AddressingMode::None => unreachable!(),
+        };
+
+        let access_shift = match access_type {
+            MemoryAccessType::Read => 0,
+            MemoryAccessType::Write => 1,
+            MemoryAccessType::Execute => 2,
+            MemoryAccessType::DontCare => unreachable!(),
+        };
+
+        let pte_size_log2 = 3;
+        let vaddr_shift = 64 - (PG_SHIFT + levels * 9);
+        // Check for canonical addresses
+        if ((address as i64) << vaddr_shift) >> vaddr_shift != address as i64 {
+            // XXX Some debugging logging here might be useful
+            return Err(());
+        }
+        let pte_addr_bits = 44;
+        let mut pte_addr = (self.ppn & ((1 << pte_addr_bits) - 1)) << PG_SHIFT;
+        let pte_bits = 12 - pte_size_log2;
+        let pte_mask = (1 << pte_bits) - 1;
+
+        for i in 0..levels {
+            let vaddr_shift = PG_SHIFT + pte_bits * (levels - 1 - i);
+            let pte_idx = (address >> vaddr_shift) & pte_mask;
+            pte_addr += pte_idx << pte_size_log2;
+            let pte = self.load_doubleword_raw(pte_addr); // XXX Need an exit if that fails
+
+            if pte & PTE_V_MASK == 0 {
+                // XXX Debug log would be useful
+                return Err(());
+            }
+
+            // XXX too many hardcoded values
+            let paddr = (pte >> 10) << PG_SHIFT;
+            let mut xwr = (pte >> 1) & 7;
+            if xwr == 0 {
+                pte_addr = paddr;
+                continue;
+            }
+
+            // *** Found a leaf node ***
+
+            if xwr == 2 || xwr == 6 {
+                // XXX Debug log would be useful
+                return Err(());
+            }
+
+            // priviledge check
+            if effective_priv == PrivilegeMode::Supervisor {
+                if pte & PTE_U_MASK != 0 && self.mstatus & MSTATUS_SUM == 0 {
+                    // XXX Debug log would be useful
+                    return Err(());
+                }
+            } else if pte & PTE_U_MASK == 0 {
+                // XXX Debug log would be useful
+                return Err(());
+            }
+
+            /* protection check */
+            /* MXR allows read access to execute-only pages */
+            if self.mstatus & MSTATUS_MXR != 0 {
+                xwr |= xwr >> 2;
+            }
+
+            if (xwr >> access_shift) & 1 == 0 {
+                return Err(());
+            }
+
+            /* 6. Check for misaligned superpages */
+            let ppn = pte >> 10;
+            let j = levels - 1 - i;
+            if ((1 << j) - 1) & ppn != 0 {
+                return Err(());
+            }
+
+            /*
+              RISC-V Priv. Spec 1.11 (draft) Section 4.3.1 offers two
+              ways to handle the A and D TLB flags.  Spike uses the
+              software managed approach whereas Dromajo used to manage
+              them (causing far fewer exceptions).
+            */
+            if CONFIG_SW_MANAGED_A_AND_D {
+                if pte & PTE_A_MASK == 0 {
+                    return Err(()); // Must have A on access
+                }
+                if access_type == MemoryAccessType::Write && pte & PTE_D_MASK == 0 {
+                    return Err(()); // Must have D on write
+                }
+            } else {
+                let mut new_pte = pte | PTE_A_MASK;
+                if access_type == MemoryAccessType::Write {
+                    new_pte |= PTE_D_MASK;
+                }
+                if pte != new_pte {
+                    // XXX Need an exit for failure
+                    self.store_doubleword_raw(pte_addr, new_pte);
+                }
+            }
+
+            let vaddr_mask = (1 << vaddr_shift) - 1;
+            return Ok(paddr & !vaddr_mask | address & vaddr_mask);
+        }
+
+        Err(())
     }
 
     /// Returns immutable reference to `Clint`.
