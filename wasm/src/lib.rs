@@ -1,8 +1,7 @@
+use riscv_emu_rust::default_terminal::DefaultTerminal;
+use riscv_emu_rust::{Emulator, Trap, TrapType};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-
-use riscv_emu_rust::default_terminal::DefaultTerminal;
-use riscv_emu_rust::Emulator;
 
 /// `WasmRiscv` is an interface between user JavaScript code and
 /// WebAssembly RISC-V emulator. The following code is example
@@ -177,25 +176,6 @@ impl WasmRiscv {
     ///   * 2: Invalid address (e.g. translated physical address points to out
     ///        of valid memory address range)
     pub fn load_doubleword(&mut self, address: u64, error: &mut [u8]) -> u64 {
-        for i in 0..8 {
-            match self
-                .emulator
-                .get_mut_cpu()
-                .get_mut_mmu()
-                .validate_address(address.wrapping_add(i))
-            {
-                Ok(valid) => {
-                    if !valid {
-                        error[0] = 2;
-                        return 0;
-                    }
-                }
-                Err(()) => {
-                    error[0] = 1;
-                    return 0;
-                }
-            }
-        }
         match self
             .emulator
             .get_mut_cpu()
@@ -206,8 +186,15 @@ impl WasmRiscv {
                 error[0] = 0;
                 data
             }
-            Err(_trap) => {
+            Err(Trap {
+                trap_type: TrapType::LoadPageFault,
+                value: _,
+            }) => {
                 error[0] = 1;
+                0
+            }
+            Err(_) => {
+                error[0] = 2;
                 0
             }
         }

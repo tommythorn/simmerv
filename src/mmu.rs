@@ -70,7 +70,6 @@ enum MemoryAccessType {
     Execute,
     Read,
     Write,
-    DontCare,
 }
 
 pub const PTE_V_MASK: u64 = 1 << 0;
@@ -208,14 +207,9 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `v_address` Virtual address
-    fn fetch(&mut self, v_address: u64) -> Result<u8, Trap> {
-        match self.translate_address(v_address, MemoryAccessType::Execute) {
-            Ok(p_address) => Ok(self.load_raw(p_address)),
-            Err(()) => Err(Trap {
-                trap_type: TrapType::InstructionPageFault,
-                value: v_address,
-            }),
-        }
+    fn fetch_u8(&mut self, v_address: u64) -> Result<u8, Trap> {
+        let p_address = self.translate_address(v_address, MemoryAccessType::Execute)?;
+        Ok(self.load_raw(p_address))
     }
 
     /// Fetches instruction four bytes. This method takes virtual address
@@ -230,20 +224,13 @@ impl Mmu {
         if v_address & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            match self.translate_address(v_address, MemoryAccessType::Execute) {
-                Ok(p_address) => Ok(self.load_word_raw(p_address)),
-                Err(()) => Err(Trap {
-                    trap_type: TrapType::InstructionPageFault,
-                    value: v_address,
-                }),
-            }
+            let p_address = self.translate_address(v_address, MemoryAccessType::Execute)?;
+            Ok(self.load_word_raw(p_address)) // XXX Can't fail?
         } else {
             let mut data = 0_u32;
             for i in 0..width {
-                match self.fetch(v_address.wrapping_add(i)) {
-                    Ok(byte) => data |= u32::from(byte) << (i * 8),
-                    Err(e) => return Err(e),
-                }
+                let byte = self.fetch_u8(v_address.wrapping_add(i))?;
+                data |= u32::from(byte) << (i * 8);
             }
             Ok(data)
         }
@@ -257,13 +244,8 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn load(&mut self, v_address: u64) -> Result<u8, Trap> {
-        match self.translate_address(v_address, MemoryAccessType::Read) {
-            Ok(p_address) => Ok(self.load_raw(p_address)),
-            Err(()) => Err(Trap {
-                trap_type: TrapType::LoadPageFault,
-                value: v_address,
-            }),
-        }
+        let p_address = self.translate_address(v_address, MemoryAccessType::Read)?;
+        Ok(self.load_raw(p_address))
     }
 
     /// Loads multiple bytes. This method takes virtual address and translates
@@ -278,30 +260,21 @@ impl Mmu {
             "Width must be 1, 2, 4, or 8. {width:X}"
         );
         if v_address & 0xfff <= 0x1000 - width {
-            match self.translate_address(v_address, MemoryAccessType::Read) {
-                Ok(p_address) => {
-                    // Fast path. All bytes fetched are in the same page so
-                    // translating an address only once.
-                    match width {
-                        1 => Ok(u64::from(self.load_raw(p_address))),
-                        2 => Ok(u64::from(self.load_halfword_raw(p_address))),
-                        4 => Ok(u64::from(self.load_word_raw(p_address))),
-                        8 => Ok(self.load_doubleword_raw(p_address)),
-                        _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
-                    }
-                }
-                Err(()) => Err(Trap {
-                    trap_type: TrapType::LoadPageFault,
-                    value: v_address,
-                }),
-            }
+            // Fast path. All bytes fetched are in the same page so
+            // translating an address only once.
+            let p_address = self.translate_address(v_address, MemoryAccessType::Read)?;
+            Ok(match width {
+                1 => u64::from(self.load_raw(p_address)),
+                2 => u64::from(self.load_halfword_raw(p_address)),
+                4 => u64::from(self.load_word_raw(p_address)),
+                8 => self.load_doubleword_raw(p_address),
+                _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
+            })
         } else {
             let mut data = 0_u64;
             for i in 0..width {
-                match self.load(v_address.wrapping_add(i)) {
-                    Ok(byte) => data |= u64::from(byte) << (i * 8),
-                    Err(e) => return Err(e),
-                }
+                let byte = self.load(v_address.wrapping_add(i))?;
+                data |= u64::from(byte) << (i * 8);
             }
             Ok(data)
         }
@@ -373,16 +346,9 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn store(&mut self, v_address: u64, value: u8) -> Result<(), Trap> {
-        match self.translate_address(v_address, MemoryAccessType::Write) {
-            Ok(p_address) => {
-                self.store_raw(p_address, value);
-                Ok(())
-            }
-            Err(()) => Err(Trap {
-                trap_type: TrapType::StorePageFault,
-                value: v_address,
-            }),
-        }
+        let p_address = self.translate_address(v_address, MemoryAccessType::Write)?;
+        self.store_raw(p_address, value);
+        Ok(())
     }
 
     /// Stores multiple bytes. This method takes a virtual address and translates
@@ -401,33 +367,22 @@ impl Mmu {
             "Width must be 1, 2, 4, or 8. {width:X}"
         );
         if v_address & 0xfff <= 0x1000 - width {
-            match self.translate_address(v_address, MemoryAccessType::Write) {
-                Ok(p_address) => {
-                    // Fast path. All bytes fetched are in the same page so
-                    // translating an address only once.
-                    match width {
-                        1 => self.store_raw(p_address, value as u8),
-                        2 => self.store_halfword_raw(p_address, value as u16),
-                        4 => self.store_word_raw(p_address, value as u32),
-                        8 => self.store_doubleword_raw(p_address, value),
-                        _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
-                    }
-                    Ok(())
-                }
-                Err(()) => Err(Trap {
-                    trap_type: TrapType::StorePageFault,
-                    value: v_address,
-                }),
+            // Fast path. All bytes fetched are in the same page so
+            // translating an address only once.
+            let p_address = self.translate_address(v_address, MemoryAccessType::Write)?;
+            match width {
+                1 => self.store_raw(p_address, value as u8),
+                2 => self.store_halfword_raw(p_address, value as u16),
+                4 => self.store_word_raw(p_address, value as u32),
+                8 => self.store_doubleword_raw(p_address, value),
+                _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
             }
         } else {
             for i in 0..width {
-                match self.store(v_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8) {
-                    Ok(()) => {}
-                    Err(e) => return Err(e),
-                }
+                self.store(v_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
             }
-            Ok(())
         }
+        Ok(())
     }
 
     /// Stores two bytes. This method takes virtual address and translates
@@ -628,34 +583,11 @@ impl Mmu {
         }
     }
 
-    /// Checks if passed virtual address is valid (pointing a certain device) or not.
-    /// This method can return page fault trap.
-    ///
-    /// # Arguments
-    /// * `v_address` Virtual address
-    /// # Errors
-    /// Exceptions are returned as errors
-    #[allow(clippy::result_unit_err)] // @TODO: broken mess of Result usage
-    pub fn validate_address(&mut self, v_address: u64) -> Result<bool, ()> {
-        // @TODO: Support other access types?
-        let p_address = self.translate_address(v_address, MemoryAccessType::DontCare)?;
-        let valid = if p_address >= DRAM_BASE {
-            self.memory.validate_address(p_address)
-        } else {
-            matches!(p_address, 0x00001020..=0x00001fff |
-		     0x02000000..=0x0200ffff |
-		     0x0c000000..=0x0fffffff |
-		     0x10000000..=0x100000ff |
-		     0x10001000..=0x10001fff)
-        };
-        Ok(valid)
-    }
-
     fn translate_address(
         &mut self,
         address: u64,
         access_type: MemoryAccessType,
-    ) -> Result<u64, ()> {
+    ) -> Result<u64, Trap> {
         let v_page = address & !0xfff;
 
         let cache = if self.page_cache_enabled {
@@ -663,7 +595,6 @@ impl Mmu {
                 MemoryAccessType::Execute => self.fetch_page_cache.get(&v_page),
                 MemoryAccessType::Read => self.load_page_cache.get(&v_page),
                 MemoryAccessType::Write => self.store_page_cache.get(&v_page),
-                MemoryAccessType::DontCare => None,
             }
         } else {
             None
@@ -673,21 +604,18 @@ impl Mmu {
             return Ok(p_page | (address & 0xfff));
         }
 
-        let translation = self.translate_address_slow(address, access_type);
+        let p_address = self.translate_address_slow(address, access_type)?;
 
         if self.page_cache_enabled {
-            if let Ok(p_address) = translation {
-                let p_page = p_address & !0xfff;
-                let _ = match access_type {
-                    MemoryAccessType::Execute => self.fetch_page_cache.insert(v_page, p_page),
-                    MemoryAccessType::Read => self.load_page_cache.insert(v_page, p_page),
-                    MemoryAccessType::Write => self.store_page_cache.insert(v_page, p_page),
-                    MemoryAccessType::DontCare => None,
-                };
-            }
+            let p_page = p_address & !0xfff;
+            let _ = match access_type {
+                MemoryAccessType::Execute => self.fetch_page_cache.insert(v_page, p_page),
+                MemoryAccessType::Read => self.load_page_cache.insert(v_page, p_page),
+                MemoryAccessType::Write => self.store_page_cache.insert(v_page, p_page),
+            };
         }
 
-        translation
+        Ok(p_address)
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -695,7 +623,7 @@ impl Mmu {
         &mut self,
         address: u64,
         access_type: MemoryAccessType,
-    ) -> Result<u64, ()> {
+    ) -> Result<u64, Trap> {
         let effective_priv = if self.mstatus & MSTATUS_MPRV != 0
             && access_type != MemoryAccessType::Execute
         {
@@ -725,7 +653,6 @@ impl Mmu {
             MemoryAccessType::Read => 0,
             MemoryAccessType::Write => 1,
             MemoryAccessType::Execute => 2,
-            MemoryAccessType::DontCare => unreachable!(),
         };
 
         let pte_size_log2 = 3;
@@ -733,7 +660,7 @@ impl Mmu {
         // Check for canonical addresses
         if ((address as i64) << vaddr_shift) >> vaddr_shift != address as i64 {
             // XXX Some debugging logging here might be useful
-            return Err(());
+            return page_fault(address, access_type);
         }
         let pte_addr_bits = 44;
         let mut pte_addr = (self.ppn & ((1 << pte_addr_bits) - 1)) << PG_SHIFT;
@@ -744,11 +671,18 @@ impl Mmu {
             let vaddr_shift = PG_SHIFT + pte_bits * (levels - 1 - i);
             let pte_idx = (address >> vaddr_shift) & pte_mask;
             pte_addr += pte_idx << pte_size_log2;
-            let pte = self.load_doubleword_raw(pte_addr); // XXX Need an exit if that fails
+            // XXX Not only do we need to raise an exception if this
+            // fails, but failing here doesn't cause a page fault but
+            // just a fault (eg CAUSE_FAULT_LOAD/STORE instead of all
+            // the others which are
+            // CAUSE_LOAD/STORE/FETCH_PAGE_FAULT).
+            let pte = self.load_doubleword_raw(pte_addr);
+            // return access_fault(address, access_type);
 
             if pte & PTE_V_MASK == 0 {
                 // XXX Debug log would be useful
-                return Err(());
+                //info!("** {:?} mode access to {address:08x} denied: invalid PTE", self.privilege_mode);
+                break;
             }
 
             // XXX too many hardcoded values
@@ -763,18 +697,21 @@ impl Mmu {
 
             if xwr == 2 || xwr == 6 {
                 // XXX Debug log would be useful
-                return Err(());
+                //info!("** {:?} mode access to {address:08x} denied: invalid xwr {xwr}", self.privilege_mode);
+                break;
             }
 
             // priviledge check
             if effective_priv == PrivilegeMode::Supervisor {
                 if pte & PTE_U_MASK != 0 && self.mstatus & MSTATUS_SUM == 0 {
                     // XXX Debug log would be useful
-                    return Err(());
+                    //info!("** {:?} mode access to {address:08x} denied: U & !SUM", self.privilege_mode);
+                    break;
                 }
             } else if pte & PTE_U_MASK == 0 {
                 // XXX Debug log would be useful
-                return Err(());
+                //info!("** {:?} mode access to {address:08x} denied: !U", self.privilege_mode);
+                return page_fault(address, access_type);
             }
 
             /* protection check */
@@ -784,14 +721,16 @@ impl Mmu {
             }
 
             if (xwr >> access_shift) & 1 == 0 {
-                return Err(());
+                //info!("** {:?} mode access to {address:08x} denied: want {access_shift}, got {xwr}", self.privilege_mode);
+                break;
             }
 
             /* 6. Check for misaligned superpages */
             let ppn = pte >> 10;
             let j = levels - 1 - i;
             if ((1 << j) - 1) & ppn != 0 {
-                return Err(());
+                //info!("** {:?} mode access to {address:08x} denied: misaligned superpage {i} / {ppn}", self.privilege_mode);
+                break;
             }
 
             /*
@@ -802,10 +741,12 @@ impl Mmu {
             */
             if CONFIG_SW_MANAGED_A_AND_D {
                 if pte & PTE_A_MASK == 0 {
-                    return Err(()); // Must have A on access
+                    //info!("** {:?} mode access to {address:08x} denied: missing A", self.privilege_mode);
+                    break; // Must have A on access
                 }
                 if access_type == MemoryAccessType::Write && pte & PTE_D_MASK == 0 {
-                    return Err(()); // Must have D on write
+                    //info!("** {:?} mode access to {address:08x} denied: missing D", self.privilege_mode);
+                    break; // Must have D on write
                 }
             } else {
                 let mut new_pte = pte | PTE_A_MASK;
@@ -813,8 +754,9 @@ impl Mmu {
                     new_pte |= PTE_D_MASK;
                 }
                 if pte != new_pte {
-                    // XXX Need an exit for failure
+                    // XXX must return access fault on failure here
                     self.store_doubleword_raw(pte_addr, new_pte);
+                    // return access_fault(address, access_type);
                 }
             }
 
@@ -822,7 +764,7 @@ impl Mmu {
             return Ok(paddr & !vaddr_mask | address & vaddr_mask);
         }
 
-        Err(())
+        page_fault(address, access_type)
     }
 
     /// Returns immutable reference to `Clint`.
@@ -842,8 +784,34 @@ impl Mmu {
     }
 }
 
+#[allow(dead_code)]
+const fn access_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T, Trap> {
+    Err::<T, Trap>(Trap {
+        trap_type: match access_type {
+            MemoryAccessType::Read => TrapType::LoadAccessFault,
+            MemoryAccessType::Write => TrapType::StoreAccessFault,
+            MemoryAccessType::Execute => TrapType::InstructionAccessFault,
+        },
+        value: address,
+    })
+}
+
+const fn page_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T, Trap> {
+    Err::<T, Trap>(Trap {
+        trap_type: match access_type {
+            MemoryAccessType::Read => TrapType::LoadPageFault,
+            MemoryAccessType::Write => TrapType::StorePageFault,
+            MemoryAccessType::Execute => TrapType::InstructionPageFault,
+        },
+        value: address,
+    })
+}
+
 /// [`Memory`](../memory/struct.Memory.html) wrapper. Converts physical address to the one in memory
 /// using [`DRAM_BASE`](constant.DRAM_BASE.html) and accesses [`Memory`](../memory/struct.Memory.html).
+// XXX This is a very poor abstraction; we need *FAST* 64-bit aligned
+// access and everything else built from that.  Out of range access
+// must fault, not crash.
 pub struct MemoryWrapper {
     memory: Memory,
 }
