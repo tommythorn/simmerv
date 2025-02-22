@@ -287,32 +287,8 @@ export class WasmRiscv {
      * Disassembles an instruction Program Counter points to.
      * Use `get_output()` to get the disassembled strings.
      */
-    disassemble_next_instruction() {
-        wasm.wasmriscv_disassemble_next_instruction(this.__wbg_ptr);
-    }
-    /**
-     * Loads eight-byte data from memory. Loading can cause an error or trap.
-     * If an error or trap happens `error[0]` holds non-zero error code and
-     * this method returns zero. Otherwise `error[0]` holds zero and this
-     * method returns loaded data.
-     *
-     * # Arguments
-     * * `address` eight-byte virtual address
-     * * `error` If an error or trap happens error[0] holds non-zero.
-     *    Otherwize zero.
-     *   * 0: No error
-     *   * 1: Page fault
-     *   * 2: Invalid address (e.g. translated physical address points to out
-     *        of valid memory address range)
-     * @param {bigint} address
-     * @param {Uint8Array} error
-     * @returns {bigint}
-     */
-    load_doubleword(address, error) {
-        var ptr0 = passArray8ToWasm0(error, wasm.__wbindgen_malloc);
-        var len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmriscv_load_doubleword(this.__wbg_ptr, address, ptr0, len0, error);
-        return BigInt.asUintN(64, ret);
+    disassemble() {
+        wasm.wasmriscv_disassemble(this.__wbg_ptr);
     }
     /**
      * Reads integer register content.

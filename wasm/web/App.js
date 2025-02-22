@@ -435,7 +435,7 @@ export default class App {
     }
     this.riscv.run_cycles(num);
     this.flush();
-    this.riscv.disassemble_next_instruction();
+    this.riscv.disassemble();
     this.flush();
     this.terminal.writeln('');
   }

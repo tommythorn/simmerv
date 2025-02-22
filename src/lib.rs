@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod default_terminal;
 pub mod device;
 pub mod elf_analyzer;
+pub mod memory;
 pub mod mmu;
 pub mod terminal;
 
@@ -76,7 +77,7 @@ impl Emulator {
         }
     }
 
-    /// Runs program set by `setup_program()`. The emulator won't stop forever.
+    /// Runs program set by `setup_program()`. The emulator will run forever.
     pub fn run_program(&mut self) {
         loop {
             self.tick();
@@ -88,22 +89,22 @@ impl Emulator {
     /// * Disassembles every instruction and dumps to terminal
     /// * The emulator stops when the test finishes
     /// * Displays the result message (pass/fail) to terminal
+    #[allow(clippy::cast_possible_truncation)]
     pub fn run_test(&mut self) {
         // @TODO: Send this message to terminal?
         println!("This elf file seems riscv-tests elf file. Running in test mode.");
         loop {
-            let disass = self.cpu.disassemble_next_instruction();
-            eprintln!("{disass}");
-
             self.tick();
+            let (disass, wbr) = self.cpu.disassemble(self.cpu.insn);
+            println!("{disass:72} {:16x}", self.cpu.read_register(wbr as u8));
 
             // Riscv-tests terminats by writing the result * 2 + 1 to `tohost`
             // Zero means pass, anything else encodes where it failed.
-            let endcode = self.cpu.get_mut_mmu().load_word_raw(self.tohost_addr);
+            let endcode = self.cpu.get_mut_mmu().load_phys_u32(self.tohost_addr);
             if endcode != 0 {
                 match endcode {
-                    1 => eprintln!("Test Passed\n"),
-                    _ => eprintln!("Test Failed with {}\n", endcode / 2),
+                    1 => println!("Test Passed\n"),
+                    _ => println!("Test Failed with {}\n", endcode / 2),
                 }
                 break;
             }
@@ -112,7 +113,7 @@ impl Emulator {
 
     /// Runs CPU one cycle
     pub fn tick(&mut self) {
-        self.cpu.run_soc();
+        self.cpu.run_soc(1);
     }
 
     /// Sets up program run by the program. This method analyzes the passed content
@@ -182,7 +183,7 @@ impl Emulator {
                 for j in 0..sh_size {
                     self.cpu
                         .get_mut_mmu()
-                        .store_raw(sh_addr + j as u64, analyzer.read_byte(sh_offset + j));
+                        .store_phys_u8(sh_addr + j as u64, analyzer.read_byte(sh_offset + j));
                 }
             }
         }

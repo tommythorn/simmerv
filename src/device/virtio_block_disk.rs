@@ -9,7 +9,7 @@ use crate::mmu::Memory;
 const MAX_QUEUE_SIZE: u64 = 0x2000;
 
 // To simulate disk access time.
-// @TODO: Set more proper number. 500 core clocks may be too short.
+// @TODO: Set more proper number. 500 core cycles may be too short.
 const DISK_ACCESS_DELAY: u64 = 500;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -24,7 +24,7 @@ const SECTOR_SIZE: u64 = 512;
 /// for the detail. It follows legacy API.
 pub struct VirtioBlockDisk {
     used_ring_index: u16,
-    clock: u64,
+    cycle: u64,
     device_features: u64,      // read only
     device_features_sel: u32,  // write only
     driver_features: u32,      // write only
@@ -37,7 +37,7 @@ pub struct VirtioBlockDisk {
     queue_notify: u32,         // write only
     interrupt_status: u32,     // read only
     status: u32,               // read and write
-    notify_clocks: Vec<u64>,
+    notify_cycles: Vec<u64>,
     contents: Vec<u8>,
 }
 
@@ -54,7 +54,7 @@ impl VirtioBlockDisk {
     pub const fn new() -> Self {
         Self {
             used_ring_index: 0,
-            clock: 0,
+            cycle: 0,
             device_features: 0,
             device_features_sel: 0,
             driver_features: 0,
@@ -67,7 +67,7 @@ impl VirtioBlockDisk {
             queue_notify: 0,
             status: 0,
             interrupt_status: 0,
-            notify_clocks: Vec::new(),
+            notify_cycles: Vec::new(),
             contents: Vec::new(), // XXX Storing the image in memory is extremely limiting
         }
     }
@@ -92,17 +92,17 @@ impl VirtioBlockDisk {
     ///
     /// # Arguments
     /// * `memory`
-    pub fn service(&mut self, memory: &mut Memory) {
-        if !self.notify_clocks.is_empty() && self.clock == self.notify_clocks[0] + DISK_ACCESS_DELAY
+    pub fn service(&mut self, memory: &mut Memory, cycle: u64) {
+        self.cycle = cycle;
+        if !self.notify_cycles.is_empty() && self.cycle >= self.notify_cycles[0] + DISK_ACCESS_DELAY
         {
             // bit 0 in interrupt_status register indicates
             // the interrupt was asserted because the device has used a buffer
             // in at least one of the active virtual queues.
             self.interrupt_status |= 1;
             self.handle_disk_access(memory);
-            self.notify_clocks.remove(0);
+            self.notify_cycles.remove(0);
         }
-        self.clock = self.clock.wrapping_add(1);
     }
 
     /// Loads register content
@@ -288,7 +288,7 @@ impl VirtioBlockDisk {
             }
             0x10001053 => {
                 self.queue_notify = (self.queue_notify & !(0xff << 24)) | ((value as u32) << 24);
-                self.notify_clocks.push(self.clock);
+                self.notify_cycles.push(self.cycle);
             }
             0x10001064 => {
                 // interrupt ack

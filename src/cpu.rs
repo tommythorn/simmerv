@@ -8,7 +8,9 @@
 
 mod fp;
 mod rvc;
-use crate::mmu::{AddressingMode, Mmu};
+
+use crate::mmu::MemoryAccessType::{Execute, Read, Write};
+use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::terminal::Terminal;
 use fnv::{self, FnvHashMap};
 pub use fp::RoundingMode;
@@ -56,13 +58,13 @@ const CSR_MTVAL: u16 = 0x343;
 const CSR_MIP: u16 = 0x344;
 const _CSR_PMPCFG0: u16 = 0x3a0;
 const _CSR_PMPADDR0: u16 = 0x3b0;
-const _CSR_MCYCLE: u16 = 0xb00;
+const CSR_MCYCLE: u16 = 0xb00;
 const CSR_CYCLE: u16 = 0xc00;
 const CSR_TIME: u16 = 0xc01;
 const _CSR_INSTRET: u16 = 0xc02;
 const _CSR_MHARTID: u16 = 0xf14;
 
-const MIP_MEIP: u64 = 0x800;
+pub const MIP_MEIP: u64 = 0x800;
 pub const MIP_MTIP: u64 = 0x080;
 pub const MIP_MSIP: u64 = 0x008;
 pub const MIP_SEIP: u64 = 0x200;
@@ -143,11 +145,14 @@ pub struct Cpu {
     fflags: u8,
     fs: u8,
 
-    clock: u64,
+    cycle: u64,
     privilege_mode: PrivilegeMode,
-    wfi: bool,
     pc: i64,
-    csr: Box<[u64]>,
+    pub insn_addr: i64, // XXX make accessor functions instead of pub?
+    pub insn: u32,      // This is the original original bytes, prior to decompression
+    wfi: bool,
+    csr: Box<[u64]>, // XXX this should be replaced with individual registers
+
     mmu: Mmu,
     reservation: Option<i64>,
     decode_cache: DecodeCache,
@@ -165,7 +170,7 @@ pub enum PrivilegeMode {
 #[derive(Debug)]
 pub struct Trap {
     pub trap_type: TrapType,
-    pub value: i64, // Trap type specific value
+    pub value: i64, // Trap type specific value (tval)
 }
 
 #[derive(Clone, Copy, Debug, FromPrimitive)]
@@ -242,10 +247,12 @@ impl Cpu {
             fflags: 0,
             fs: 1,
 
-            clock: 0,
+            cycle: 0,
             privilege_mode: PrivilegeMode::Machine,
             wfi: false,
             pc: 0,
+            insn_addr: 0,
+            insn: 0,
             csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
             mmu: Mmu::new(terminal),
             reservation: None,
@@ -288,49 +295,51 @@ impl Cpu {
         self.pc
     }
 
-    /// Runs program one cycle. Fetch, decode, and execution are completed in a cycle so far.
+    /// Runs program N cycles. Fetch, decode, and execution are completed in a cycle so far.
     #[allow(clippy::cast_sign_loss)]
-    pub fn run_soc(&mut self) {
-        let insn_addr = self.pc;
-        if let Err(e) = self.run_cpu_tick() {
-            self.handle_exception(&e, insn_addr);
+    pub fn run_soc(&mut self, cpu_steps: usize) {
+        for _ in 0..cpu_steps {
+            self.run_cpu_tick();
         }
-        self.mmu.service(&mut self.csr[CSR_MIP as usize]);
-        self.handle_interrupt(self.pc);
-        self.clock = self.clock.wrapping_add(1);
-
-        // cpu core clock : mtime clock in clint = 8 : 1 is
-        // just an arbiraty ratio.
-        // @TODO: Implement more properly
-        self.write_csr_raw(CSR_CYCLE, self.clock * 8);
+        self.mmu.service(self.cycle);
+        self.handle_interrupt();
     }
 
-    // @TODO: Rename?
-    #[allow(clippy::cast_sign_loss)]
-    fn run_cpu_tick(&mut self) -> Result<(), Trap> {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn run_cpu_tick(&mut self) {
+        self.cycle = self.cycle.wrapping_add(1);
         if self.wfi {
-            if self.read_csr_raw(CSR_MIE) & self.read_csr_raw(CSR_MIP) != 0 {
+            if self.mmu.mip & self.read_csr_raw(CSR_MIE) != 0 {
                 self.wfi = false;
             }
-            return Ok(());
+            return;
         }
 
-        let insn_addr = self.pc;
-        let word = match self.mmu.fetch_word(insn_addr as u64) {
-            Ok(word) => word,
-            Err(e) => {
-                self.pc = self.pc.wrapping_add(4); // @TODO: What if instruction is compressed?
-                return Err(e);
-            }
+        self.insn_addr = self.pc;
+        let Some(word) = self.memop(Execute, self.insn_addr, 0, 0, 4) else {
+            // Exception was triggered
+            // XXX For full correctness we mustn't fail if we _can_ fetch 16-bit
+            // _and_ they turn out to be a legal instruction.
+            return;
         };
-        let (insn, npc) = decompress(insn_addr, word);
-        self.pc = npc; // XXX To be eliminated
+        self.insn = word as u32;
+
+        let (insn, npc) = decompress(self.insn_addr, word as u32);
+        self.pc = npc;
         let Ok(decoded) = self.decode(insn) else {
-            panic!("Unknown instruction PC:{insn_addr:x} WORD:{word:x}");
+            self.handle_exception(&Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: word,
+            });
+            println!("Illegal instruction {:016x} {word:08x}", self.insn_addr);
+            return;
         };
-        let result = (decoded.operation)(self, insn, insn_addr as u64);
-        self.x[0] = 0; // hardwired zero
-        result
+        match (decoded.operation)(self.insn_addr as u64, insn, self) {
+            Err(e) => self.handle_exception(&e),
+            Ok(()) => {
+                self.x[0] = 0; // hardwired zero
+            }
+        }
     }
 
     /// Decodes a word instruction data and returns a reference to
@@ -372,12 +381,12 @@ impl Cpu {
     }
 
     #[allow(clippy::cast_sign_loss)]
-    fn handle_interrupt(&mut self, insn_addr: i64) {
+    fn handle_interrupt(&mut self) {
         use self::TrapType::{
             MachineExternalInterrupt, MachineSoftwareInterrupt, MachineTimerInterrupt,
             SupervisorExternalInterrupt, SupervisorSoftwareInterrupt, SupervisorTimerInterrupt,
         };
-        let minterrupt = self.read_csr_raw(CSR_MIP) & self.read_csr_raw(CSR_MIE);
+        let minterrupt = self.mmu.mip & self.read_csr_raw(CSR_MIE);
         if minterrupt == 0 {
             return;
         }
@@ -395,18 +404,15 @@ impl Cpu {
                 trap_type,
                 value: self.pc,
             };
-            if minterrupt & intr != 0 && self.handle_trap(&trap, insn_addr, true) {
-                // Who should clear mip bit?  A: the device that controls it.
-                // XXX This is wrong.
-                self.write_csr_raw(CSR_MIP, self.read_csr_raw(CSR_MIP) & !intr);
+            if minterrupt & intr != 0 && self.handle_trap(&trap, self.pc, true) {
                 self.wfi = false;
                 return;
             }
         }
     }
 
-    fn handle_exception(&mut self, exception: &Trap, insn_addr: i64) {
-        self.handle_trap(exception, insn_addr, false);
+    fn handle_exception(&mut self, exception: &Trap) {
+        self.handle_trap(exception, self.insn_addr, false);
     }
 
     #[allow(clippy::similar_names, clippy::too_many_lines)]
@@ -604,7 +610,7 @@ impl Cpu {
             }
             PrivilegeMode::Reserved => panic!(), // shouldn't happen
         }
-        //println!("Trap! {:x} Clock:{:x}", cause, self.clock);
+        //println!("Trap! {:x} Cycle:{:x}", cause, self.cycle);
         true
     }
 
@@ -615,18 +621,40 @@ impl Cpu {
 
     #[allow(clippy::cast_sign_loss)]
     fn read_csr(&self, address: u16) -> Result<u64, Trap> {
+        // SATP access in S requires TVM = 0
+        if address == CSR_SATP
+            && self.privilege_mode == PrivilegeMode::Supervisor
+            && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+        {
+            return Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: 0,
+            });
+        }
+
         if self.has_csr_access_privilege(address) {
             Ok(self.read_csr_raw(address))
         } else {
             Err(Trap {
                 trap_type: TrapType::IllegalInstruction,
-                value: self.pc.wrapping_sub(4), // @TODO: Is this always correct?
+                value: 0,
             })
         }
     }
 
     #[allow(clippy::cast_sign_loss)]
     fn write_csr(&mut self, address: u16, mut value: u64) -> Result<(), Trap> {
+        // SATP access in S requires TVM = 0
+        if address == CSR_SATP
+            && self.privilege_mode == PrivilegeMode::Supervisor
+            && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+        {
+            return Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: 0,
+            });
+        }
+
         if self.has_csr_access_privilege(address) {
             /*
             // Checking writability fails some tests so disabling so far
@@ -648,7 +676,7 @@ impl Cpu {
         } else {
             Err(Trap {
                 trap_type: TrapType::IllegalInstruction,
-                value: self.pc.wrapping_sub(4), // @TODO: Is this always correct?
+                value: 0,
             })
         }
     }
@@ -661,9 +689,11 @@ impl Cpu {
             CSR_FRM => self.read_frm() as u64,           // XXX exception if fs == 0
             CSR_FCSR => self.read_fcsr() as u64,         // XXX exception if fs == 0
             CSR_SSTATUS => self.csr[CSR_MSTATUS as usize] & 0x8000_0003_000d_e162,
-            CSR_SIE => self.csr[CSR_MIE as usize] & 0x222,
-            CSR_SIP => self.csr[CSR_MIP as usize] & 0x222,
+            CSR_SIE => self.csr[CSR_MIE as usize] & self.csr[CSR_MIDELEG as usize],
+            CSR_SIP => self.mmu.mip & self.csr[CSR_MIDELEG as usize],
+            CSR_MIP => self.mmu.mip,
             CSR_TIME => self.mmu.get_clint().read_mtime(),
+            CSR_CYCLE | CSR_MCYCLE => self.cycle,
             _ => self.csr[address as usize],
         }
     }
@@ -686,19 +716,25 @@ impl Cpu {
                 self.csr[CSR_MIE as usize] |= value & 0x222;
             }
             CSR_SIP => {
-                self.csr[CSR_MIP as usize] &= !0x222;
-                self.csr[CSR_MIP as usize] |= value & 0x222;
+                let mask = self.csr[CSR_MIDELEG as usize];
+                self.mmu.mip = value & mask | self.mmu.mip & !mask;
+            }
+            CSR_MIP => {
+                let mask = !0; // XXX 0x555 was too restrictive?? Stopped Ubuntu booting
+                self.mmu.mip = value & mask | self.mmu.mip & !mask;
             }
             CSR_MIDELEG => {
-                self.csr[address as usize] = value & 0x666; // from qemu
+                self.csr[CSR_MIDELEG as usize] = value & 0x222;
             }
             CSR_MSTATUS => {
                 self.csr[CSR_MSTATUS as usize] = value;
                 self.mmu.update_mstatus(value);
             }
             CSR_TIME => {
+                // XXX This should trap actually
                 self.mmu.get_mut_clint().write_mtime(value);
             }
+            /*CSR_CYCLE |*/ CSR_MCYCLE => self.cycle = value,
             _ => {
                 self.csr[address as usize] = value;
             }
@@ -739,33 +775,23 @@ impl Cpu {
             .update_ppn((satp >> SATP_PPN_SHIFT) & SATP_PPN_MASK);
     }
 
-    /// Disassembles an instruction pointed by Program Counter.
+    /// Disassembles an instruction pointed by Program Counter and
+    /// and return the [possibly] writeback register
     // XXX Make it take the writable as a parameter
     #[allow(clippy::cast_sign_loss)]
-    pub fn disassemble_next_instruction(&mut self) -> String {
-        // @TODO: Fetching can make a side effect,
-        // for example updating page table entry or update peripheral hardware registers.
-        // But ideally disassembling doesn't want to cause any side effect.
-        // How can we avoid side effect?
-        let original_word = match self.mmu.fetch_word(self.pc as u64) {
-            Ok(data) => data,
-            Err(trap) => {
-                return format!("{:016x} Trapped with {trap:?}!\n", self.pc);
-            }
-        };
+    pub fn disassemble(&mut self, original_word: u32) -> (String, usize) {
         let (word, _) = decompress(0, original_word);
         let Ok(inst) = self.decode_raw(word) else {
-            // XXX SHOULD RAISE ILLEGAL INSTRUCTION TRAP!
-            return format!(
-                "Unknown instruction PC:{:x} WORD:{original_word:x}",
-                self.pc
+            return (
+                format!("{:016x} {original_word:08x} Illegal instruction", self.pc),
+                0,
             );
         };
 
         let mut s = String::new();
         let _ = write!(s, "{:016x} {original_word:08x} {} ", self.pc, inst.name);
-        (inst.disassemble)(&mut s, self, word, self.pc as u64, true);
-        s
+        let wbr = (inst.disassemble)(&mut s, self, word, self.pc as u64, true);
+        (s, wbr)
     }
 
     /// Returns mutable `Mmu`
@@ -854,14 +880,125 @@ impl Cpu {
             rm
         }
     }
+
+    // Memory access
+    // - does virtual -> physical address translation
+    // - directly handles exception
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn memop(
+        &mut self,
+        access: MemoryAccessType,
+        baseva: i64,
+        offset: i64,
+        v: i64,
+        size: i64,
+    ) -> Option<i64> {
+        let va = baseva.wrapping_add(offset);
+
+        if va & 0xfff > 0x1000 - size {
+            // Slow path. All bytes aren't in the same page so not contigious
+            // in memory
+            return self.memop_slow(access, va, v, size);
+        }
+
+        let pa = match self.mmu.translate_address(va as u64, access) {
+            Ok(pa) => pa as i64,
+            Err(trap) => {
+                self.handle_exception(&trap);
+                return None;
+            }
+        };
+
+        let Ok(slice) = self.mmu.memory.slice(pa, size as usize) else {
+            return self.memop_slow(access, va, v, size);
+        };
+
+        match access {
+            Write => {
+                slice.copy_from_slice(&i64::to_le_bytes(v)[0..size as usize]);
+                None
+            }
+            Read | Execute => {
+                // Unsigned, sign extension is the job of the consumer
+                let mut buf = [0; 8];
+                buf[0..size as usize].copy_from_slice(slice);
+                Some(i64::from_le_bytes(buf))
+            }
+        }
+    }
+
+    // Slow path where we either span multiple pages and/or access outside memory
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn memop_slow(
+        &mut self,
+        access: MemoryAccessType,
+        va: i64,
+        mut v: i64,
+        size: i64,
+    ) -> Option<i64> {
+        let trap_type = match access {
+            Read => TrapType::LoadAccessFault,
+            Write => TrapType::StoreAccessFault,
+            Execute => TrapType::InstructionAccessFault,
+        };
+
+        let mut r: u64 = 0;
+        for i in 0..size {
+            let pa = match self.mmu.translate_address((va + i) as u64, access) {
+                Ok(pa) => pa,
+                Err(trap) => {
+                    self.handle_exception(&trap);
+                    return None;
+                }
+            };
+
+            let mut b = 0;
+            match self.mmu.memory.slice(pa as i64, 1) {
+                Ok(slice) => match access {
+                    Write => slice[0] = v as u8,
+                    Read | Execute => b = slice[0],
+                },
+
+                Err(()) => match access {
+                    Write => {
+                        let Ok(()) = self.mmu.store_mmio_u8(pa as i64, v as u8) else {
+                            self.handle_exception(&Trap {
+                                trap_type,
+                                value: va + 1,
+                            });
+                            return None;
+                        };
+                    }
+                    Read | Execute => {
+                        let Ok(w) = self.mmu.load_mmio_u8(pa) else {
+                            self.handle_exception(&Trap {
+                                trap_type,
+                                value: va + 1,
+                            });
+                            return None;
+                        };
+                        b = w;
+                    }
+                },
+            }
+            r |= u64::from(b) << (i * 8);
+            v >>= 8;
+        }
+        if matches!(access, Write) {
+            None
+        } else {
+            Some(r as i64)
+        }
+    }
 }
 
 struct Instruction {
     mask: u32,
     data: u32, // @TODO: rename
     name: &'static str,
-    operation: fn(cpu: &mut Cpu, word: u32, address: u64) -> Result<(), Trap>,
-    disassemble: fn(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool),
+    operation: fn(address: u64, word: u32, cpu: &mut Cpu) -> Result<(), Trap>,
+    disassemble:
+        fn(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> usize,
 }
 
 #[inline]
@@ -900,7 +1037,7 @@ const fn parse_format_b(word: u32) -> FormatB {
     }
 }
 
-fn dump_format_b(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) {
+fn dump_format_b(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> usize {
     let f = parse_format_b(word);
     *s += get_register_name(f.rs1);
     if evaluate {
@@ -911,6 +1048,7 @@ fn dump_format_b(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluat
         let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
     let _ = write!(s, ",{:x}", address.wrapping_add(f.imm));
+    0
 }
 
 struct FormatCSR {
@@ -927,7 +1065,13 @@ const fn parse_format_csr(word: u32) -> FormatCSR {
     }
 }
 
-fn dump_format_csr(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_csr(
+    s: &mut String,
+    cpu: &mut Cpu,
+    word: u32,
+    _address: u64,
+    evaluate: bool,
+) -> usize {
     let f = parse_format_csr(word);
     *s += get_register_name(f.rd);
     if evaluate {
@@ -942,6 +1086,7 @@ fn dump_format_csr(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, eval
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs]);
     }
+    f.rd
 }
 
 struct FormatI {
@@ -965,7 +1110,7 @@ const fn parse_format_i(word: u32) -> FormatI {
     }
 }
 
-fn dump_format_i(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_i(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> usize {
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     if evaluate {
@@ -976,9 +1121,16 @@ fn dump_format_i(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
     let _ = write!(s, ",{:x}", f.imm);
+    f.rd
 }
 
-fn dump_format_i_mem(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_i_mem(
+    s: &mut String,
+    cpu: &mut Cpu,
+    word: u32,
+    _address: u64,
+    evaluate: bool,
+) -> usize {
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     if evaluate {
@@ -989,6 +1141,7 @@ fn dump_format_i_mem(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, ev
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
     *s += ")";
+    f.rd
 }
 
 struct FormatJ {
@@ -1013,13 +1166,14 @@ const fn parse_format_j(word: u32) -> FormatJ {
     }
 }
 
-fn dump_format_j(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) {
+fn dump_format_j(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluate: bool) -> usize {
     let f = parse_format_j(word);
     *s += get_register_name(f.rd);
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
     let _ = write!(s, ",{:x}", address.wrapping_add(f.imm));
+    f.rd
 }
 
 #[derive(Debug)]
@@ -1039,7 +1193,7 @@ const fn parse_format_r(word: u32) -> FormatR {
     }
 }
 
-fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> usize {
     let f = parse_format_r(word);
     *s += get_register_name(f.rd);
     if evaluate {
@@ -1053,6 +1207,7 @@ fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
     }
+    f.rd
 }
 
 // has rs3
@@ -1072,7 +1227,13 @@ const fn parse_format_r2(word: u32) -> FormatR2 {
     }
 }
 
-fn dump_format_r2(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_r2(
+    s: &mut String,
+    cpu: &mut Cpu,
+    word: u32,
+    _address: u64,
+    evaluate: bool,
+) -> usize {
     let f = parse_format_r2(word);
     *s += get_register_name(f.rd);
     if evaluate {
@@ -1090,6 +1251,7 @@ fn dump_format_r2(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalu
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs3]);
     }
+    f.rd
 }
 
 struct FormatS {
@@ -1114,7 +1276,7 @@ const fn parse_format_s(word: u32) -> FormatS {
     }
 }
 
-fn dump_format_s(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_s(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> usize {
     let f = parse_format_s(word);
     *s += get_register_name(f.rs2);
     if evaluate {
@@ -1125,6 +1287,7 @@ fn dump_format_s(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
         let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
     }
     *s += ")";
+    0
 }
 
 struct FormatU {
@@ -1135,28 +1298,34 @@ struct FormatU {
 const fn parse_format_u(word: u32) -> FormatU {
     FormatU {
         rd: ((word >> 7) & 0x1f) as usize, // [11:7]
-        imm: (
-            match word & 0x80000000 {
-                                0x80000000 => 0xffffffff00000000,
-                                _ => 0
-                        } | // imm[63:32] = [31]
-                        ((word as u64) & 0xfffff000)
-            // imm[31:12] = [31:12]
-        ),
+        imm: (match word & 0x80000000 {
+            0x80000000 => 0xffffffff00000000,
+            _ => 0,
+        } | ((word as u64) & 0xfffff000)),
     }
 }
 
-fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) {
+fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evaluate: bool) -> usize {
     let f = parse_format_u(word);
     *s += get_register_name(f.rd);
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
     let _ = write!(s, ",{:x}", f.imm);
+
+    f.rd
 }
 
 #[allow(clippy::ptr_arg)] // Clippy can't tell that we can't change the function type
-const fn dump_empty(_s: &mut String, _cpu: &mut Cpu, _word: u32, _address: u64, _evaluate: bool) {}
+const fn dump_empty(
+    _s: &mut String,
+    _cpu: &mut Cpu,
+    _word: u32,
+    _address: u64,
+    _evaluate: bool,
+) -> usize {
+    0
+}
 
 fn get_register_name(num: usize) -> &'static str {
     match num {
@@ -1202,7 +1371,8 @@ const INSTRUCTION_NUM: usize = 162;
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
-    clippy::float_cmp
+    clippy::float_cmp,
+    clippy::cast_lossless
 )]
 const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     // RV32I
@@ -1210,7 +1380,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000007f,
         data: 0x00000037,
         name: "LUI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_u(word);
             cpu.x[f.rd] = f.imm as i64;
             Ok(())
@@ -1221,7 +1391,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000007f,
         data: 0x00000017,
         name: "AUIPC",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_u(word);
             cpu.x[f.rd] = address.wrapping_add(f.imm) as i64;
             Ok(())
@@ -1232,7 +1402,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000007f,
         data: 0x0000006f,
         name: "JAL",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_j(word);
             cpu.x[f.rd] = cpu.pc;
             cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1244,7 +1414,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00000067,
         name: "JALR",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             let tmp = cpu.pc;
             cpu.pc = cpu.x[f.rs1].wrapping_add(f.imm as i64);
@@ -1262,13 +1432,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
             }
             *s += ")";
+            f.rd
         },
     },
     Instruction {
         mask: 0x0000707f,
         data: 0x00000063,
         name: "BEQ",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_b(word);
             if cpu.x[f.rs1] == cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1281,7 +1452,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00001063,
         name: "BNE",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_b(word);
             if cpu.x[f.rs1] != cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1294,7 +1465,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00004063,
         name: "BLT",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_b(word);
             if cpu.x[f.rs1] < cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1307,7 +1478,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00005063,
         name: "BGE",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_b(word);
             if cpu.x[f.rs1] >= cpu.x[f.rs2] {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1320,7 +1491,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00006063,
         name: "BLTU",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_b(word);
             if (cpu.x[f.rs1] as u64) < (cpu.x[f.rs2] as u64) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1333,7 +1504,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00007063,
         name: "BGEU",
-        operation: |cpu, word, address| {
+        operation: |address, word, cpu| {
             let f = parse_format_b(word);
             if (cpu.x[f.rs1] as u64) >= (cpu.x[f.rs2] as u64) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
@@ -1346,12 +1517,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00000003,
         name: "LB",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu.mmu.load(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => i64::from(data as i8),
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 1) {
+                let v = v as i8 as i64;
+                cpu.x[f.rd] = v;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1360,15 +1531,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00001003,
         name: "LH",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu
-                .mmu
-                .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
-            {
-                Ok(data) => i64::from(data as i16),
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 2) {
+                let v = v as i16 as i64;
+                cpu.x[f.rd] = v;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1377,12 +1545,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00002003,
         name: "LW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => i64::from(data as i32),
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
+                cpu.x[f.rd] = v as i32 as i64;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1391,12 +1558,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00004003,
         name: "LBU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu.mmu.load(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => i64::from(data),
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 1) {
+                cpu.x[f.rd] = v;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1405,15 +1571,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00005003,
         name: "LHU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu
-                .mmu
-                .load_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
-            {
-                Ok(data) => i64::from(data),
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 2) {
+                cpu.x[f.rd] = v;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1422,10 +1584,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00000023,
         name: "SB",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.mmu
-                .store(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u8)
+            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 1);
+            Ok(())
         },
         disassemble: dump_format_s,
     },
@@ -1433,10 +1595,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00001023,
         name: "SH",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.mmu
-                .store_halfword(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u16)
+            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 2);
+            Ok(())
         },
         disassemble: dump_format_s,
     },
@@ -1444,10 +1606,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00002023,
         name: "SW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.mmu
-                .store_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u32)
+            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 4);
+            Ok(())
         },
         disassemble: dump_format_s,
     },
@@ -1455,7 +1617,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00000013,
         name: "ADDI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
             Ok(())
@@ -1466,7 +1628,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00002013,
         name: "SLTI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < f.imm);
             Ok(())
@@ -1477,7 +1639,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00003013,
         name: "SLTIU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u64) < (f.imm as u64));
             Ok(())
@@ -1488,7 +1650,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00004013,
         name: "XORI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = cpu.x[f.rs1] ^ f.imm;
             Ok(())
@@ -1499,7 +1661,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00006013,
         name: "ORI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = cpu.x[f.rs1] | f.imm;
             Ok(())
@@ -1510,7 +1672,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00007013,
         name: "ANDI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = cpu.x[f.rs1] & f.imm;
             Ok(())
@@ -1524,7 +1686,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00000033,
         name: "ADD",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
             Ok(())
@@ -1535,7 +1697,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x40000033,
         name: "SUB",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]);
             Ok(())
@@ -1546,7 +1708,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00001033,
         name: "SLL",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shl(cpu.x[f.rs2] as u32);
             Ok(())
@@ -1557,7 +1719,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00002033,
         name: "SLT",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < cpu.x[f.rs2]);
             Ok(())
@@ -1568,7 +1730,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00003033,
         name: "SLTU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u64) < (cpu.x[f.rs2] as u64));
             Ok(())
@@ -1579,7 +1741,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00004033,
         name: "XOR",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1] ^ cpu.x[f.rs2];
             Ok(())
@@ -1590,7 +1752,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00005033,
         name: "SRL",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = (cpu.x[f.rs1] as u64).wrapping_shr(cpu.x[f.rs2] as u32) as i64;
             Ok(())
@@ -1601,7 +1763,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x40005033,
         name: "SRA",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shr(cpu.x[f.rs2] as u32);
             Ok(())
@@ -1612,7 +1774,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00006033,
         name: "OR",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1] | cpu.x[f.rs2];
             Ok(())
@@ -1623,7 +1785,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x00007033,
         name: "AND",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1] & cpu.x[f.rs2];
             Ok(())
@@ -1656,7 +1818,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x00000073,
         name: "ECALL",
-        operation: |cpu, _word, address| {
+        operation: |address, _word, cpu| {
             let exception_type = match cpu.privilege_mode {
                 PrivilegeMode::User => TrapType::EnvironmentCallFromUMode,
                 PrivilegeMode::Supervisor => TrapType::EnvironmentCallFromSMode,
@@ -1682,12 +1844,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00006003,
         name: "LWU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1].wrapping_add(f.imm) as u64) {
-                Ok(data) => i64::from(data),
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
+                cpu.x[f.rd] = v;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1696,15 +1857,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00003003,
         name: "LD",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = match cpu
-                .mmu
-                .load_doubleword(cpu.x[f.rs1].wrapping_add(f.imm) as u64)
-            {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 8) {
+                cpu.x[f.rd] = v;
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -1713,10 +1870,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00003023,
         name: "SD",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.mmu
-                .store_doubleword(cpu.x[f.rs1].wrapping_add(f.imm) as u64, cpu.x[f.rs2] as u64)
+            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 8);
+            Ok(())
         },
         disassemble: dump_format_s,
     },
@@ -1724,7 +1881,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfc00707f, // RV64I version!
         data: 0x00001013,
         name: "SLLI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
@@ -1737,7 +1894,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfc00707f,
         data: 0x00005013,
         name: "SRLI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
@@ -1750,7 +1907,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfc00707f,
         data: 0x40005013,
         name: "SRAI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
@@ -1763,7 +1920,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x0000001b,
         name: "ADDIW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(f.imm) as i32);
             Ok(())
@@ -1774,7 +1931,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0000101b,
         name: "SLLIW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let shamt = f.rs2 as u32;
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] << shamt) as i32);
@@ -1786,7 +1943,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfc00707f,
         data: 0x0000501b,
         name: "SRLIW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
@@ -1799,7 +1956,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfc00707f,
         data: 0x4000501b,
         name: "SRAIW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let shamt = (word >> 20) & 0x1f;
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32) >> shamt);
@@ -1811,7 +1968,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0000003b,
         name: "ADDW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]) as i32);
             Ok(())
@@ -1822,7 +1979,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x4000003b,
         name: "SUBW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]) as i32);
             Ok(())
@@ -1833,7 +1990,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0000103b,
         name: "SLLW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shl(cpu.x[f.rs2] as u32) as i32);
             Ok(())
@@ -1844,7 +2001,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0000503b,
         name: "SRLW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shr(cpu.x[f.rs2] as u32) as i32);
             Ok(())
@@ -1855,7 +2012,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x4000503b,
         name: "SRAW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_shr(cpu.x[f.rs2] as u32));
             Ok(())
@@ -1878,7 +2035,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00001073,
         name: "CSRRW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = match cpu.read_csr(f.csr) {
                 Ok(data) => data as i64,
@@ -1898,7 +2055,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00002073,
         name: "CSRRS",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = match cpu.read_csr(f.csr) {
                 Ok(data) => data as i64,
@@ -1918,7 +2075,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00003073,
         name: "CSRRC",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = match cpu.read_csr(f.csr) {
                 Ok(data) => data as i64,
@@ -1938,7 +2095,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00005073,
         name: "CSRRWI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = match cpu.read_csr(f.csr) {
                 Ok(data) => data as i64,
@@ -1957,7 +2114,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00006073,
         name: "CSRRSI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = match cpu.read_csr(f.csr) {
                 Ok(data) => data as i64,
@@ -1976,7 +2133,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00007073,
         name: "CSRRCI",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = match cpu.read_csr(f.csr) {
                 Ok(data) => data as i64,
@@ -1996,7 +2153,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02000033,
         name: "MUL",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.x[f.rs1].wrapping_mul(cpu.x[f.rs2]);
             Ok(())
@@ -2007,7 +2164,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02001033,
         name: "MULH",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = ((i128::from(cpu.x[f.rs1]) * i128::from(cpu.x[f.rs2])) >> 64) as i64;
             Ok(())
@@ -2018,7 +2175,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02002033,
         name: "MULHSU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] =
                 ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64) as i64;
@@ -2030,7 +2187,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02003033,
         name: "MULHU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = (u128::from(cpu.x[f.rs1] as u64)
                 .wrapping_mul(u128::from(cpu.x[f.rs2] as u64))
@@ -2043,7 +2200,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02004033,
         name: "DIV",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1];
             let divisor = cpu.x[f.rs2];
@@ -2062,7 +2219,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02005033,
         name: "DIVU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1] as u64;
             let divisor = cpu.x[f.rs2] as u64;
@@ -2079,7 +2236,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02006033,
         name: "REM",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1];
             let divisor = cpu.x[f.rs2];
@@ -2098,7 +2255,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x02007033,
         name: "REMU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1] as u64;
             let divisor = cpu.x[f.rs2] as u64;
@@ -2115,7 +2272,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0200003b,
         name: "MULW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32));
             Ok(())
@@ -2126,7 +2283,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0200403b,
         name: "DIVW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1] as i32;
             let divisor = cpu.x[f.rs2] as i32;
@@ -2145,7 +2302,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0200503b,
         name: "DIVUW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1] as u32;
             let divisor = cpu.x[f.rs2] as u32;
@@ -2162,7 +2319,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0200603b,
         name: "REMW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1] as i32;
             let divisor = cpu.x[f.rs2] as i32;
@@ -2181,7 +2338,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x0200703b,
         name: "REMUW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.x[f.rs1] as u32;
             let divisor = cpu.x[f.rs2] as u32;
@@ -2198,10 +2355,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf9f0707f,
         data: 0x1000202f,
         name: "LR.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            cpu.x[f.rd] = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => {
                     cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
                     i64::from(data as i32)
@@ -2216,11 +2373,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x1800202f,
         name: "SC.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
             cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
-                match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
+                match cpu
+                    .mmu
+                    .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32)
+                {
                     Ok(()) => {
                         cpu.reservation = None;
                         0
@@ -2238,13 +2398,16 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x0800202f,
         name: "AMOSWAP.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32) {
+            match cpu
+                .mmu
+                .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32)
+            {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2257,15 +2420,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x0000202f,
         name: "AMOADD.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u32)
+                .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u32)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2279,15 +2442,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x2000202f,
         name: "AMOXOR.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_word(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32 ^ tmp)
+                .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32 ^ tmp)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2301,15 +2464,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x6000202f,
         name: "AMOAND.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_word(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u32)
+                .store_virt_u32(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u32)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2323,15 +2486,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x4000202f,
         name: "AMOOR.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_word(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u32)
+                .store_virt_u32(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u32)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2345,9 +2508,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x8000202f,
         name: "AMOMIN.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i32,
                 Err(e) => return Err(e),
             };
@@ -2356,7 +2519,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min as u32) {
+            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, min as u32) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2369,9 +2532,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0xa000202f,
         name: "AMOMAX.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i32,
                 Err(e) => return Err(e),
             };
@@ -2380,7 +2543,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max as u32) {
+            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, max as u32) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2393,9 +2556,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0xc000202f,
         name: "AMOMINU.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
@@ -2404,7 +2567,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, min) {
+            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, min) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2419,9 +2582,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0xe000202f,
         name: "AMOMAXU.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_word(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
@@ -2430,7 +2593,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_word(cpu.x[f.rs1] as u64, max) {
+            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2444,10 +2607,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf9f0707f,
         data: 0x1000302f,
         name: "LR.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            cpu.x[f.rd] = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => {
                     cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
                     data as i64
@@ -2462,13 +2625,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x1800302f,
         name: "SC.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
             cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
                 match cpu
                     .mmu
-                    .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
+                    .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
                 {
                     Ok(()) => {
                         cpu.reservation = None;
@@ -2487,15 +2650,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x0800302f,
         name: "AMOSWAP.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
+                .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2509,15 +2672,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x0000302f,
         name: "AMOADD.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u64)
+                .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2531,15 +2694,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x2000302f,
         name: "AMOXOR.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64 ^ tmp)
+                .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64 ^ tmp)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2553,15 +2716,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x6000302f,
         name: "AMOAND.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u64)
+                .store_virt_u64(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2575,15 +2738,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x4000302f,
         name: "AMOOR.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_doubleword(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u64)
+                .store_virt_u64(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
@@ -2597,9 +2760,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0x8000302f,
         name: "AMOMIN.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
@@ -2608,7 +2771,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min as u64) {
+            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, min as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2621,9 +2784,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0xa000302f,
         name: "AMOMAX.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
@@ -2632,7 +2795,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max as u64) {
+            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, max as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2645,9 +2808,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0xc000302f,
         name: "AMOMINU.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
@@ -2656,7 +2819,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, min) {
+            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, min) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2669,9 +2832,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf800707f,
         data: 0xe000302f,
         name: "AMOMAXU.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_doubleword(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
@@ -2680,7 +2843,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 tmp
             };
-            match cpu.mmu.store_doubleword(cpu.x[f.rs1] as u64, max) {
+            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
@@ -2694,9 +2857,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00002007,
         name: "FLW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
+            cpu.f[f.rd] =
+                cpu.mmu.load_virt_u64_(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -2705,10 +2869,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00002027,
         name: "FSW",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_s(word);
             cpu.mmu
-                .store32(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
+                .store_virt_u32_(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
         },
         disassemble: dump_format_s,
     },
@@ -2716,7 +2880,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x00000043,
         name: "FMADD.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             // XXX Update fflags
             cpu.write_f32(
@@ -2732,7 +2896,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x00000047,
         name: "FMSUB.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             cpu.write_f32(
                 f.rd,
@@ -2747,7 +2911,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x0000004b,
         name: "FNMSUB.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             cpu.write_f32(
                 f.rd,
@@ -2763,7 +2927,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x0000004f,
         name: "FNMADD.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             cpu.write_f32(
                 f.rd,
@@ -2779,7 +2943,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x00000053,
         name: "FADD.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1) + cpu.read_f32(f.rs2));
             Ok(())
@@ -2790,7 +2954,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x08000053,
         name: "FSUB.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1) - cpu.read_f32(f.rs2));
             Ok(())
@@ -2801,7 +2965,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x10000053,
         name: "FMUL.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             // @TODO: Update fcsr
             let f = parse_format_r(word);
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1) * cpu.read_f32(f.rs2));
@@ -2813,7 +2977,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x18000053,
         name: "FDIV.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             //let rm = cpu.get_rm(word);
 
@@ -2839,7 +3003,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0x58000053,
         name: "FSQRT.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1).sqrt());
             Ok(())
@@ -2850,7 +3014,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x20000053,
         name: "FSGNJ.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
@@ -2864,7 +3028,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x20001053,
         name: "FSGNJN.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
@@ -2878,7 +3042,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x20002053,
         name: "FSGNJX.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
@@ -2892,7 +3056,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x28000053,
         name: "FMIN.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (f1, f2) = (cpu.read_f32(f.rs1), cpu.read_f32(f.rs2));
             let r = if f1 < f2 { f1 } else { f2 };
@@ -2905,7 +3069,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x28001053,
         name: "FMAX.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (f1, f2) = (cpu.read_f32(f.rs1), cpu.read_f32(f.rs2));
             let r = if f1 > f2 { f1 } else { f2 };
@@ -2918,7 +3082,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc0000053,
         name: "FCVT.W.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
             Ok(())
@@ -2929,7 +3093,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc0100053,
         name: "FCVT.WU.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) as u32);
             Ok(())
@@ -2940,7 +3104,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0707f,
         data: 0xe0000053,
         name: "FMV.X.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as i32);
             Ok(())
@@ -2951,7 +3115,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa0002053,
         name: "FEQ.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) == cpu.read_f32(f.rs2));
@@ -2965,7 +3129,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa0001053,
         name: "FLT.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) < cpu.read_f32(f.rs2));
@@ -2978,7 +3142,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa0000053,
         name: "FLE.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) <= cpu.read_f32(f.rs2));
@@ -3002,7 +3166,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd0000053,
         name: "FCVT.S.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (r, fflags) = cvt_i32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
             cpu.f[f.rd] = r;
@@ -3015,7 +3179,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd0100053,
         name: "FCVT.S.WU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (r, fflags) = cvt_u32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
             cpu.f[f.rd] = r;
@@ -3028,7 +3192,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0707f,
         data: 0xf0000053,
         name: "FMV.W.X",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.f[f.rd] = fp::NAN_BOX_F32 | cpu.x[f.rs1];
             Ok(())
@@ -3040,7 +3204,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc0200053,
         name: "FCVT.L.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f32(f.rs1) as i64;
@@ -3053,7 +3217,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc0300053,
         name: "FCVT.LU.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f32(f.rs1) as u64 as i64;
@@ -3066,7 +3230,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd0200053,
         name: "FCVT.S.L",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (r, fflags) = cvt_i64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
             cpu.f[f.rd] = r;
@@ -3079,7 +3243,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd0300053,
         name: "FCVT.S.LU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
 
@@ -3095,11 +3259,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00003007,
         name: "FLD",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             // FP load/stores loads *bits* thus doesn't pass through f32/f64
             // XXX This really should be `cpu.f[f.rd] = cpu.mmu.ld64(cpu.load_ea(f))?;`
-            cpu.f[f.rd] = cpu.mmu.load64(cpu.x[f.rs1].wrapping_add(f.imm))?;
+            cpu.f[f.rd] = cpu.mmu.load_virt_u64_(cpu.x[f.rs1].wrapping_add(f.imm))?;
             Ok(())
         },
         disassemble: dump_format_i,
@@ -3108,7 +3272,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0000707f,
         data: 0x00003027,
         name: "FSD",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_s(word);
             cpu.mmu
                 .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
@@ -3119,7 +3283,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x02000043,
         name: "FMADD.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             // XXX Update fflags
             cpu.write_f64(
@@ -3135,7 +3299,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x02000047,
         name: "FMSUB.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             cpu.write_f64(
                 f.rd,
@@ -3150,7 +3314,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x0200004b,
         name: "FNMSUB.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             cpu.write_f64(
                 f.rd,
@@ -3166,7 +3330,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0x0600007f,
         data: 0x0200004f,
         name: "FNMADD.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
             cpu.write_f64(
                 f.rd,
@@ -3182,7 +3346,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x02000053,
         name: "FADD.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1) + cpu.read_f64(f.rs2));
             Ok(())
@@ -3193,7 +3357,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x0a000053,
         name: "FSUB.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1) - cpu.read_f64(f.rs2));
             Ok(())
@@ -3204,7 +3368,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x12000053,
         name: "FMUL.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             // @TODO: Update fcsr
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1) * cpu.read_f64(f.rs2));
@@ -3216,7 +3380,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00007f,
         data: 0x1a000053,
         name: "FDIV.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let dividend = cpu.read_f64(f.rs1);
             let divisor = cpu.read_f64(f.rs2);
@@ -3239,7 +3403,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0x5a000053,
         name: "FSQRT.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1).sqrt());
             Ok(())
@@ -3250,7 +3414,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x22000053,
         name: "FSGNJ.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
@@ -3264,7 +3428,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x22001053,
         name: "FSGNJN.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
@@ -3278,7 +3442,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x22002053,
         name: "FSGNJX.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
@@ -3292,7 +3456,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x2A000053,
         name: "FMIN.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (f1, f2) = (cpu.read_f64(f.rs1), cpu.read_f64(f.rs2));
             let r = if f1 < f2 { f1 } else { f2 };
@@ -3305,7 +3469,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0x2A001053,
         name: "FMAX.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let (f1, f2) = (cpu.read_f64(f.rs1), cpu.read_f64(f.rs2));
             let r = if f1 > f2 { f1 } else { f2 };
@@ -3318,7 +3482,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0x40100053,
         name: "FCVT.S.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f32(f.rd, cpu.read_f64(f.rs1) as f32);
             Ok(())
@@ -3329,7 +3493,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0x42000053,
         name: "FCVT.D.S",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, f64::from(cpu.read_f32(f.rs1)));
             Ok(())
@@ -3340,7 +3504,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa2002053,
         name: "FEQ.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) == cpu.read_f64(f.rs2));
             Ok(())
@@ -3351,7 +3515,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa2001053,
         name: "FLT.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) < cpu.read_f64(f.rs2));
             Ok(())
@@ -3362,7 +3526,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe00707f,
         data: 0xa2000053,
         name: "FLE.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) <= cpu.read_f64(f.rs2));
             Ok(())
@@ -3384,7 +3548,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc2000053,
         name: "FCVT.W.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
             Ok(())
@@ -3395,7 +3559,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc2100053,
         name: "FCVT.WU.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as u32);
             Ok(())
@@ -3406,7 +3570,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd2000053,
         name: "FCVT.D.W",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as i32));
             Ok(())
@@ -3417,7 +3581,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd2100053,
         name: "FCVT.D.WU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as u32));
             Ok(())
@@ -3429,7 +3593,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc2200053,
         name: "FCVT.L.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f64(f.rs1) as i64;
@@ -3442,7 +3606,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xc2300053,
         name: "FCVT.LU.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f64(f.rs1) as u64 as i64;
@@ -3455,7 +3619,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0707f,
         data: 0xe2000053,
         name: "FMV.X.D",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.f[f.rs1];
             Ok(())
@@ -3466,7 +3630,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd2200053,
         name: "FCVT.D.L",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, cpu.x[f.rs1] as f64);
             Ok(())
@@ -3477,7 +3641,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0007f,
         data: 0xd2300053,
         name: "FCVT.D.LU",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.write_f64(f.rd, cpu.x[f.rs1] as u64 as f64);
             Ok(())
@@ -3488,7 +3652,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0707f,
         data: 0xf2000053,
         name: "FMV.D.X",
-        operation: |cpu, word, _address| {
+        operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.f[f.rd] = cpu.x[f.rs1];
             Ok(())
@@ -3509,7 +3673,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x30200073,
         name: "MRET",
-        operation: |cpu, _word, _address| {
+        operation: |_address, _word, cpu| {
             cpu.pc = match cpu.read_csr(CSR_MEPC) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
@@ -3540,8 +3704,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x10200073,
         name: "SRET",
-        operation: |cpu, _word, _address| {
+        operation: |_address, _word, cpu| {
             // @TODO: Throw error if higher privilege return instruction is executed
+
+            if cpu.privilege_mode == PrivilegeMode::User
+                || cpu.privilege_mode == PrivilegeMode::Supervisor
+                    && cpu.csr[CSR_MSTATUS as usize] & MSTATUS_TSR != 0
+            {
+                cpu.handle_exception(&Trap {
+                    trap_type: TrapType::IllegalInstruction,
+                    value: 0,
+                });
+                return Ok(());
+            }
+
             cpu.pc = match cpu.read_csr(CSR_SEPC) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
@@ -3571,8 +3747,26 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe007fff,
         data: 0x12000073,
         name: "SFENCE.VMA",
-        operation: |_cpu, _word, _address| {
-            // Do nothing?
+        operation: |_address, _word, cpu| {
+            if cpu.privilege_mode == PrivilegeMode::User
+                || cpu.privilege_mode == PrivilegeMode::Supervisor
+                    && cpu.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+            {
+                cpu.handle_exception(&Trap {
+                    trap_type: TrapType::IllegalInstruction,
+                    value: 0,
+                });
+            } else {
+                /*
+                    if f.rs1 == 0 {
+                    // tlb_flush_all(s);
+                } else {
+                    // tlb_flush_vaddr(s, read_reg(rs1));
+                }
+                     */
+
+                /* the current code TLB may have been flushed */
+            }
             Ok(())
         },
         disassemble: dump_empty,
@@ -3581,8 +3775,24 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x10500073,
         name: "WFI",
-        operation: |cpu, _word, _address| {
-            cpu.wfi = true;
+        operation: |_address, _word, cpu| {
+            /*
+             * "When TW=1, if WFI is executed in S- mode, and it does
+             * not complete within an implementation-specific, bounded
+             * time limit, the WFI instruction causes an illegal
+             * instruction trap."
+             */
+            if matches!(cpu.privilege_mode, PrivilegeMode::User)
+                || matches!(cpu.privilege_mode, PrivilegeMode::Supervisor)
+                    && cpu.read_csr_raw(CSR_MSTATUS) & MSTATUS_TW != 0
+            {
+                cpu.handle_exception(&Trap {
+                    trap_type: TrapType::IllegalInstruction,
+                    value: 0,
+                });
+            } else {
+                cpu.wfi = true;
+            }
             Ok(())
         },
         disassemble: dump_empty,
@@ -3896,22 +4106,22 @@ mod test_cpu {
         cpu.update_pc(DRAM_BASE as i64);
 
         // Write non-compressed "addi x1, x1, 1" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00108093) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00108093) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         // Write compressed "addi x8, x0, 8" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE + 4, 0x20) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE + 4, 0x20) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
 
-        cpu.run_soc();
+        cpu.run_soc(1);
 
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         assert_eq!(1, cpu.read_register(1));
 
-        cpu.run_soc();
+        cpu.run_soc(1);
 
         assert_eq!(DRAM_BASE as i64 + 6, cpu.read_pc());
         assert_eq!(8, cpu.read_register(8));
@@ -3924,16 +4134,21 @@ mod test_cpu {
         cpu.get_mut_mmu().init_memory(4);
         cpu.update_pc(DRAM_BASE as i64);
         // write non-compressed "addi a0, a0, 12" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, 0xc50513) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0xc50513) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         assert_eq!(DRAM_BASE as i64, cpu.read_pc());
         assert_eq!(0, cpu.read_register(10));
-        match cpu.run_cpu_tick() {
+        cpu.run_cpu_tick();
+        /*
+            should test for handing paniced
+            {
+            match
             Ok(()) => {}
             Err(_e) => panic!("run_cpu_tick() unexpectedly did panic"),
         }
+        */
         // .run_cpu_tick() increments the program counter by 4 for
         // non-compressed instruction.
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
@@ -3985,24 +4200,24 @@ mod test_cpu {
         cpu.get_mut_mmu().init_memory(4);
         cpu.update_pc(DRAM_BASE as i64);
         // write WFI instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, wfi_instruction) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, wfi_instruction) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
-        cpu.run_soc();
+        cpu.run_soc(1);
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         for _i in 0..10 {
             // Until interrupt happens, .tick() does nothing
             // @TODO: Check accurately that the state is unchanged
-            cpu.run_soc();
+            cpu.run_soc(1);
             assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         }
         // Machine timer interrupt
         cpu.write_csr_raw(CSR_MIE, MIP_MTIP);
-        cpu.write_csr_raw(CSR_MIP, MIP_MTIP);
+        cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(CSR_MSTATUS, 0x8);
         cpu.write_csr_raw(CSR_MTVEC, 0x0);
-        cpu.run_soc();
+        cpu.run_soc(1);
         // Interrupt happened and moved to handler
         assert_eq!(0, cpu.read_pc());
     }
@@ -4014,7 +4229,7 @@ mod test_cpu {
         let mut cpu = create_cpu();
         cpu.get_mut_mmu().init_memory(4);
         // Write non-compressed "addi x0, x0, 1" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00100013) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
@@ -4022,10 +4237,10 @@ mod test_cpu {
 
         // Machine timer interrupt but mie in mstatus is not enabled yet
         cpu.write_csr_raw(CSR_MIE, MIP_MTIP);
-        cpu.write_csr_raw(CSR_MIP, MIP_MTIP);
+        cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(CSR_MTVEC, handler_vector);
 
-        cpu.run_soc();
+        cpu.run_soc(1);
 
         // Interrupt isn't caught because mie is disabled
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
@@ -4034,7 +4249,7 @@ mod test_cpu {
         // Enable mie in mstatus
         cpu.write_csr_raw(CSR_MSTATUS, 0x8);
 
-        cpu.run_soc();
+        cpu.run_soc(1);
 
         // Interrupt happened and moved to handler
         assert_eq!(handler_vector as i64, cpu.read_pc());
@@ -4056,14 +4271,14 @@ mod test_cpu {
         let mut cpu = create_cpu();
         cpu.get_mut_mmu().init_memory(4);
         // Write ECALL instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00000073) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00000073) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         cpu.write_csr_raw(CSR_MTVEC, handler_vector);
         cpu.update_pc(DRAM_BASE as i64);
 
-        cpu.run_soc();
+        cpu.run_soc(1);
 
         // Interrupt happened and moved to handler
         assert_eq!(handler_vector as i64, cpu.read_pc());
@@ -4085,49 +4300,27 @@ mod test_cpu {
         cpu.update_pc(DRAM_BASE as i64);
 
         // Write non-compressed "addi x0, x0, 1" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00100013) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         // Write non-compressed "addi x1, x1, 1" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE + 4, 0x00108093) {
+        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE + 4, 0x00108093) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
 
         // Test x0
         assert_eq!(0, cpu.read_register(0));
-        cpu.run_soc(); // Execute  "addi x0, x0, 1"
-                       // x0 is still zero because it's hardcoded zero
+        cpu.run_soc(1); // Execute  "addi x0, x0, 1"
+                        // x0 is still zero because it's hardcoded zero
         assert_eq!(0, cpu.read_register(0));
 
         // Test x1
         assert_eq!(0, cpu.read_register(1));
-        cpu.run_soc(); // Execute  "addi x1, x1, 1"
-                       // x1 is not hardcoded zero
+        cpu.run_soc(1); // Execute  "addi x1, x1, 1"
+                        // x1 is not hardcoded zero
         assert_eq!(1, cpu.read_register(1));
-    }
-
-    #[test]
-    #[allow(clippy::match_wild_err_arm)]
-    fn disassemble_next_instruction() {
-        let mut cpu = create_cpu();
-        cpu.get_mut_mmu().init_memory(4);
-        cpu.update_pc(DRAM_BASE as i64);
-
-        // Write non-compressed "addi x0, x0, 1" instruction
-        match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x00100013) {
-            Ok(()) => {}
-            Err(_e) => panic!("Failed to store"),
-        }
-
-        assert_eq!(
-            "0000000080000000 00100013 ADDI zero:0,zero:0,1",
-            cpu.disassemble_next_instruction()
-        );
-
-        // No effect to PC
-        assert_eq!(DRAM_BASE as i64, cpu.read_pc());
     }
 }
 

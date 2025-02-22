@@ -1,5 +1,5 @@
 use riscv_emu_rust::default_terminal::DefaultTerminal;
-use riscv_emu_rust::{Emulator, Trap, TrapType};
+use riscv_emu_rust::Emulator;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
@@ -154,49 +154,12 @@ impl WasmRiscv {
 
     /// Disassembles an instruction Program Counter points to.
     /// Use `get_output()` to get the disassembled strings.
-    pub fn disassemble_next_instruction(&mut self) {
-        let s = self.emulator.get_mut_cpu().disassemble_next_instruction();
+    pub fn disassemble(&mut self) {
+        let cpu = self.emulator.get_mut_cpu();
+        let (s, _wbr) = cpu.disassemble(cpu.insn);
         let bytes = s.as_bytes();
         for &b in bytes {
             self.emulator.get_mut_terminal().put_byte(b);
-        }
-    }
-
-    /// Loads eight-byte data from memory. Loading can cause an error or trap.
-    /// If an error or trap happens `error[0]` holds non-zero error code and
-    /// this method returns zero. Otherwise `error[0]` holds zero and this
-    /// method returns loaded data.
-    ///
-    /// # Arguments
-    /// * `address` eight-byte virtual address
-    /// * `error` If an error or trap happens error[0] holds non-zero.
-    ///    Otherwize zero.
-    ///   * 0: No error
-    ///   * 1: Page fault
-    ///   * 2: Invalid address (e.g. translated physical address points to out
-    ///        of valid memory address range)
-    pub fn load_doubleword(&mut self, address: u64, error: &mut [u8]) -> u64 {
-        match self
-            .emulator
-            .get_mut_cpu()
-            .get_mut_mmu()
-            .load_doubleword(address)
-        {
-            Ok(data) => {
-                error[0] = 0;
-                data
-            }
-            Err(Trap {
-                trap_type: TrapType::LoadPageFault,
-                value: _,
-            }) => {
-                error[0] = 1;
-                0
-            }
-            Err(_) => {
-                error[0] = 2;
-                0
-            }
         }
     }
 

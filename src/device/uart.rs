@@ -57,7 +57,7 @@ impl Uart {
 
         // Reads input.
         // 0x38400 is just an arbitary number @TODO: Fix me
-        if (self.clock % 0x38400) == 0 && self.rbr == 0 {
+        if (self.clock % 4192) == 0 && self.lsr & LSR_DATA_AVAILABLE == 0 {
             let value = self.terminal.get_input();
             if value != 0 {
                 self.rbr = value;
@@ -66,18 +66,6 @@ impl Uart {
                 if (self.ier & IER_RXINT_BIT) != 0 {
                     rx_ip = true;
                 }
-            }
-        }
-
-        // Writes output.
-        // 0x10 is just an arbitary number @TODO: Fix me
-        if (self.clock % 0x10) == 0 && self.thr != 0 {
-            self.terminal.put_byte(self.thr);
-            self.thr = 0;
-            self.lsr |= LSR_THR_EMPTY;
-            self.update_iir();
-            if (self.ier & IER_THREINT_BIT) != 0 {
-                self.thre_ip = true;
             }
         }
 
@@ -156,15 +144,13 @@ impl Uart {
     /// # Arguments
     /// * `address`
     /// * `value`
-    pub const fn store(&mut self, address: u64, value: u8) {
+    pub fn store(&mut self, address: u64, value: u8) {
         //println!("UART Store AD:{:X} VAL:{:X}", address, value);
         match address {
             // Transfer Holding Register
             0x10000000 => {
                 if (self.lcr >> 7) == 0 {
-                    self.thr = value;
-                    self.lsr &= !LSR_THR_EMPTY;
-                    self.update_iir();
+                    self.terminal.put_byte(value);
                 }
             }
             0x10000001 => {

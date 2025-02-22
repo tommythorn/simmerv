@@ -8,14 +8,10 @@ use crate::device::clint::Clint;
 use crate::device::plic::Plic;
 use crate::device::uart::Uart;
 use crate::device::virtio_block_disk::VirtioBlockDisk;
+pub use crate::memory::*;
 use crate::terminal::Terminal;
 use fnv::FnvHashMap;
 use num_traits::FromPrimitive;
-
-/// DRAM base address. Offset from this base address
-/// is the address in main memory.
-pub const DRAM_BASE: u64 = 0x80000000;
-
 const DTB_SIZE: usize = 0xfe0;
 
 /// Emulates Memory Management Unit. It holds the Main memory and peripheral
@@ -25,10 +21,11 @@ const DTB_SIZE: usize = 0xfe0;
 /// It may also be said Bus.
 /// @TODO: Memory protection is not implemented yet. We should support.
 pub struct Mmu {
+    pub mip: u64, // We keep it here for easy sharing
+    pub memory: Memory,
     ppn: u64,
     addressing_mode: AddressingMode,
     privilege_mode: PrivilegeMode,
-    memory: Memory,
     dtb: Vec<u8>,
     disk: VirtioBlockDisk,
     plic: Plic,
@@ -63,8 +60,9 @@ pub enum AddressingMode {
     SV48, // @TODO: Implement
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-enum MemoryAccessType {
+// XXX Shouldn't this be in cpu.rs?
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum MemoryAccessType {
     Execute,
     Read,
     Write,
@@ -90,6 +88,7 @@ impl Mmu {
         dtb[..content.len()].copy_from_slice(&content[..]);
 
         Self {
+            mip: 0,
             ppn: 0,
             addressing_mode: AddressingMode::None,
             privilege_mode: PrivilegeMode::Machine,
@@ -151,14 +150,14 @@ impl Mmu {
     }
 
     /// Runs one cycle of MMU and peripheral devices.
-    pub fn service(&mut self, mip: &mut u64) {
-        self.clint.service(mip);
-        self.disk.service(&mut self.memory);
+    pub fn service(&mut self, cycle: u64) {
+        self.clint.service(cycle, &mut self.mip);
+        self.disk.service(&mut self.memory, cycle);
         self.uart.service();
         self.plic.service(
             self.disk.is_interrupting(),
             self.uart.is_interrupting(),
-            mip,
+            &mut self.mip,
         );
     }
 
@@ -198,40 +197,6 @@ impl Mmu {
         self.clear_page_cache();
     }
 
-    /// Fetches an instruction byte. This method takes virtual address
-    /// and translates into physical address inside.
-    ///
-    /// # Arguments
-    /// * `v_address` Virtual address
-    fn fetch_u8(&mut self, v_address: u64) -> Result<u8, Trap> {
-        let p_address = self.translate_address(v_address, MemoryAccessType::Execute)?;
-        Ok(self.load_raw(p_address))
-    }
-
-    /// Fetches instruction four bytes. This method takes virtual address
-    /// and translates into physical address inside.
-    ///
-    /// # Arguments
-    /// * `v_address` Virtual address
-    /// # Errors
-    /// Exceptions are returned as errors
-    pub fn fetch_word(&mut self, v_address: u64) -> Result<u32, Trap> {
-        let width = 4;
-        if v_address & 0xfff <= 0x1000 - width {
-            // Fast path. All bytes fetched are in the same page so
-            // translating an address only once.
-            let p_address = self.translate_address(v_address, MemoryAccessType::Execute)?;
-            Ok(self.load_word_raw(p_address)) // XXX Can't fail?
-        } else {
-            let mut data = 0_u32;
-            for i in 0..width {
-                let byte = self.fetch_u8(v_address.wrapping_add(i))?;
-                data |= u32::from(byte) << (i * 8);
-            }
-            Ok(data)
-        }
-    }
-
     /// Loads an byte. This method takes virtual address and translates
     /// into physical address inside.
     ///
@@ -239,9 +204,9 @@ impl Mmu {
     /// * `v_address` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn load(&mut self, v_address: u64) -> Result<u8, Trap> {
+    pub fn load_virt_u8(&mut self, v_address: u64) -> Result<u8, Trap> {
         let p_address = self.translate_address(v_address, MemoryAccessType::Read)?;
-        Ok(self.load_raw(p_address))
+        Ok(self.load_phys_u8(p_address))
     }
 
     /// Loads multiple bytes. This method takes virtual address and translates
@@ -250,7 +215,7 @@ impl Mmu {
     /// # Arguments
     /// * `v_address` Virtual address
     /// * `width` Must be 1, 2, 4, or 8
-    fn load_bytes(&mut self, v_address: u64, width: u64) -> Result<u64, Trap> {
+    fn load_virt_bytes(&mut self, v_address: u64, width: u64) -> Result<u64, Trap> {
         debug_assert!(
             width == 1 || width == 2 || width == 4 || width == 8,
             "Width must be 1, 2, 4, or 8. {width:X}"
@@ -260,34 +225,19 @@ impl Mmu {
             // translating an address only once.
             let p_address = self.translate_address(v_address, MemoryAccessType::Read)?;
             Ok(match width {
-                1 => u64::from(self.load_raw(p_address)),
-                2 => u64::from(self.load_halfword_raw(p_address)),
-                4 => u64::from(self.load_word_raw(p_address)),
-                8 => self.load_doubleword_raw(p_address),
+                1 => u64::from(self.load_phys_u8(p_address)),
+                2 => u64::from(self.load_phys_u16(p_address)),
+                4 => u64::from(self.load_phys_u32(p_address)),
+                8 => self.load_phys_u64(p_address),
                 _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
             })
         } else {
             let mut data = 0_u64;
             for i in 0..width {
-                let byte = self.load(v_address.wrapping_add(i))?;
+                let byte = self.load_virt_u8(v_address.wrapping_add(i))?;
                 data |= u64::from(byte) << (i * 8);
             }
             Ok(data)
-        }
-    }
-
-    /// Loads two bytes. This method takes virtual address and translates
-    /// into physical address inside.
-    ///
-    /// # Arguments
-    /// * `v_address` Virtual address
-    /// # Errors
-    /// Exceptions are returned as errors
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn load_halfword(&mut self, v_address: u64) -> Result<u16, Trap> {
-        match self.load_bytes(v_address, 2) {
-            Ok(data) => Ok(data as u16),
-            Err(e) => Err(e),
         }
     }
 
@@ -298,9 +248,11 @@ impl Mmu {
     /// * `v_address` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
+    //
+    // XXX Still being used by the atomics
     #[allow(clippy::cast_possible_truncation)]
-    pub fn load_word(&mut self, v_address: u64) -> Result<u32, Trap> {
-        match self.load_bytes(v_address, 4) {
+    pub fn load_virt_u32(&mut self, v_address: u64) -> Result<u32, Trap> {
+        match self.load_virt_bytes(v_address, 4) {
             Ok(data) => Ok(data as u32),
             Err(e) => Err(e),
         }
@@ -313,8 +265,8 @@ impl Mmu {
     /// * `v_address` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn load_doubleword(&mut self, v_address: u64) -> Result<u64, Trap> {
-        match self.load_bytes(v_address, 8) {
+    pub fn load_virt_u64(&mut self, v_address: u64) -> Result<u64, Trap> {
+        match self.load_virt_bytes(v_address, 8) {
             Ok(data) => Ok(data),
             Err(e) => Err(e),
         }
@@ -327,10 +279,12 @@ impl Mmu {
     /// * `v_address` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
+    // XXX in contrast to `load_virt_u64` it takes the address as i64.  Eventually all the memory
+    // ops will do this, but for the moment we have this odd ugliness
     #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-    pub fn load64(&mut self, v_address: i64) -> Result<i64, Trap> {
+    pub fn load_virt_u64_(&mut self, v_address: i64) -> Result<i64, Trap> {
         // XXX All addresses should be i64
-        Ok(self.load_bytes(v_address as u64, 8)? as i64)
+        Ok(self.load_virt_bytes(v_address as u64, 8)? as i64)
     }
 
     /// Store an byte. This method takes virtual address and translates
@@ -341,9 +295,9 @@ impl Mmu {
     /// * `value`
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store(&mut self, v_address: u64, value: u8) -> Result<(), Trap> {
+    pub fn store_virt_u8(&mut self, v_address: u64, value: u8) -> Result<(), Trap> {
         let p_address = self.translate_address(v_address, MemoryAccessType::Write)?;
-        self.store_raw(p_address, value);
+        self.store_phys_u8(p_address, value);
         Ok(())
     }
 
@@ -357,7 +311,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     #[allow(clippy::cast_possible_truncation)]
-    fn store_bytes(&mut self, v_address: u64, value: u64, width: u64) -> Result<(), Trap> {
+    fn store_virt_bytes(&mut self, v_address: u64, value: u64, width: u64) -> Result<(), Trap> {
         debug_assert!(
             width == 1 || width == 2 || width == 4 || width == 8,
             "Width must be 1, 2, 4, or 8. {width:X}"
@@ -367,15 +321,15 @@ impl Mmu {
             // translating an address only once.
             let p_address = self.translate_address(v_address, MemoryAccessType::Write)?;
             match width {
-                1 => self.store_raw(p_address, value as u8),
-                2 => self.store_halfword_raw(p_address, value as u16),
-                4 => self.store_word_raw(p_address, value as u32),
-                8 => self.store_doubleword_raw(p_address, value),
+                1 => self.store_phys_u8(p_address, value as u8),
+                2 => self.store_phys_u16(p_address, value as u16),
+                4 => self.store_phys_u32(p_address, value as u32),
+                8 => self.store_phys_u64(p_address, value),
                 _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
             }
         } else {
             for i in 0..width {
-                self.store(v_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
+                self.store_virt_u8(v_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
             }
         }
         Ok(())
@@ -389,8 +343,8 @@ impl Mmu {
     /// * `value` data written
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_halfword(&mut self, v_address: u64, value: u16) -> Result<(), Trap> {
-        self.store_bytes(v_address, u64::from(value), 2)
+    pub fn store_virt_u16(&mut self, v_address: u64, value: u16) -> Result<(), Trap> {
+        self.store_virt_bytes(v_address, u64::from(value), 2)
     }
 
     /// Stores four bytes. This method takes virtual address and translates
@@ -401,8 +355,8 @@ impl Mmu {
     /// * `value` data written
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_word(&mut self, v_address: u64, value: u32) -> Result<(), Trap> {
-        self.store_bytes(v_address, u64::from(value), 4)
+    pub fn store_virt_u32(&mut self, v_address: u64, value: u32) -> Result<(), Trap> {
+        self.store_virt_bytes(v_address, u64::from(value), 4)
     }
 
     /// Stores eight bytes. This method takes virtual address and translates
@@ -413,22 +367,24 @@ impl Mmu {
     /// * `value` data written
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_doubleword(&mut self, v_address: u64, value: u64) -> Result<(), Trap> {
-        self.store_bytes(v_address, value, 8)
+    pub fn store_virt_u64(&mut self, v_address: u64, value: u64) -> Result<(), Trap> {
+        self.store_virt_bytes(v_address, value, 8)
     }
 
     /// # Errors
     /// Exceptions are returned as errors
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn store64(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
-        self.store_bytes(v_address as u64, value as u64, 8)
+        self.store_virt_bytes(v_address as u64, value as u64, 8)
     }
 
     /// # Errors
     /// Exceptions are returned as errors
+    // XXX in contrast to `store_virt_u32` it takes the address and data as i64.
+    // Eventually all the memory ops will do this, but for the moment we have this odd ugliness
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store32(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
-        self.store_bytes(v_address as u64, value as u64, 4)
+    pub fn store_virt_u32_(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
+        self.store_virt_bytes(v_address as u64, value as u64, 4)
     }
 
     /// Loads a byte from main memory or peripheral devices depending on
@@ -436,23 +392,32 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `p_address` Physical address
-    #[allow(clippy::cast_possible_truncation)]
-    fn load_raw(&mut self, p_address: u64) -> u8 {
+    /// # Panics
+    /// Can panic ...
+    #[allow(clippy::cast_possible_truncation, clippy::unwrap_used)]
+    fn load_phys_u8(&mut self, p_address: u64) -> u8 {
         // @TODO: Mapping should be configurable with dtb
         if p_address >= DRAM_BASE {
             self.memory.read_u8(p_address)
         } else {
-            match p_address {
-                // I don't know why but dtb data seems to be stored from 0x1020 on Linux.
-                // It might be from self.x[0xb] initialization?
-                // And DTB size is arbitray.
-                0x00001020..=0x00001fff => self.dtb[p_address as usize - 0x1020],
-                0x02000000..=0x0200ffff => self.clint.load(p_address),
-                0x0C000000..=0x0fffffff => self.plic.load(p_address),
-                0x10000000..=0x100000ff => self.uart.load(p_address),
-                0x10001000..=0x10001FFF => self.disk.load(p_address),
-                _ => panic!("Unknown memory mapping {p_address:X}."),
-            }
+            self.load_mmio_u8(p_address).unwrap()
+        }
+    }
+
+    /// # Errors
+    /// Cannot really panic
+    #[allow(clippy::result_unit_err, clippy::cast_possible_truncation)]
+    pub fn load_mmio_u8(&mut self, p_address: u64) -> Result<u8, ()> {
+        match p_address {
+            // I don't know why but dtb data seems to be stored from 0x1020 on Linux.
+            // It might be from self.x[0xb] initialization?
+            // And DTB size is arbitray.
+            0x00001020..=0x00001fff => Ok(self.dtb[p_address as usize - 0x1020]),
+            0x02000000..=0x0200ffff => Ok(self.clint.load(p_address)),
+            0x0C000000..=0x0fffffff => Ok(self.plic.load(p_address)),
+            0x10000000..=0x100000ff => Ok(self.uart.load(p_address)),
+            0x10001000..=0x10001FFF => Ok(self.disk.load(p_address)),
+            _ => Err(()),
         }
     }
 
@@ -461,14 +426,14 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `p_address` Physical address
-    fn load_halfword_raw(&mut self, p_address: u64) -> u16 {
+    fn load_phys_u16(&mut self, p_address: u64) -> u16 {
         if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
             // Fast path. Directly load main memory at a time.
             self.memory.read_u16(p_address)
         } else {
             let mut data = 0_u16;
             for i in 0..2 {
-                data |= u16::from(self.load_raw(p_address.wrapping_add(i))) << (i * 8);
+                data |= u16::from(self.load_phys_u8(p_address.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -479,13 +444,13 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `p_address` Physical address
-    pub fn load_word_raw(&mut self, p_address: u64) -> u32 {
+    pub fn load_phys_u32(&mut self, p_address: u64) -> u32 {
         if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
             self.memory.read_u32(p_address)
         } else {
             let mut data = 0_u32;
             for i in 0..4 {
-                data |= u32::from(self.load_raw(p_address.wrapping_add(i))) << (i * 8);
+                data |= u32::from(self.load_phys_u8(p_address.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -496,13 +461,13 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `p_address` Physical address
-    fn load_doubleword_raw(&mut self, p_address: u64) -> u64 {
+    fn load_phys_u64(&mut self, p_address: u64) -> u64 {
         if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
             self.memory.read_u64(p_address)
         } else {
             let mut data = 0_u64;
             for i in 0..8 {
-                data |= u64::from(self.load_raw(p_address.wrapping_add(i))) << (i * 8);
+                data |= u64::from(self.load_phys_u8(p_address.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -514,20 +479,30 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     /// * `value` data written
+    /// # Errors
+    /// Will return error for access outside supported memory range
+    #[allow(clippy::result_unit_err, clippy::cast_sign_loss)]
+    pub fn store_mmio_u8(&mut self, pa: i64, value: u8) -> Result<(), ()> {
+        let p_address = pa as u64;
+        match p_address {
+            0x02000000..=0x0200ffff => self.clint.store(p_address, value, &mut self.mip),
+            0x0c000000..=0x0fffffff => self.plic.store(p_address, value, &mut self.mip),
+            0x10000000..=0x100000ff => self.uart.store(p_address, value),
+            0x10001000..=0x10001FFF => self.disk.store(p_address, value),
+            _ => return Err(()),
+        }
+        Ok(())
+    }
+
     /// # Panics
-    /// Will panic on access to unsupported MMIO ranges (XXX this should just ignore them)
-    pub fn store_raw(&mut self, p_address: u64, value: u8) {
+    /// It can panic which is bad and which is why it's going away soon
+    #[allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
+    pub fn store_phys_u8(&mut self, p_address: u64, value: u8) {
         // @TODO: Mapping should be configurable with dtb
         if p_address >= DRAM_BASE {
             self.memory.write_u8(p_address, value);
         } else {
-            match p_address {
-                0x02000000..=0x0200ffff => self.clint.store(p_address, value),
-                0x0c000000..=0x0fffffff => self.plic.store(p_address, value),
-                0x10000000..=0x100000ff => self.uart.store(p_address, value),
-                0x10001000..=0x10001FFF => self.disk.store(p_address, value),
-                _ => panic!("Unknown memory mapping {p_address:X}."),
-            }
+            self.store_mmio_u8(p_address as i64, value).unwrap();
         }
     }
 
@@ -537,12 +512,14 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     /// * `value` data written
-    fn store_halfword_raw(&mut self, p_address: u64, value: u16) {
+    /// # Panics
+    /// It can panic which is bad and which is why it's going away soon
+    fn store_phys_u16(&mut self, p_address: u64, value: u16) {
         if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
             self.memory.write_u16(p_address, value);
         } else {
             for i in 0..2 {
-                self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
+                self.store_phys_u8(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
             }
         }
     }
@@ -553,12 +530,12 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     /// * `value` data written
-    fn store_word_raw(&mut self, p_address: u64, value: u32) {
+    fn store_phys_u32(&mut self, p_address: u64, value: u32) {
         if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
             self.memory.write_u32(p_address, value);
         } else {
             for i in 0..4 {
-                self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
+                self.store_phys_u8(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
             }
         }
     }
@@ -569,17 +546,19 @@ impl Mmu {
     /// # Arguments
     /// * `p_address` Physical address
     /// * `value` data written
-    fn store_doubleword_raw(&mut self, p_address: u64, value: u64) {
+    fn store_phys_u64(&mut self, p_address: u64, value: u64) {
         if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
             self.memory.write_u64(p_address, value);
         } else {
             for i in 0..8 {
-                self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
+                self.store_phys_u8(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
             }
         }
     }
 
-    fn translate_address(
+    /// # Errors
+    /// If this fails then the error will have the exception that should be raised
+    pub fn translate_address(
         &mut self,
         address: u64,
         access_type: MemoryAccessType,
@@ -672,7 +651,7 @@ impl Mmu {
             // just a fault (eg CAUSE_FAULT_LOAD/STORE instead of all
             // the others which are
             // CAUSE_LOAD/STORE/FETCH_PAGE_FAULT).
-            let pte = self.load_doubleword_raw(pte_addr);
+            let pte = self.load_phys_u64(pte_addr);
             // return access_fault(address, access_type);
 
             if pte & PTE_V_MASK == 0 {
@@ -751,7 +730,7 @@ impl Mmu {
                 }
                 if pte != new_pte {
                     // XXX must return access fault on failure here
-                    self.store_doubleword_raw(pte_addr, new_pte);
+                    self.store_phys_u64(pte_addr, new_pte);
                     // return access_fault(address, access_type);
                 }
             }
@@ -780,19 +759,6 @@ impl Mmu {
     }
 }
 
-#[allow(dead_code)]
-#[allow(clippy::cast_sign_loss)]
-const fn access_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Trap> {
-    Err::<T, Trap>(Trap {
-        trap_type: match access_type {
-            MemoryAccessType::Read => TrapType::LoadAccessFault,
-            MemoryAccessType::Write => TrapType::StoreAccessFault,
-            MemoryAccessType::Execute => TrapType::InstructionAccessFault,
-        },
-        value: address,
-    })
-}
-
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // XXX Try to remove this later when the u64 -> i64 conversion is done
 const fn page_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Trap> {
     Err::<T, Trap>(Trap {
@@ -803,113 +769,4 @@ const fn page_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T,
         },
         value: address,
     })
-}
-
-/// [`Memory`](../memory/struct.Memory.html). Converts physical address to the one in memory
-/// using [`DRAM_BASE`](constant.DRAM_BASE.html) and accesses [`Memory`](../memory/struct.Memory.html).
-// XXX Out of range access must fault, not crash.
-pub struct Memory {
-    data: Vec<u8>,
-}
-
-impl Memory {
-    const fn new() -> Self {
-        Self { data: vec![] }
-    }
-
-    fn init(&mut self, capacity: usize) {
-        self.data.resize(capacity, 0);
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn read_u8(&mut self, p_address: u64) -> u8 {
-        debug_assert!(
-            p_address >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        self.data[address as usize]
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn read_u16(&mut self, p_address: u64) -> u16 {
-        debug_assert!(
-            p_address >= DRAM_BASE && p_address.wrapping_add(1) >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        let address = address as usize;
-        let mut buf = [0; 2];
-        buf.copy_from_slice(&self.data[address..address + 2]);
-        u16::from_le_bytes(buf)
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn read_u32(&mut self, p_address: u64) -> u32 {
-        debug_assert!(
-            p_address >= DRAM_BASE && p_address.wrapping_add(3) >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        let address = address as usize;
-        let mut buf = [0; 4];
-        buf.copy_from_slice(&self.data[address..address + 4]);
-        u32::from_le_bytes(buf)
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn read_u64(&mut self, p_address: u64) -> u64 {
-        debug_assert!(
-            p_address >= DRAM_BASE && p_address.wrapping_add(7) >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        let address = address as usize;
-        let mut buf = [0; 8];
-        buf.copy_from_slice(&self.data[address..address + 8]);
-        u64::from_le_bytes(buf)
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn write_u8(&mut self, p_address: u64, value: u8) {
-        debug_assert!(
-            p_address >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        self.data[address as usize] = value;
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn write_u16(&mut self, p_address: u64, value: u16) {
-        debug_assert!(
-            p_address >= DRAM_BASE && p_address.wrapping_add(1) >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        let address = address as usize;
-        self.data[address..address + 2].copy_from_slice(&value.to_le_bytes());
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn write_u32(&mut self, p_address: u64, value: u32) {
-        debug_assert!(
-            p_address >= DRAM_BASE && p_address.wrapping_add(3) >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        let address = address as usize;
-        self.data[address..address + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn write_u64(&mut self, p_address: u64, value: u64) {
-        debug_assert!(
-            p_address >= DRAM_BASE && p_address.wrapping_add(7) >= DRAM_BASE,
-            "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
-        );
-        let address = p_address - DRAM_BASE;
-        let address: usize = address as usize;
-        self.data[address..address + 8].copy_from_slice(&value.to_le_bytes());
-    }
 }

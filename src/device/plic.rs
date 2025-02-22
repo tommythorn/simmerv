@@ -1,6 +1,6 @@
 #![allow(clippy::unreadable_literal)]
 
-use crate::cpu::MIP_SEIP;
+use crate::cpu::{MIP_MEIP, MIP_SEIP};
 
 // Based on SiFive Interrupt Cookbook
 // https://sifive.cdn.prismic.io/sifive/0d163928-2128-42be-a75a-464df65e04e0_sifive-interrupt-cookbook.pdf
@@ -108,8 +108,9 @@ impl Plic {
 
         self.irq = irq;
         if self.irq != 0 {
-            //println!("IRQ: {:X}", self.irq);
-            *mip |= MIP_SEIP;
+            *mip |= MIP_MEIP | MIP_SEIP;
+        } else {
+            *mip &= !MIP_MEIP & !MIP_SEIP;
         }
     }
 
@@ -170,7 +171,7 @@ impl Plic {
     /// * `address`
     /// * `value`
     #[allow(clippy::cast_lossless)]
-    pub const fn store(&mut self, address: u64, value: u8) {
+    pub fn store(&mut self, address: u64, value: u8, mip: &mut u64) {
         //println!("PLIC Store AD:{:X} VAL:{:X}", address, value);
         match address {
             0x0c000000..=0x0c000fff => {
@@ -228,6 +229,10 @@ impl Plic {
                 self.clear_ip(value as u32);
             }
             _ => {}
+        }
+        if self.needs_update_irq {
+            self.update_irq(mip);
+            self.needs_update_irq = false;
         }
     }
 }
