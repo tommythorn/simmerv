@@ -51,7 +51,7 @@ impl Uart {
 
     /// Runs one cycle. `Uart` gets/puts input/output data via `Terminal`
     /// at certain timing.
-    pub fn tick(&mut self) {
+    pub fn service(&mut self) {
         self.clock = self.clock.wrapping_add(1);
         let mut rx_ip = false;
 

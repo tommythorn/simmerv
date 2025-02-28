@@ -332,7 +332,7 @@ export class WasmRiscv {
      */
     read_pc() {
         const ret = wasm.wasmriscv_read_pc(this.__wbg_ptr);
-        return BigInt.asUintN(64, ret);
+        return ret;
     }
     /**
      * Gets ascii code byte sent from the emulator to terminal.

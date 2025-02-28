@@ -8,7 +8,6 @@ use crate::device::clint::Clint;
 use crate::device::plic::Plic;
 use crate::device::uart::Uart;
 use crate::device::virtio_block_disk::VirtioBlockDisk;
-use crate::memory::Memory;
 use crate::terminal::Terminal;
 use fnv::FnvHashMap;
 use num_traits::FromPrimitive;
@@ -26,11 +25,10 @@ const DTB_SIZE: usize = 0xfe0;
 /// It may also be said Bus.
 /// @TODO: Memory protection is not implemented yet. We should support.
 pub struct Mmu {
-    clock: u64,
     ppn: u64,
     addressing_mode: AddressingMode,
     privilege_mode: PrivilegeMode,
-    memory: MemoryWrapper,
+    memory: Memory,
     dtb: Vec<u8>,
     disk: VirtioBlockDisk,
     plic: Plic,
@@ -92,11 +90,10 @@ impl Mmu {
         dtb[..content.len()].copy_from_slice(&content[..]);
 
         Self {
-            clock: 0,
             ppn: 0,
             addressing_mode: AddressingMode::None,
             privilege_mode: PrivilegeMode::Machine,
-            memory: MemoryWrapper::new(),
+            memory: Memory::new(),
             dtb,
             disk: VirtioBlockDisk::new(),
             plic: Plic::new(),
@@ -114,7 +111,7 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `capacity`
-    pub fn init_memory(&mut self, capacity: u64) {
+    pub fn init_memory(&mut self, capacity: usize) {
         self.memory.init(capacity);
     }
 
@@ -122,7 +119,7 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `data` Filesystem binary content
-    pub fn init_disk(&mut self, data: &[u8]) {
+    pub fn init_disk(&mut self, data: Vec<u8>) {
         self.disk.init(data);
     }
 
@@ -154,16 +151,15 @@ impl Mmu {
     }
 
     /// Runs one cycle of MMU and peripheral devices.
-    pub fn tick(&mut self, mip: &mut u64) {
-        self.clint.tick(mip);
-        self.disk.tick(&mut self.memory);
-        self.uart.tick();
-        self.plic.tick(
+    pub fn service(&mut self, mip: &mut u64) {
+        self.clint.service(mip);
+        self.disk.service(&mut self.memory);
+        self.uart.service();
+        self.plic.service(
             self.disk.is_interrupting(),
             self.uart.is_interrupting(),
             mip,
         );
-        self.clock = self.clock.wrapping_add(1);
     }
 
     /// Updates addressing mode
@@ -444,7 +440,7 @@ impl Mmu {
     fn load_raw(&mut self, p_address: u64) -> u8 {
         // @TODO: Mapping should be configurable with dtb
         if p_address >= DRAM_BASE {
-            self.memory.read_byte(p_address)
+            self.memory.read_u8(p_address)
         } else {
             match p_address {
                 // I don't know why but dtb data seems to be stored from 0x1020 on Linux.
@@ -468,7 +464,7 @@ impl Mmu {
     fn load_halfword_raw(&mut self, p_address: u64) -> u16 {
         if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
             // Fast path. Directly load main memory at a time.
-            self.memory.read_halfword(p_address)
+            self.memory.read_u16(p_address)
         } else {
             let mut data = 0_u16;
             for i in 0..2 {
@@ -485,7 +481,7 @@ impl Mmu {
     /// * `p_address` Physical address
     pub fn load_word_raw(&mut self, p_address: u64) -> u32 {
         if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
-            self.memory.read_word(p_address)
+            self.memory.read_u32(p_address)
         } else {
             let mut data = 0_u32;
             for i in 0..4 {
@@ -502,7 +498,7 @@ impl Mmu {
     /// * `p_address` Physical address
     fn load_doubleword_raw(&mut self, p_address: u64) -> u64 {
         if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
-            self.memory.read_doubleword(p_address)
+            self.memory.read_u64(p_address)
         } else {
             let mut data = 0_u64;
             for i in 0..8 {
@@ -523,7 +519,7 @@ impl Mmu {
     pub fn store_raw(&mut self, p_address: u64, value: u8) {
         // @TODO: Mapping should be configurable with dtb
         if p_address >= DRAM_BASE {
-            self.memory.write_byte(p_address, value);
+            self.memory.write_u8(p_address, value);
         } else {
             match p_address {
                 0x02000000..=0x0200ffff => self.clint.store(p_address, value),
@@ -543,7 +539,7 @@ impl Mmu {
     /// * `value` data written
     fn store_halfword_raw(&mut self, p_address: u64, value: u16) {
         if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
-            self.memory.write_halfword(p_address, value);
+            self.memory.write_u16(p_address, value);
         } else {
             for i in 0..2 {
                 self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
@@ -559,7 +555,7 @@ impl Mmu {
     /// * `value` data written
     fn store_word_raw(&mut self, p_address: u64, value: u32) {
         if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
-            self.memory.write_word(p_address, value);
+            self.memory.write_u32(p_address, value);
         } else {
             for i in 0..4 {
                 self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
@@ -575,7 +571,7 @@ impl Mmu {
     /// * `value` data written
     fn store_doubleword_raw(&mut self, p_address: u64, value: u64) {
         if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
-            self.memory.write_doubleword(p_address, value);
+            self.memory.write_u64(p_address, value);
         } else {
             for i in 0..8 {
                 self.store_raw(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
@@ -660,7 +656,7 @@ impl Mmu {
         // Check for canonical addresses
         if ((address as i64) << vaddr_shift) >> vaddr_shift != address as i64 {
             // XXX Some debugging logging here might be useful
-            return page_fault(address, access_type);
+            return page_fault(address as i64, access_type);
         }
         let pte_addr_bits = 44;
         let mut pte_addr = (self.ppn & ((1 << pte_addr_bits) - 1)) << PG_SHIFT;
@@ -711,7 +707,7 @@ impl Mmu {
             } else if pte & PTE_U_MASK == 0 {
                 // XXX Debug log would be useful
                 //info!("** {:?} mode access to {address:08x} denied: !U", self.privilege_mode);
-                return page_fault(address, access_type);
+                return page_fault(address as i64, access_type);
             }
 
             /* protection check */
@@ -764,7 +760,7 @@ impl Mmu {
             return Ok(paddr & !vaddr_mask | address & vaddr_mask);
         }
 
-        page_fault(address, access_type)
+        page_fault(address as i64, access_type)
     }
 
     /// Returns immutable reference to `Clint`.
@@ -785,7 +781,8 @@ impl Mmu {
 }
 
 #[allow(dead_code)]
-const fn access_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T, Trap> {
+#[allow(clippy::cast_sign_loss)]
+const fn access_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Trap> {
     Err::<T, Trap>(Trap {
         trap_type: match access_type {
             MemoryAccessType::Read => TrapType::LoadAccessFault,
@@ -796,7 +793,8 @@ const fn access_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<
     })
 }
 
-const fn page_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T, Trap> {
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // XXX Try to remove this later when the u64 -> i64 conversion is done
+const fn page_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Trap> {
     Err::<T, Trap>(Trap {
         trap_type: match access_type {
             MemoryAccessType::Read => TrapType::LoadPageFault,
@@ -807,92 +805,111 @@ const fn page_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T,
     })
 }
 
-/// [`Memory`](../memory/struct.Memory.html) wrapper. Converts physical address to the one in memory
+/// [`Memory`](../memory/struct.Memory.html). Converts physical address to the one in memory
 /// using [`DRAM_BASE`](constant.DRAM_BASE.html) and accesses [`Memory`](../memory/struct.Memory.html).
-// XXX This is a very poor abstraction; we need *FAST* 64-bit aligned
-// access and everything else built from that.  Out of range access
-// must fault, not crash.
-pub struct MemoryWrapper {
-    memory: Memory,
+// XXX Out of range access must fault, not crash.
+pub struct Memory {
+    data: Vec<u8>,
 }
 
-impl MemoryWrapper {
+impl Memory {
     const fn new() -> Self {
-        Self {
-            memory: Memory::new(),
-        }
+        Self { data: vec![] }
     }
 
-    fn init(&mut self, capacity: u64) {
-        self.memory.init(capacity);
+    fn init(&mut self, capacity: usize) {
+        self.data.resize(capacity, 0);
     }
 
-    pub fn read_byte(&mut self, p_address: u64) -> u8 {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn read_u8(&mut self, p_address: u64) -> u8 {
         debug_assert!(
             p_address >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.read_byte(p_address - DRAM_BASE)
+        let address = p_address - DRAM_BASE;
+        self.data[address as usize]
     }
 
-    pub fn read_halfword(&mut self, p_address: u64) -> u16 {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn read_u16(&mut self, p_address: u64) -> u16 {
         debug_assert!(
             p_address >= DRAM_BASE && p_address.wrapping_add(1) >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.read_halfword(p_address - DRAM_BASE)
+        let address = p_address - DRAM_BASE;
+        let address = address as usize;
+        let mut buf = [0; 2];
+        buf.copy_from_slice(&self.data[address..address + 2]);
+        u16::from_le_bytes(buf)
     }
 
-    pub fn read_word(&mut self, p_address: u64) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn read_u32(&mut self, p_address: u64) -> u32 {
         debug_assert!(
             p_address >= DRAM_BASE && p_address.wrapping_add(3) >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.read_word(p_address - DRAM_BASE)
+        let address = p_address - DRAM_BASE;
+        let address = address as usize;
+        let mut buf = [0; 4];
+        buf.copy_from_slice(&self.data[address..address + 4]);
+        u32::from_le_bytes(buf)
     }
 
-    pub fn read_doubleword(&mut self, p_address: u64) -> u64 {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn read_u64(&mut self, p_address: u64) -> u64 {
         debug_assert!(
             p_address >= DRAM_BASE && p_address.wrapping_add(7) >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.read_doubleword(p_address - DRAM_BASE)
+        let address = p_address - DRAM_BASE;
+        let address = address as usize;
+        let mut buf = [0; 8];
+        buf.copy_from_slice(&self.data[address..address + 8]);
+        u64::from_le_bytes(buf)
     }
 
-    pub fn write_byte(&mut self, p_address: u64, value: u8) {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_u8(&mut self, p_address: u64, value: u8) {
         debug_assert!(
             p_address >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.write_byte(p_address - DRAM_BASE, value);
+        let address = p_address - DRAM_BASE;
+        self.data[address as usize] = value;
     }
 
-    pub fn write_halfword(&mut self, p_address: u64, value: u16) {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_u16(&mut self, p_address: u64, value: u16) {
         debug_assert!(
             p_address >= DRAM_BASE && p_address.wrapping_add(1) >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.write_halfword(p_address - DRAM_BASE, value);
+        let address = p_address - DRAM_BASE;
+        let address = address as usize;
+        self.data[address..address + 2].copy_from_slice(&value.to_le_bytes());
     }
 
-    pub fn write_word(&mut self, p_address: u64, value: u32) {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_u32(&mut self, p_address: u64, value: u32) {
         debug_assert!(
             p_address >= DRAM_BASE && p_address.wrapping_add(3) >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.write_word(p_address - DRAM_BASE, value);
+        let address = p_address - DRAM_BASE;
+        let address = address as usize;
+        self.data[address..address + 4].copy_from_slice(&value.to_le_bytes());
     }
 
-    pub fn write_doubleword(&mut self, p_address: u64, value: u64) {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_u64(&mut self, p_address: u64, value: u64) {
         debug_assert!(
             p_address >= DRAM_BASE && p_address.wrapping_add(7) >= DRAM_BASE,
             "Memory address must equals to or bigger than DRAM_BASE. {p_address:X}"
         );
-        self.memory.write_doubleword(p_address - DRAM_BASE, value);
-    }
-
-    #[must_use]
-    pub fn validate_address(&self, address: u64) -> bool {
-        self.memory.validate_address(address - DRAM_BASE)
+        let address = p_address - DRAM_BASE;
+        let address: usize = address as usize;
+        self.data[address..address + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

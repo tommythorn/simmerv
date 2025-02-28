@@ -1,6 +1,6 @@
 #![allow(clippy::unreadable_literal)]
 
-use crate::mmu::MemoryWrapper;
+use crate::mmu::Memory;
 
 // Based on Virtual I/O Device (VIRTIO) Version 1.1
 // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html
@@ -38,7 +38,7 @@ pub struct VirtioBlockDisk {
     interrupt_status: u32,     // read only
     status: u32,               // read and write
     notify_clocks: Vec<u64>,
-    contents: Vec<u64>,
+    contents: Vec<u8>,
 }
 
 impl Default for VirtioBlockDisk {
@@ -49,6 +49,7 @@ impl Default for VirtioBlockDisk {
 
 impl VirtioBlockDisk {
     /// Creates a new `VirtioBlockDisk`.
+    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -67,7 +68,7 @@ impl VirtioBlockDisk {
             status: 0,
             interrupt_status: 0,
             notify_clocks: Vec::new(),
-            contents: vec![], // XXX Storing the image in memory is extremely limiting
+            contents: Vec::new(), // XXX Storing the image in memory is extremely limiting
         }
     }
 
@@ -82,17 +83,8 @@ impl VirtioBlockDisk {
     /// # Arguments
     /// * `contents` filesystem content binary
     #[allow(clippy::cast_lossless)]
-    pub fn init(&mut self, contents: &[u8]) {
-        // @TODO: Optimize
-        for _i in 0..contents.len().div_ceil(8) {
-            self.contents.push(0);
-        }
-        for (i, item) in contents.iter().enumerate() {
-            let index = i >> 3;
-            let pos = (i % 8) * 8;
-            self.contents[index] =
-                (self.contents[index] & !(0xff << pos)) | ((*item as u64) << pos);
-        }
+    pub fn init(&mut self, contents: Vec<u8>) {
+        self.contents = contents;
     }
 
     /// Runs one cycle. Data transfer between main memory and block device
@@ -100,14 +92,13 @@ impl VirtioBlockDisk {
     ///
     /// # Arguments
     /// * `memory`
-    pub fn tick(&mut self, memory: &mut MemoryWrapper) {
-        if !self.notify_clocks.is_empty()
-            && (self.clock == self.notify_clocks[0] + DISK_ACCESS_DELAY)
+    pub fn service(&mut self, memory: &mut Memory) {
+        if !self.notify_clocks.is_empty() && self.clock == self.notify_clocks[0] + DISK_ACCESS_DELAY
         {
             // bit 0 in interrupt_status register indicates
             // the interrupt was asserted because the device has used a buffer
             // in at least one of the active virtual queues.
-            self.interrupt_status |= 0x1;
+            self.interrupt_status |= 1;
             self.handle_disk_access(memory);
             self.notify_clocks.remove(0);
         }
@@ -169,7 +160,7 @@ impl VirtioBlockDisk {
             0x10001073 => (self.status >> 24) as u8,
             // Configurations (The first 64-it is the number of sectors) @TODO: Implement properly
             0x10001100..=0x10001107 => {
-                let n_secs: u64 = (self.contents.len() / (512 / 8)) as u64;
+                let n_secs: u64 = self.contents.len() as u64 / 512;
                 let n_secs_as_u8: [u8; 8] = n_secs.to_le_bytes();
                 n_secs_as_u8[address as usize & 7]
             }
@@ -301,8 +292,8 @@ impl VirtioBlockDisk {
             }
             0x10001064 => {
                 // interrupt ack
-                if (value & 0x1) == 1 {
-                    self.interrupt_status &= !0x1;
+                if value & 1 == 1 {
+                    self.interrupt_status &= !1;
                 } else {
                     panic!("Unknown ack {value:X}");
                 }
@@ -330,9 +321,12 @@ impl VirtioBlockDisk {
     /// * `mem_addresss` Physical address. Must be eight-byte aligned.
     /// * `disk_address` Must be eight-byte aligned.
     /// * `length` Must be eight-byte aligned.
+    /// # Panics
+    /// This will panic if the `disk_address` isn't reasonable
+    #[allow(clippy::cast_possible_truncation)]
     fn transfer_from_disk(
         &self,
-        memory: &mut MemoryWrapper,
+        memory: &mut Memory,
         mem_address: u64,
         disk_address: u64,
         length: u64,
@@ -342,16 +336,17 @@ impl VirtioBlockDisk {
             "Memory address should be eight-byte aligned. {mem_address:X}"
         );
         debug_assert!(
-            (disk_address % 8) == 0,
-            "Disk address should be eight-byte aligned. {disk_address:X}"
-        );
-        debug_assert!(
             (length % 8) == 0,
             "Length should be eight-byte aligned. {length:X}"
         );
+
+        // NB: Using a similar representation for the memory would
+        // enable a much more efficient copy
         for i in 0..(length / 8) {
-            let disk_index = ((disk_address + i * 8) >> 3) as usize;
-            memory.write_doubleword(mem_address + i * 8, self.contents[disk_index]);
+            let p = (disk_address + i * 8) as usize;
+            let mut v64 = [0; 8];
+            v64.copy_from_slice(&self.contents[p..p + 8]);
+            memory.write_u64(mem_address + i * 8, u64::from_le_bytes(v64));
         }
     }
 
@@ -362,9 +357,10 @@ impl VirtioBlockDisk {
     /// * `mem_addresss` Physical address. Must be eight-byte aligned.
     /// * `disk_address` Must be eight-byte aligned.
     /// * `length` Must be eight-byte aligned.
+    #[allow(clippy::cast_possible_truncation)]
     fn transfer_to_disk(
         &mut self,
-        memory: &mut MemoryWrapper,
+        memory: &mut Memory,
         mem_address: u64,
         disk_address: u64,
         length: u64,
@@ -381,9 +377,11 @@ impl VirtioBlockDisk {
             (length % 8) == 0,
             "Length should be eight-byte aligned. {length:X}"
         );
+
         for i in 0..(length / 8) {
-            let disk_index = ((disk_address + i * 8) >> 3) as usize;
-            self.contents[disk_index] = memory.read_doubleword(mem_address + i * 8);
+            let p = (disk_address + i * 8) as usize;
+            self.contents[p..p + 8]
+                .copy_from_slice(&memory.read_u64(mem_address + i * 8).to_le_bytes());
         }
     }
 
@@ -393,9 +391,7 @@ impl VirtioBlockDisk {
     /// * `addresss` Address in disk
     #[allow(clippy::cast_possible_truncation)]
     fn read_from_disk(&self, address: u64) -> u8 {
-        let index = (address >> 3) as usize;
-        let pos = (address % 8) * 8;
-        (self.contents[index] >> pos) as u8
+        self.contents[address as usize]
     }
 
     /// Writes a byte to disk.
@@ -403,14 +399,13 @@ impl VirtioBlockDisk {
     /// # Arguments
     /// * `addresss` Address in disk
     /// * `value` Data written to disk
+    #[allow(clippy::cast_possible_truncation)]
     fn write_to_disk(&mut self, address: u64, value: u8) {
-        let index = (address >> 3) as usize;
-        let pos = (address % 8) * 8;
-        self.contents[index] = (self.contents[index] & !(0xff << pos)) | (u64::from(value) << pos);
+        self.contents[address as usize] = value;
     }
 
     const fn get_page_address(&self) -> u64 {
-        (self.queue_pfn as u64) * (self.guest_page_size as u64)
+        self.queue_pfn as u64 * self.guest_page_size as u64
     }
 
     // Virtqueue layout: Starting at page address
@@ -462,18 +457,18 @@ impl VirtioBlockDisk {
 
     // @TODO: Follow the virtio block specification more propertly.
     #[allow(clippy::cast_possible_truncation)]
-    fn handle_disk_access(&mut self, memory: &mut MemoryWrapper) {
+    fn handle_disk_access(&mut self, memory: &mut Memory) {
         let base_desc_address = self.get_base_desc_address();
         let base_avail_address = self.get_base_avail_address();
         let base_used_address = self.get_base_used_address();
         let queue_size = u64::from(self.queue_size);
 
-        let _avail_flag = u64::from(memory.read_halfword(base_avail_address));
-        let _avail_index = u64::from(memory.read_halfword(base_avail_address.wrapping_add(2)));
+        let _avail_flag = u64::from(memory.read_u16(base_avail_address));
+        let _avail_index = u64::from(memory.read_u16(base_avail_address.wrapping_add(2)));
         let desc_index_address = base_avail_address
             .wrapping_add(4)
             .wrapping_add((u64::from(self.used_ring_index) % queue_size) * 2);
-        let desc_head_index = u64::from(memory.read_halfword(desc_index_address)) % queue_size;
+        let desc_head_index = u64::from(memory.read_u16(desc_index_address)) % queue_size;
 
         /*
         println!("Desc AD:{:X}", base_desc_address);
@@ -492,11 +487,11 @@ impl VirtioBlockDisk {
         let mut desc_next = desc_head_index;
         loop {
             let desc_element_address = base_desc_address + 16 * desc_next;
-            let desc_addr = memory.read_doubleword(desc_element_address);
-            let desc_len = memory.read_word(desc_element_address.wrapping_add(8));
-            let desc_flags = memory.read_halfword(desc_element_address.wrapping_add(12));
+            let desc_addr = memory.read_u64(desc_element_address);
+            let desc_len = memory.read_u32(desc_element_address.wrapping_add(8));
+            let desc_flags = memory.read_u16(desc_element_address.wrapping_add(12));
             desc_next =
-                u64::from(memory.read_halfword(desc_element_address.wrapping_add(14))) % queue_size;
+                u64::from(memory.read_u16(desc_element_address.wrapping_add(14))) % queue_size;
 
             /*
             println!("Desc addr:{:X}", desc_addr);
@@ -517,9 +512,9 @@ impl VirtioBlockDisk {
 
                     // Read/Write operation can be distinguished with the second descriptor flags
                     // so we can ignore blk_type?
-                    _blk_type = memory.read_word(desc_addr);
-                    _blk_reserved = memory.read_word(desc_addr.wrapping_add(4));
-                    blk_sector = memory.read_doubleword(desc_addr.wrapping_add(8));
+                    _blk_type = memory.read_u32(desc_addr);
+                    _blk_reserved = memory.read_u32(desc_addr.wrapping_add(4));
+                    blk_sector = memory.read_u64(desc_addr.wrapping_add(8));
                     /*
                     println!("Blk type:{:X}", _blk_type);
                     println!("Blk reserved:{:X}", _blk_reserved);
@@ -530,9 +525,9 @@ impl VirtioBlockDisk {
                     // Second descriptor: Read/Write disk
                     if (desc_flags & VIRTQ_DESC_F_WRITE) == 0 {
                         // write to disk
-                        if (desc_addr % 8) == 0
-                            && ((blk_sector * SECTOR_SIZE) % 8) == 0
-                            && (desc_len % 8) == 0
+                        if desc_addr % 8 == 0
+                            && (blk_sector * SECTOR_SIZE) % 8 == 0
+                            && desc_len % 8 == 0
                         {
                             // Enter fast path if possible
                             self.transfer_to_disk(
@@ -543,15 +538,15 @@ impl VirtioBlockDisk {
                             );
                         } else {
                             for i in 0..u64::from(desc_len) {
-                                let data = memory.read_byte(desc_addr + i);
+                                let data = memory.read_u8(desc_addr + i);
                                 self.write_to_disk(blk_sector * SECTOR_SIZE + i, data);
                             }
                         }
                     } else {
                         // read from disk
-                        if (desc_addr % 8) == 0
-                            && ((blk_sector * SECTOR_SIZE) % 8) == 0
-                            && (desc_len % 8) == 0
+                        if desc_addr % 8 == 0
+                            && (blk_sector * SECTOR_SIZE) % 8 == 0
+                            && desc_len % 8 == 0
                         {
                             // Enter fast path if possible
                             self.transfer_from_disk(
@@ -563,7 +558,7 @@ impl VirtioBlockDisk {
                         } else {
                             for i in 0..u64::from(desc_len) {
                                 let data = self.read_from_disk(blk_sector * SECTOR_SIZE + i);
-                                memory.write_byte(desc_addr + i, data);
+                                memory.write_u8(desc_addr + i, data);
                             }
                         }
                     }
@@ -571,11 +566,11 @@ impl VirtioBlockDisk {
                 2 => {
                     // Third descriptor: Result status
                     assert!(
-                        ((desc_flags & VIRTQ_DESC_F_WRITE) != 0),
+                        (desc_flags & VIRTQ_DESC_F_WRITE) != 0,
                         "Third descriptor should be write."
                     );
-                    assert!((desc_len == 1), "Third descriptor length should be one.");
-                    memory.write_byte(desc_addr, 0); // 0 means succeeded
+                    assert!(desc_len == 1, "Third descriptor length should be one.");
+                    memory.write_u8(desc_addr, 0); // 0 means succeeded
                 }
                 _ => {}
             }
@@ -589,7 +584,7 @@ impl VirtioBlockDisk {
 
         assert!((desc_num == 3), "Descript chain length should be three.");
 
-        memory.write_word(
+        memory.write_u32(
             base_used_address
                 .wrapping_add(4)
                 .wrapping_add((u64::from(self.used_ring_index) % queue_size) * 8),
@@ -597,6 +592,6 @@ impl VirtioBlockDisk {
         );
 
         self.used_ring_index = self.used_ring_index.wrapping_add(1);
-        memory.write_halfword(base_used_address.wrapping_add(2), self.used_ring_index);
+        memory.write_u16(base_used_address.wrapping_add(2), self.used_ring_index);
     }
 }

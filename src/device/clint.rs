@@ -34,7 +34,7 @@ impl Clint {
     ///
     /// # Arguments
     /// * `mip` CPU `mip` register. It can be updated if interrupt occurs.
-    pub const fn tick(&mut self, mip: &mut u64) {
+    pub const fn service(&mut self, mip: &mut u64) {
         self.clock = self.clock.wrapping_add(1);
         self.mtime = self.mtime.wrapping_add(1);
 

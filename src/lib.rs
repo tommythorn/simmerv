@@ -1,22 +1,21 @@
 #![allow(clippy::unreadable_literal)]
 
 // @TODO: temporal
-const TEST_MEMORY_CAPACITY: u64 = 1024 * 512;
-const PROGRAM_MEMORY_CAPACITY: u64 = 1024 * 1024 * 512; // big enough to run Linux and xv6
+const TEST_MEMORY_CAPACITY: usize = 1024 * 512;
+const PROGRAM_MEMORY_CAPACITY: usize = 1024 * 1024 * 512; // big enough to run Linux and xv6
 
 pub mod cpu;
 pub mod default_terminal;
 pub mod device;
 pub mod elf_analyzer;
-pub mod memory;
 pub mod mmu;
 pub mod terminal;
 
 use crate::cpu::Cpu;
 use crate::elf_analyzer::ElfAnalyzer;
 use crate::terminal::Terminal;
-use fnv::FnvHashMap;
 pub use cpu::{Trap, TrapType};
+use fnv::FnvHashMap;
 
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
@@ -113,7 +112,7 @@ impl Emulator {
 
     /// Runs CPU one cycle
     pub fn tick(&mut self) {
-        self.cpu.tick();
+        self.cpu.run_soc();
     }
 
     /// Sets up program run by the program. This method analyzes the passed content
@@ -126,7 +125,7 @@ impl Emulator {
     /// Will panic if given a non-Elf file
     // @TODO: Make ElfAnalyzer and move the core logic there.
     // @TODO: Returns `Err` if the passed contend doesn't seem ELF file
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     pub fn setup_program(&mut self, data: Vec<u8>) {
         let analyzer = ElfAnalyzer::new(data);
 
@@ -188,7 +187,7 @@ impl Emulator {
             }
         }
 
-        self.cpu.update_pc(header.e_entry);
+        self.cpu.update_pc(header.e_entry as i64);
     }
 
     /// Loads symbols of program and adds them to `symbol_map`.
@@ -235,7 +234,7 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `content` File system content binary
-    pub fn setup_filesystem(&mut self, content: &[u8]) {
+    pub fn setup_filesystem(&mut self, content: Vec<u8>) {
         self.cpu.get_mut_mmu().init_disk(content);
     }
 

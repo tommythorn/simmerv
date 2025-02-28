@@ -9,7 +9,6 @@ use crate::cpu::MIP_SEIP;
 /// Refer to the [specification](https://sifive.cdn.prismic.io/sifive%2Fc89f6e5a-cf9e-44c3-a3db-04420702dcc1_sifive+e31+manual+v19.08.pdf)
 /// for the detail.
 pub struct Plic {
-    clock: u64,
     irq: u32,
     enabled: u64,
     threshold: u32,
@@ -34,7 +33,6 @@ impl Plic {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            clock: 0,
             irq: 0,
             enabled: 0,
             threshold: 0,
@@ -54,9 +52,7 @@ impl Plic {
     /// * `virtio_ip`
     /// * `uart_ip`
     /// * `mip`
-    pub fn tick(&mut self, virtio_ip: bool, uart_ip: bool, mip: &mut u64) {
-        self.clock = self.clock.wrapping_add(1);
-
+    pub fn service(&mut self, virtio_ip: bool, uart_ip: bool, mip: &mut u64) {
         // Handling interrupts as "Edge-triggered" interrupt so far
 
         // Our VirtIO disk implements an interrupt as "Level-triggered" and

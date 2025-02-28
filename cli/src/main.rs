@@ -101,7 +101,7 @@ fn main() -> std::io::Result<()> {
 
     let mut emulator = Emulator::new(get_terminal(terminal_type));
     emulator.setup_program(elf_contents);
-    emulator.setup_filesystem(&fs_contents);
+    emulator.setup_filesystem(fs_contents);
     if has_dtb {
         emulator.setup_dtb(&dtb_contents);
     }

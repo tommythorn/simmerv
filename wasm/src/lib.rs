@@ -83,7 +83,7 @@ impl WasmRiscv {
     /// # Arguments
     /// * `content` File system content binary
     pub fn setup_filesystem(&mut self, content: Vec<u8>) {
-        self.emulator.setup_filesystem(&content);
+        self.emulator.setup_filesystem(content);
     }
 
     /// Sets up device tree. The emulator has default device tree configuration.
@@ -140,7 +140,7 @@ impl WasmRiscv {
     pub fn run_until_breakpoints(&mut self, breakpoints: Vec<u64>, max_cycles: u32) -> bool {
         let mut table = HashMap::new();
         for breakpoint in breakpoints {
-            table.insert(breakpoint, true);
+            table.insert(breakpoint as i64, true);
         }
         for _i in 0..max_cycles {
             self.emulator.tick();
@@ -209,7 +209,7 @@ impl WasmRiscv {
     }
 
     /// Reads Program Counter content.
-    pub fn read_pc(&self) -> u64 {
+    pub fn read_pc(&self) -> i64 {
         self.emulator.get_cpu().read_pc()
     }
 
