@@ -18,7 +18,7 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 // 1: buffer is read-only = write to disk operation
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-const SECTOR_SIZE: u64 = 512;
+const SECTOR_SIZE: usize = 512;
 
 /// Emulates Virtio Block device. Refer to the [specification](https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html)
 /// for the detail. It follows legacy API.
@@ -323,31 +323,16 @@ impl VirtioBlockDisk {
     /// * `length` Must be eight-byte aligned.
     /// # Panics
     /// This will panic if the `disk_address` isn't reasonable
-    #[allow(clippy::cast_possible_truncation)]
-    fn transfer_from_disk(
-        &self,
-        memory: &mut Memory,
-        mem_address: u64,
-        disk_address: u64,
-        length: u64,
-    ) {
-        debug_assert!(
-            (mem_address % 8) == 0,
-            "Memory address should be eight-byte aligned. {mem_address:X}"
-        );
-        debug_assert!(
-            (length % 8) == 0,
-            "Length should be eight-byte aligned. {length:X}"
-        );
-
-        // NB: Using a similar representation for the memory would
-        // enable a much more efficient copy
-        for i in 0..(length / 8) {
-            let p = (disk_address + i * 8) as usize;
-            let mut v64 = [0; 8];
-            v64.copy_from_slice(&self.contents[p..p + 8]);
-            memory.write_u64(mem_address + i * 8, u64::from_le_bytes(v64));
-        }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::expect_used,
+        clippy::cast_possible_wrap
+    )]
+    fn transfer_from_disk(&self, memory: &mut Memory, pa: u64, disk_address: usize, length: usize) {
+        memory
+            .slice(pa as i64, length)
+            .expect("transfer_from_disk() reaches outside memory")
+            .copy_from_slice(&self.contents[disk_address..disk_address + length]);
     }
 
     /// Fast path of transferring the data from memory to disk.
@@ -357,51 +342,24 @@ impl VirtioBlockDisk {
     /// * `mem_addresss` Physical address. Must be eight-byte aligned.
     /// * `disk_address` Must be eight-byte aligned.
     /// * `length` Must be eight-byte aligned.
-    #[allow(clippy::cast_possible_truncation)]
+    /// #
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::expect_used,
+        clippy::cast_possible_wrap
+    )]
     fn transfer_to_disk(
         &mut self,
         memory: &mut Memory,
-        mem_address: u64,
-        disk_address: u64,
-        length: u64,
+        pa: u64,
+        disk_address: usize,
+        length: usize,
     ) {
-        debug_assert!(
-            (mem_address % 8) == 0,
-            "Memory address should be eight-byte aligned. {mem_address:X}"
+        self.contents[disk_address..disk_address + length].copy_from_slice(
+            memory
+                .slice(pa as i64, length)
+                .expect("transfer_to_disk() reaches outside memory"),
         );
-        debug_assert!(
-            (disk_address % 8) == 0,
-            "Disk address should be eight-byte aligned. {disk_address:X}"
-        );
-        debug_assert!(
-            (length % 8) == 0,
-            "Length should be eight-byte aligned. {length:X}"
-        );
-
-        for i in 0..(length / 8) {
-            let p = (disk_address + i * 8) as usize;
-            self.contents[p..p + 8]
-                .copy_from_slice(&memory.read_u64(mem_address + i * 8).to_le_bytes());
-        }
-    }
-
-    /// Reads a byte from disk.
-    ///
-    /// # Arguments
-    /// * `addresss` Address in disk
-    #[allow(clippy::cast_possible_truncation)]
-    fn read_from_disk(&self, address: u64) -> u8 {
-        self.contents[address as usize]
-    }
-
-    /// Writes a byte to disk.
-    ///
-    /// # Arguments
-    /// * `addresss` Address in disk
-    /// * `value` Data written to disk
-    #[allow(clippy::cast_possible_truncation)]
-    fn write_to_disk(&mut self, address: u64, value: u8) {
-        self.contents[address as usize] = value;
     }
 
     const fn get_page_address(&self) -> u64 {
@@ -514,7 +472,7 @@ impl VirtioBlockDisk {
                     // so we can ignore blk_type?
                     _blk_type = memory.read_u32(desc_addr);
                     _blk_reserved = memory.read_u32(desc_addr.wrapping_add(4));
-                    blk_sector = memory.read_u64(desc_addr.wrapping_add(8));
+                    blk_sector = memory.read_u64(desc_addr.wrapping_add(8)) as usize;
                     /*
                     println!("Blk type:{:X}", _blk_type);
                     println!("Blk reserved:{:X}", _blk_reserved);
@@ -525,42 +483,20 @@ impl VirtioBlockDisk {
                     // Second descriptor: Read/Write disk
                     if (desc_flags & VIRTQ_DESC_F_WRITE) == 0 {
                         // write to disk
-                        if desc_addr % 8 == 0
-                            && (blk_sector * SECTOR_SIZE) % 8 == 0
-                            && desc_len % 8 == 0
-                        {
-                            // Enter fast path if possible
-                            self.transfer_to_disk(
-                                memory,
-                                desc_addr,
-                                blk_sector * SECTOR_SIZE,
-                                u64::from(desc_len),
-                            );
-                        } else {
-                            for i in 0..u64::from(desc_len) {
-                                let data = memory.read_u8(desc_addr + i);
-                                self.write_to_disk(blk_sector * SECTOR_SIZE + i, data);
-                            }
-                        }
+                        self.transfer_to_disk(
+                            memory,
+                            desc_addr,
+                            blk_sector * SECTOR_SIZE,
+                            desc_len as usize,
+                        );
                     } else {
                         // read from disk
-                        if desc_addr % 8 == 0
-                            && (blk_sector * SECTOR_SIZE) % 8 == 0
-                            && desc_len % 8 == 0
-                        {
-                            // Enter fast path if possible
-                            self.transfer_from_disk(
-                                memory,
-                                desc_addr,
-                                blk_sector * SECTOR_SIZE,
-                                u64::from(desc_len),
-                            );
-                        } else {
-                            for i in 0..u64::from(desc_len) {
-                                let data = self.read_from_disk(blk_sector * SECTOR_SIZE + i);
-                                memory.write_u8(desc_addr + i, data);
-                            }
-                        }
+                        self.transfer_from_disk(
+                            memory,
+                            desc_addr,
+                            blk_sector * SECTOR_SIZE,
+                            desc_len as usize,
+                        );
                     }
                 }
                 2 => {
