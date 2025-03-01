@@ -3155,10 +3155,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0707f,
         data: 0xe0001053,
         name: "FCLASS.S",
-        operation: |_cpu, word, _address| {
-            let _f = parse_format_r(word);
-            todo!("fclass.s");
-            //Ok(())
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+
+            if f.rd != 0 {
+                cpu.x[f.rd] = 1 << fp::fclass_f32(cpu.f[f.rs1] as u32) as usize;
+            }
+            Ok(())
         },
         disassemble: dump_format_r,
     },
@@ -3537,10 +3540,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfff0707f,
         data: 0xe2001053,
         name: "FCLASS.D",
-        operation: |_cpu, word, _address| {
-            let _f = parse_format_r(word);
-            todo!("fclass.d");
-            //Ok(())
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+
+            if f.rd != 0 {
+                cpu.x[f.rd] = 1 << fp::fclass_f64(cpu.f[f.rs1]) as usize;
+            }
+            Ok(())
         },
         disassemble: dump_format_r,
     },

@@ -40,7 +40,7 @@ here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 ## Instructions/Features support status
 
 - [x] RV64IMAC
-- [x] RV64FD (all-but fclass implemented, flags/rounding modes very lacking)
+- [x] RV64FD (flags/rounding modes very lacking)
 - [x] RV64Zifencei
 - [x] RV64Zicsr
 - [ ] RV64B
