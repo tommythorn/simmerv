@@ -4313,13 +4313,13 @@ mod test_cpu {
         // Test x0
         assert_eq!(0, cpu.read_register(0));
         cpu.run_soc(1); // Execute  "addi x0, x0, 1"
-                        // x0 is still zero because it's hardcoded zero
+        // x0 is still zero because it's hardcoded zero
         assert_eq!(0, cpu.read_register(0));
 
         // Test x1
         assert_eq!(0, cpu.read_register(1));
         cpu.run_soc(1); // Execute  "addi x1, x1, 1"
-                        // x1 is not hardcoded zero
+        // x1 is not hardcoded zero
         assert_eq!(1, cpu.read_register(1));
     }
 }

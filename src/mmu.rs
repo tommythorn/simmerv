@@ -1,8 +1,8 @@
 #![allow(clippy::unreadable_literal)]
 
 use crate::cpu::{
-    PrivilegeMode, Trap, TrapType, CONFIG_SW_MANAGED_A_AND_D, MSTATUS_MPP_SHIFT, MSTATUS_MPRV,
-    MSTATUS_MXR, MSTATUS_SUM, PG_SHIFT,
+    CONFIG_SW_MANAGED_A_AND_D, MSTATUS_MPP_SHIFT, MSTATUS_MPRV, MSTATUS_MXR, MSTATUS_SUM, PG_SHIFT,
+    PrivilegeMode, Trap, TrapType,
 };
 use crate::device::clint::Clint;
 use crate::device::plic::Plic;
