@@ -4,22 +4,17 @@ Riscv-rust is a [RISC-V](https://riscv.org/) processor and peripheral
 devices emulator project written in Rust and compilable to
 WebAssembly.
 
-This is a substrantially enhanced fork of [Takahiro's riscv-rust
+This is a substantially enhanced fork of [Takahiro's riscv-rust
 original emulator](https://github.com/takahirox/riscv-rust).  This
 fork is already far more complete and is working towards near 100%
 correctness.  Ultimately, we also expect it to become substantially
 faster, but this work is delayed until this is sufficiently correct to
 run benchmarks and off-the-shelf Linux distributions.
 
-You can import RISC-V emulator into your Rust or JavaScript project.
-Refer to the
-[Slides](https://docs.google.com/presentation/d/1qeR6KMSaJTR0ZSa2kLxgcBuc_zBo3l-kYbOpq1Wqmi0/edit?usp=sharing)
-for more detail.
-
 ## Online Demo
 
-You can run Linux or xv6 on the emulator in your browser. [Online demo
-is here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
+You can run Linux on the emulator in your browser. [Online demo is
+here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 ## Screenshots
 
@@ -32,8 +27,10 @@ is here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 ## Features
 
-- Emulate RISC-V processor and peripheral devices
-- Stable as [Linux](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html) and [xv6-riscv](https://github.com/mit-pdos/xv6-riscv) run on it
+- Emulate RISC-V RV64GC processor and peripheral devices (virtio block
+  device and a UART)
+- Boots Debian Trixie
+- Stable as [Linux](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html) run on it
 - Linux OpenSBI and legacy BBL boot support
 - Runnable locally
 - Also runnable in browser with WebAssembly
@@ -46,15 +43,15 @@ is here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 - [x] RV64FD (all-but fclass implemented, flags/rounding modes very lacking)
 - [x] RV64Zifencei
 - [x] RV64Zicsr
+- [ ] RV64B
+- [ ] Svnapot
 - [x] CSR (almost?)
 - [x] Sv39
-- [ ] Sv48
+- [x] Sv48 (untested, but should work)
 - [x] Privileged instructions
-- [ ] PMP
+- [ ] PMP (this is intensionally not implemented as it will negatively affect performance)
 
-The emulator supports almost all instructions listed above but some
-instructions which are not used in Linux or xv6 are not implemented
-yet. Your contribution is very welcome.
+The emulator supports all instructions listed above but some 
 
 ## How to import into your Rust project
 
