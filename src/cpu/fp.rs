@@ -128,3 +128,13 @@ pub const fn fclass_f64(a: i64) -> Fclass {
         Fclass::Pnormal
     }
 }
+
+const F_QNAN32: i64 = 0x7fc00000;
+const F32_HIGH: i64 = 0xffff_ffff_0000_0000u64 as i64;
+pub const fn unbox32(r: i64) -> i64 {
+    if (r & F32_HIGH) == F32_HIGH {
+        r
+    } else {
+        F_QNAN32
+    }
+}
