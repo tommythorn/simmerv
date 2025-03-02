@@ -156,7 +156,8 @@ impl WasmRiscv {
     /// Use `get_output()` to get the disassembled strings.
     pub fn disassemble(&mut self) {
         let cpu = self.emulator.get_mut_cpu();
-        let (s, _wbr) = cpu.disassemble(cpu.insn);
+        let mut s = String::new();
+        let _wbr = cpu.disassemble(&mut s);
         let bytes = s.as_bytes();
         for &b in bytes {
             self.emulator.get_mut_terminal().put_byte(b);

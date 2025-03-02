@@ -91,12 +91,16 @@ impl Emulator {
     /// * Displays the result message (pass/fail) to terminal
     #[allow(clippy::cast_possible_truncation)]
     pub fn run_test(&mut self) {
-        // @TODO: Send this message to terminal?
-        println!("This elf file seems riscv-tests elf file. Running in test mode.");
+        let mut s = String::new();
         loop {
+            s.clear();
+            let wbr = self.cpu.disassemble(&mut s);
             self.tick();
-            let (disass, wbr) = self.cpu.disassemble(self.cpu.insn);
-            println!("{disass:72} {:16x}", self.cpu.read_register(wbr as u8));
+            println!(
+                "{:5} {s:72} {:16x}",
+                self.cpu.cycle,
+                self.cpu.read_register(wbr as u8)
+            );
 
             // Riscv-tests terminats by writing the result * 2 + 1 to `tohost`
             // Zero means pass, anything else encodes where it failed.

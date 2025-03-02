@@ -145,7 +145,7 @@ pub struct Cpu {
     fflags: u8,
     fs: u8,
 
-    cycle: u64,
+    pub cycle: u64,
     privilege_mode: PrivilegeMode,
     pc: i64,
     pub insn_addr: i64, // XXX make accessor functions instead of pub?
@@ -777,21 +777,21 @@ impl Cpu {
 
     /// Disassembles an instruction pointed by Program Counter and
     /// and return the [possibly] writeback register
-    // XXX Make it take the writable as a parameter
     #[allow(clippy::cast_sign_loss)]
-    pub fn disassemble(&mut self, original_word: u32) -> (String, usize) {
-        let (word, _) = decompress(0, original_word);
-        let Ok(inst) = self.decode_raw(word) else {
-            return (
-                format!("{:016x} {original_word:08x} Illegal instruction", self.pc),
-                0,
-            );
+    pub fn disassemble(&mut self, s: &mut String) -> usize {
+        let Some(word32) = self.memop_disass(self.pc) else {
+            let _ = write!(s, "<inaccessible>");
+            return 0;
+        };
+        let word32 = (word32 & 0xffff) as u32;
+        let (insn, _) = decompress(0, word32);
+        let Ok(decoded) = self.decode_raw(insn) else {
+            let _ = write!(s, "{:016x} {word32:08x} Illegal instruction", self.pc);
+            return 0;
         };
 
-        let mut s = String::new();
-        let _ = write!(s, "{:016x} {original_word:08x} {} ", self.pc, inst.name);
-        let wbr = (inst.disassemble)(&mut s, self, word, self.pc as u64, true);
-        (s, wbr)
+        let _ = write!(s, "{:016x} {word32:08x} {} ", self.pc, decoded.name);
+        (decoded.disassemble)(s, self, word32, self.pc as u64, true)
     }
 
     /// Returns mutable `Mmu`
@@ -881,10 +881,6 @@ impl Cpu {
         }
     }
 
-    // Memory access
-    // - does virtual -> physical address translation
-    // - directly handles exception
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn memop(
         &mut self,
         access: MemoryAccessType,
@@ -892,6 +888,26 @@ impl Cpu {
         offset: i64,
         v: i64,
         size: i64,
+    ) -> Option<i64> {
+        self.memop_general(access, baseva, offset, v, size, false)
+    }
+
+    fn memop_disass(&mut self, baseva: i64) -> Option<i64> {
+        self.memop_general(Execute, baseva, 0, 0, 4, true)
+    }
+
+    // Memory access
+    // - does virtual -> physical address translation
+    // - directly handles exception
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn memop_general(
+        &mut self,
+        access: MemoryAccessType,
+        baseva: i64,
+        offset: i64,
+        v: i64,
+        size: i64,
+        side_effect_free: bool,
     ) -> Option<i64> {
         let va = baseva.wrapping_add(offset);
 
@@ -901,12 +917,16 @@ impl Cpu {
             return self.memop_slow(access, va, v, size);
         }
 
-        let pa = match self.mmu.translate_address(va as u64, access) {
+        let pa = match self
+            .mmu
+            .translate_address(va as u64, access, side_effect_free)
+        {
             Ok(pa) => pa as i64,
-            Err(trap) => {
+            Err(trap) if !side_effect_free => {
                 self.handle_exception(&trap);
                 return None;
             }
+            _ => return None,
         };
 
         let Ok(slice) = self.mmu.memory.slice(pa, size as usize) else {
@@ -944,7 +964,7 @@ impl Cpu {
 
         let mut r: u64 = 0;
         for i in 0..size {
-            let pa = match self.mmu.translate_address((va + i) as u64, access) {
+            let pa = match self.mmu.translate_address((va + i) as u64, access, false) {
                 Ok(pa) => pa,
                 Err(trap) => {
                     self.handle_exception(&trap);

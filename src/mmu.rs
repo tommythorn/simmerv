@@ -205,7 +205,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn load_virt_u8(&mut self, va: u64) -> Result<u8, Trap> {
-        let pa = self.translate_address(va, MemoryAccessType::Read)?;
+        let pa = self.translate_address(va, MemoryAccessType::Read, false)?;
         Ok(self.load_phys_u8(pa))
     }
 
@@ -223,7 +223,7 @@ impl Mmu {
         if va & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            let pa = self.translate_address(va, MemoryAccessType::Read)?;
+            let pa = self.translate_address(va, MemoryAccessType::Read, false)?;
             Ok(match width {
                 1 => u64::from(self.load_phys_u8(pa)),
                 2 => u64::from(self.load_phys_u16(pa)),
@@ -296,7 +296,7 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     pub fn store_virt_u8(&mut self, va: u64, value: u8) -> Result<(), Trap> {
-        let pa = self.translate_address(va, MemoryAccessType::Write)?;
+        let pa = self.translate_address(va, MemoryAccessType::Write, false)?;
         self.store_phys_u8(pa, value).map_err(|()| Trap {
             trap_type: TrapType::StoreAccessFault,
             value: va as i64,
@@ -321,7 +321,7 @@ impl Mmu {
         if va & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            let pa = self.translate_address(va, MemoryAccessType::Write)?;
+            let pa = self.translate_address(va, MemoryAccessType::Write, false)?;
             let r = match width {
                 1 => self.store_phys_u8(pa, value as u8),
                 2 => self.store_phys_u16(pa, value as u16),
@@ -583,6 +583,7 @@ impl Mmu {
         &mut self,
         address: u64,
         access_type: MemoryAccessType,
+        side_effect_free: bool,
     ) -> Result<u64, Trap> {
         let v_page = address & !0xfff;
 
@@ -600,9 +601,9 @@ impl Mmu {
             return Ok(p_page | (address & 0xfff));
         }
 
-        let pa = self.translate_address_slow(address, access_type)?;
+        let pa = self.translate_address_slow(address, access_type, side_effect_free)?;
 
-        if self.page_cache_enabled {
+        if self.page_cache_enabled && !side_effect_free {
             let p_page = pa & !0xfff;
             let _ = match access_type {
                 MemoryAccessType::Execute => self.fetch_page_cache.insert(v_page, p_page),
@@ -615,7 +616,12 @@ impl Mmu {
     }
 
     #[allow(clippy::cast_possible_wrap)]
-    fn translate_address_slow(&mut self, va: u64, access: MemoryAccessType) -> Result<u64, Trap> {
+    fn translate_address_slow(
+        &mut self,
+        va: u64,
+        access: MemoryAccessType,
+        side_effect_free: bool,
+    ) -> Result<u64, Trap> {
         let effective_priv = if self.mstatus & MSTATUS_MPRV != 0
             && access != MemoryAccessType::Execute
         {
@@ -745,7 +751,10 @@ impl Mmu {
                 if access == MemoryAccessType::Write {
                     new_pte |= PTE_D_MASK;
                 }
-                if pte != new_pte && self.store_phys_u64(pte_addr, new_pte).is_err() {
+                if pte != new_pte
+                    && !side_effect_free
+                    && self.store_phys_u64(pte_addr, new_pte).is_err()
+                {
                     return access_fault(va as i64, access);
                 }
             }
