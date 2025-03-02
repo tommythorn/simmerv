@@ -91,24 +91,27 @@ impl Emulator {
     /// * Displays the result message (pass/fail) to terminal
     #[allow(clippy::cast_possible_truncation)]
     pub fn run_test(&mut self) {
+        //use std::io::{self, Write};
+
         let mut s = String::new();
         loop {
             s.clear();
             let wbr = self.cpu.disassemble(&mut s);
             self.tick();
-            println!(
+            eprintln!(
                 "{:5} {s:72} {:16x}",
                 self.cpu.cycle,
                 self.cpu.read_register(wbr as u8)
             );
+            //let _ = io::stdout().flush();
 
-            // Riscv-tests terminats by writing the result * 2 + 1 to `tohost`
+            // Riscv-tests terminates by writing the result * 2 + 1 to `tohost`
             // Zero means pass, anything else encodes where it failed.
             let endcode = self.cpu.get_mut_mmu().load_phys_u32(self.tohost_addr);
             if endcode != 0 {
                 match endcode {
-                    1 => println!("Test Passed\n"),
-                    _ => println!("Test Failed with {}\n", endcode / 2),
+                    1 => eprintln!("Test Passed\n"),
+                    _ => eprintln!("Test Failed with {}\n", endcode / 2),
                 }
                 break;
             }
