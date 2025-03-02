@@ -822,7 +822,7 @@ impl Cpu {
             let _ = write!(s, "<inaccessible>");
             return 0;
         };
-        let word32 = (word32 & 0xffff) as u32;
+        let word32 = (word32 & 0xffffffff) as u32;
         let (insn, _) = decompress(0, word32);
         let Ok(decoded) = self.decode_raw(insn) else {
             let _ = write!(s, "{:016x} {word32:08x} Illegal instruction", self.pc);
