@@ -506,7 +506,11 @@ impl VirtioBlockDisk {
                         "Third descriptor should be write."
                     );
                     assert!(desc_len == 1, "Third descriptor length should be one.");
-                    memory.write_u8(desc_addr, 0); // 0 means succeeded
+                    memory.write_u8(desc_addr, 0).unwrap_or_else(|()| {
+                        println!(
+                            "VirtioBlockDisk tries to write outside memory, trying to continue"
+                        );
+                    }); // 0 means succeeded
                 }
                 _ => {}
             }
@@ -520,14 +524,22 @@ impl VirtioBlockDisk {
 
         assert!((desc_num == 3), "Descript chain length should be three.");
 
-        memory.write_u32(
-            base_used_address
-                .wrapping_add(4)
-                .wrapping_add((u64::from(self.used_ring_index) % queue_size) * 8),
-            desc_head_index as u32,
-        );
+        memory
+            .write_u32(
+                base_used_address
+                    .wrapping_add(4)
+                    .wrapping_add((u64::from(self.used_ring_index) % queue_size) * 8),
+                desc_head_index as u32,
+            )
+            .unwrap_or_else(|()| {
+                println!("VirtioBlockDisk tries to write outside memory, trying to continue");
+            });
 
         self.used_ring_index = self.used_ring_index.wrapping_add(1);
-        memory.write_u16(base_used_address.wrapping_add(2), self.used_ring_index);
+        memory
+            .write_u16(base_used_address.wrapping_add(2), self.used_ring_index)
+            .unwrap_or_else(|()| {
+                println!("VirtioBlockDisk tries to write outside memory, trying to continue");
+            });
     }
 }

@@ -1,4 +1,4 @@
-#![allow(clippy::unreadable_literal)]
+#![allow(clippy::unreadable_literal, clippy::cast_possible_wrap)]
 
 use crate::cpu::{
     CONFIG_SW_MANAGED_A_AND_D, MSTATUS_MPP_SHIFT, MSTATUS_MPRV, MSTATUS_MXR, MSTATUS_SUM, PG_SHIFT,
@@ -201,40 +201,40 @@ impl Mmu {
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn load_virt_u8(&mut self, v_address: u64) -> Result<u8, Trap> {
-        let p_address = self.translate_address(v_address, MemoryAccessType::Read)?;
-        Ok(self.load_phys_u8(p_address))
+    pub fn load_virt_u8(&mut self, va: u64) -> Result<u8, Trap> {
+        let pa = self.translate_address(va, MemoryAccessType::Read)?;
+        Ok(self.load_phys_u8(pa))
     }
 
     /// Loads multiple bytes. This method takes virtual address and translates
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// * `width` Must be 1, 2, 4, or 8
-    fn load_virt_bytes(&mut self, v_address: u64, width: u64) -> Result<u64, Trap> {
+    fn load_virt_bytes(&mut self, va: u64, width: u64) -> Result<u64, Trap> {
         debug_assert!(
             width == 1 || width == 2 || width == 4 || width == 8,
             "Width must be 1, 2, 4, or 8. {width:X}"
         );
-        if v_address & 0xfff <= 0x1000 - width {
+        if va & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            let p_address = self.translate_address(v_address, MemoryAccessType::Read)?;
+            let pa = self.translate_address(va, MemoryAccessType::Read)?;
             Ok(match width {
-                1 => u64::from(self.load_phys_u8(p_address)),
-                2 => u64::from(self.load_phys_u16(p_address)),
-                4 => u64::from(self.load_phys_u32(p_address)),
-                8 => self.load_phys_u64(p_address),
+                1 => u64::from(self.load_phys_u8(pa)),
+                2 => u64::from(self.load_phys_u16(pa)),
+                4 => u64::from(self.load_phys_u32(pa)),
+                8 => self.load_phys_u64(pa),
                 _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
             })
         } else {
             let mut data = 0_u64;
             for i in 0..width {
-                let byte = self.load_virt_u8(v_address.wrapping_add(i))?;
+                let byte = self.load_virt_u8(va.wrapping_add(i))?;
                 data |= u64::from(byte) << (i * 8);
             }
             Ok(data)
@@ -245,14 +245,14 @@ impl Mmu {
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
     //
     // XXX Still being used by the atomics
     #[allow(clippy::cast_possible_truncation)]
-    pub fn load_virt_u32(&mut self, v_address: u64) -> Result<u32, Trap> {
-        match self.load_virt_bytes(v_address, 4) {
+    pub fn load_virt_u32(&mut self, va: u64) -> Result<u32, Trap> {
+        match self.load_virt_bytes(va, 4) {
             Ok(data) => Ok(data as u32),
             Err(e) => Err(e),
         }
@@ -262,11 +262,11 @@ impl Mmu {
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn load_virt_u64(&mut self, v_address: u64) -> Result<u64, Trap> {
-        match self.load_virt_bytes(v_address, 8) {
+    pub fn load_virt_u64(&mut self, va: u64) -> Result<u64, Trap> {
+        match self.load_virt_bytes(va, 8) {
             Ok(data) => Ok(data),
             Err(e) => Err(e),
         }
@@ -276,106 +276,112 @@ impl Mmu {
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
     // XXX in contrast to `load_virt_u64` it takes the address as i64.  Eventually all the memory
     // ops will do this, but for the moment we have this odd ugliness
     #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-    pub fn load_virt_u64_(&mut self, v_address: i64) -> Result<i64, Trap> {
+    pub fn load_virt_u64_(&mut self, va: i64) -> Result<i64, Trap> {
         // XXX All addresses should be i64
-        Ok(self.load_virt_bytes(v_address as u64, 8)? as i64)
+        Ok(self.load_virt_bytes(va as u64, 8)? as i64)
     }
 
     /// Store an byte. This method takes virtual address and translates
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// * `value`
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_virt_u8(&mut self, v_address: u64, value: u8) -> Result<(), Trap> {
-        let p_address = self.translate_address(v_address, MemoryAccessType::Write)?;
-        self.store_phys_u8(p_address, value);
-        Ok(())
+    pub fn store_virt_u8(&mut self, va: u64, value: u8) -> Result<(), Trap> {
+        let pa = self.translate_address(va, MemoryAccessType::Write)?;
+        self.store_phys_u8(pa, value).map_err(|()| Trap {
+            trap_type: TrapType::StoreAccessFault,
+            value: va as i64,
+        })
     }
 
     /// Stores multiple bytes. This method takes a virtual address and translates
     /// it into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// * `value` data written
     /// * `width` Must be 1, 2, 4, or 8
     /// # Errors
     /// Exceptions are returned as errors
     #[allow(clippy::cast_possible_truncation)]
-    fn store_virt_bytes(&mut self, v_address: u64, value: u64, width: u64) -> Result<(), Trap> {
+    fn store_virt_bytes(&mut self, va: u64, value: u64, width: u64) -> Result<(), Trap> {
         debug_assert!(
             width == 1 || width == 2 || width == 4 || width == 8,
             "Width must be 1, 2, 4, or 8. {width:X}"
         );
-        if v_address & 0xfff <= 0x1000 - width {
+        if va & 0xfff <= 0x1000 - width {
             // Fast path. All bytes fetched are in the same page so
             // translating an address only once.
-            let p_address = self.translate_address(v_address, MemoryAccessType::Write)?;
-            match width {
-                1 => self.store_phys_u8(p_address, value as u8),
-                2 => self.store_phys_u16(p_address, value as u16),
-                4 => self.store_phys_u32(p_address, value as u32),
-                8 => self.store_phys_u64(p_address, value),
+            let pa = self.translate_address(va, MemoryAccessType::Write)?;
+            let r = match width {
+                1 => self.store_phys_u8(pa, value as u8),
+                2 => self.store_phys_u16(pa, value as u16),
+                4 => self.store_phys_u32(pa, value as u32),
+                8 => self.store_phys_u64(pa, value),
                 _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
-            }
+            };
+            r.map_err(|()| Trap {
+                trap_type: TrapType::StoreAccessFault,
+                value: va as i64,
+            })
         } else {
             for i in 0..width {
-                self.store_virt_u8(v_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
+                self.store_virt_u8(va.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
             }
+            Ok(())
         }
-        Ok(())
     }
 
     /// Stores two bytes. This method takes virtual address and translates
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// * `value` data written
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_virt_u16(&mut self, v_address: u64, value: u16) -> Result<(), Trap> {
-        self.store_virt_bytes(v_address, u64::from(value), 2)
+    pub fn store_virt_u16(&mut self, va: u64, value: u16) -> Result<(), Trap> {
+        self.store_virt_bytes(va, u64::from(value), 2)
     }
 
     /// Stores four bytes. This method takes virtual address and translates
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// * `value` data written
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_virt_u32(&mut self, v_address: u64, value: u32) -> Result<(), Trap> {
-        self.store_virt_bytes(v_address, u64::from(value), 4)
+    pub fn store_virt_u32(&mut self, va: u64, value: u32) -> Result<(), Trap> {
+        self.store_virt_bytes(va, u64::from(value), 4)
     }
 
     /// Stores eight bytes. This method takes virtual address and translates
     /// into physical address inside.
     ///
     /// # Arguments
-    /// * `v_address` Virtual address
+    /// * `va` Virtual address
     /// * `value` data written
     /// # Errors
     /// Exceptions are returned as errors
-    pub fn store_virt_u64(&mut self, v_address: u64, value: u64) -> Result<(), Trap> {
-        self.store_virt_bytes(v_address, value, 8)
+    pub fn store_virt_u64(&mut self, va: u64, value: u64) -> Result<(), Trap> {
+        self.store_virt_bytes(va, value, 8)
     }
 
     /// # Errors
     /// Exceptions are returned as errors
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store64(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
-        self.store_virt_bytes(v_address as u64, value as u64, 8)
+    pub fn store64(&mut self, va: i64, value: i64) -> Result<(), Trap> {
+        self.store_virt_bytes(va as u64, value as u64, 8)
     }
 
     /// # Errors
@@ -383,40 +389,40 @@ impl Mmu {
     // XXX in contrast to `store_virt_u32` it takes the address and data as i64.
     // Eventually all the memory ops will do this, but for the moment we have this odd ugliness
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store_virt_u32_(&mut self, v_address: i64, value: i64) -> Result<(), Trap> {
-        self.store_virt_bytes(v_address as u64, value as u64, 4)
+    pub fn store_virt_u32_(&mut self, va: i64, value: i64) -> Result<(), Trap> {
+        self.store_virt_bytes(va as u64, value as u64, 4)
     }
 
     /// Loads a byte from main memory or peripheral devices depending on
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
+    /// * `pa` Physical address
     /// # Panics
     /// Can panic ...
     #[allow(clippy::cast_possible_truncation, clippy::unwrap_used)]
-    fn load_phys_u8(&mut self, p_address: u64) -> u8 {
+    fn load_phys_u8(&mut self, pa: u64) -> u8 {
         // @TODO: Mapping should be configurable with dtb
-        if p_address >= DRAM_BASE {
-            self.memory.read_u8(p_address)
+        if pa >= DRAM_BASE {
+            self.memory.read_u8(pa)
         } else {
-            self.load_mmio_u8(p_address).unwrap()
+            self.load_mmio_u8(pa).unwrap()
         }
     }
 
     /// # Errors
     /// Cannot really panic
     #[allow(clippy::result_unit_err, clippy::cast_possible_truncation)]
-    pub fn load_mmio_u8(&mut self, p_address: u64) -> Result<u8, ()> {
-        match p_address {
+    pub fn load_mmio_u8(&mut self, pa: u64) -> Result<u8, ()> {
+        match pa {
             // I don't know why but dtb data seems to be stored from 0x1020 on Linux.
             // It might be from self.x[0xb] initialization?
             // And DTB size is arbitray.
-            0x00001020..=0x00001fff => Ok(self.dtb[p_address as usize - 0x1020]),
-            0x02000000..=0x0200ffff => Ok(self.clint.load(p_address)),
-            0x0C000000..=0x0fffffff => Ok(self.plic.load(p_address)),
-            0x10000000..=0x100000ff => Ok(self.uart.load(p_address)),
-            0x10001000..=0x10001FFF => Ok(self.disk.load(p_address)),
+            0x00001020..=0x00001fff => Ok(self.dtb[pa as usize - 0x1020]),
+            0x02000000..=0x0200ffff => Ok(self.clint.load(pa)),
+            0x0C000000..=0x0fffffff => Ok(self.plic.load(pa)),
+            0x10000000..=0x100000ff => Ok(self.uart.load(pa)),
+            0x10001000..=0x10001FFF => Ok(self.disk.load(pa)),
             _ => Err(()),
         }
     }
@@ -425,15 +431,15 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
-    fn load_phys_u16(&mut self, p_address: u64) -> u16 {
-        if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
+    /// * `pa` Physical address
+    fn load_phys_u16(&mut self, pa: u64) -> u16 {
+        if pa >= DRAM_BASE && pa.wrapping_add(1) > pa {
             // Fast path. Directly load main memory at a time.
-            self.memory.read_u16(p_address)
+            self.memory.read_u16(pa)
         } else {
             let mut data = 0_u16;
             for i in 0..2 {
-                data |= u16::from(self.load_phys_u8(p_address.wrapping_add(i))) << (i * 8);
+                data |= u16::from(self.load_phys_u8(pa.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -443,14 +449,14 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
-    pub fn load_phys_u32(&mut self, p_address: u64) -> u32 {
-        if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
-            self.memory.read_u32(p_address)
+    /// * `pa` Physical address
+    pub fn load_phys_u32(&mut self, pa: u64) -> u32 {
+        if pa >= DRAM_BASE && pa.wrapping_add(3) > pa {
+            self.memory.read_u32(pa)
         } else {
             let mut data = 0_u32;
             for i in 0..4 {
-                data |= u32::from(self.load_phys_u8(p_address.wrapping_add(i))) << (i * 8);
+                data |= u32::from(self.load_phys_u8(pa.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -460,14 +466,14 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
-    fn load_phys_u64(&mut self, p_address: u64) -> u64 {
-        if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
-            self.memory.read_u64(p_address)
+    /// * `pa` Physical address
+    fn load_phys_u64(&mut self, pa: u64) -> u64 {
+        if pa >= DRAM_BASE && pa.wrapping_add(7) > pa {
+            self.memory.read_u64(pa)
         } else {
             let mut data = 0_u64;
             for i in 0..8 {
-                data |= u64::from(self.load_phys_u8(p_address.wrapping_add(i))) << (i * 8);
+                data |= u64::from(self.load_phys_u8(pa.wrapping_add(i))) << (i * 8);
             }
             data
         }
@@ -477,18 +483,18 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
+    /// * `pa` Physical address
     /// * `value` data written
     /// # Errors
     /// Will return error for access outside supported memory range
     #[allow(clippy::result_unit_err, clippy::cast_sign_loss)]
     pub fn store_mmio_u8(&mut self, pa: i64, value: u8) -> Result<(), ()> {
-        let p_address = pa as u64;
-        match p_address {
-            0x02000000..=0x0200ffff => self.clint.store(p_address, value, &mut self.mip),
-            0x0c000000..=0x0fffffff => self.plic.store(p_address, value, &mut self.mip),
-            0x10000000..=0x100000ff => self.uart.store(p_address, value),
-            0x10001000..=0x10001FFF => self.disk.store(p_address, value),
+        let pa = pa as u64;
+        match pa {
+            0x02000000..=0x0200ffff => self.clint.store(pa, value, &mut self.mip),
+            0x0c000000..=0x0fffffff => self.plic.store(pa, value, &mut self.mip),
+            0x10000000..=0x100000ff => self.uart.store(pa, value),
+            0x10001000..=0x10001FFF => self.disk.store(pa, value),
             _ => return Err(()),
         }
         Ok(())
@@ -496,13 +502,19 @@ impl Mmu {
 
     /// # Panics
     /// It can panic which is bad and which is why it's going away soon
-    #[allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
-    pub fn store_phys_u8(&mut self, p_address: u64, value: u8) {
+    /// # Errors
+    /// If any part of the access is outside of memory, a unit error is returned
+    #[allow(
+        clippy::unwrap_used,
+        clippy::result_unit_err,
+        clippy::cast_possible_wrap
+    )]
+    pub fn store_phys_u8(&mut self, pa: u64, value: u8) -> Result<(), ()> {
         // @TODO: Mapping should be configurable with dtb
-        if p_address >= DRAM_BASE {
-            self.memory.write_u8(p_address, value);
+        if DRAM_BASE <= pa {
+            self.memory.write_u8(pa, value)
         } else {
-            self.store_mmio_u8(p_address as i64, value).unwrap();
+            self.store_mmio_u8(pa as i64, value)
         }
     }
 
@@ -510,17 +522,20 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
+    /// * `pa` Physical address
     /// * `value` data written
     /// # Panics
     /// It can panic which is bad and which is why it's going away soon
-    fn store_phys_u16(&mut self, p_address: u64, value: u16) {
-        if p_address >= DRAM_BASE && p_address.wrapping_add(1) > p_address {
-            self.memory.write_u16(p_address, value);
+    /// # Errors
+    /// If any part of the access is outside of memory, a unit error is returned
+    fn store_phys_u16(&mut self, pa: u64, value: u16) -> Result<(), ()> {
+        if pa >= DRAM_BASE {
+            self.memory.write_u16(pa, value)
         } else {
             for i in 0..2 {
-                self.store_phys_u8(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
+                self.store_phys_u8(pa.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
             }
+            Ok(())
         }
     }
 
@@ -528,15 +543,18 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
+    /// * `pa` Physical address
     /// * `value` data written
-    fn store_phys_u32(&mut self, p_address: u64, value: u32) {
-        if p_address >= DRAM_BASE && p_address.wrapping_add(3) > p_address {
-            self.memory.write_u32(p_address, value);
+    /// # Errors
+    /// If any part of the access is outside of memory, a unit error is returned
+    fn store_phys_u32(&mut self, pa: u64, value: u32) -> Result<(), ()> {
+        if pa >= DRAM_BASE {
+            self.memory.write_u32(pa, value)
         } else {
             for i in 0..4 {
-                self.store_phys_u8(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
+                self.store_phys_u8(pa.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
             }
+            Ok(())
         }
     }
 
@@ -544,15 +562,18 @@ impl Mmu {
     /// physical address.
     ///
     /// # Arguments
-    /// * `p_address` Physical address
+    /// * `pa` Physical address
     /// * `value` data written
-    fn store_phys_u64(&mut self, p_address: u64, value: u64) {
-        if p_address >= DRAM_BASE && p_address.wrapping_add(7) > p_address {
-            self.memory.write_u64(p_address, value);
+    /// # Errors
+    /// If any part of the access is outside of memory, a unit error is returned
+    fn store_phys_u64(&mut self, pa: u64, value: u64) -> Result<(), ()> {
+        if pa >= DRAM_BASE {
+            self.memory.write_u64(pa, value)
         } else {
             for i in 0..8 {
-                self.store_phys_u8(p_address.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8);
+                self.store_phys_u8(pa.wrapping_add(i), ((value >> (i * 8)) & 0xff) as u8)?;
             }
+            Ok(())
         }
     }
 
@@ -579,10 +600,10 @@ impl Mmu {
             return Ok(p_page | (address & 0xfff));
         }
 
-        let p_address = self.translate_address_slow(address, access_type)?;
+        let pa = self.translate_address_slow(address, access_type)?;
 
         if self.page_cache_enabled {
-            let p_page = p_address & !0xfff;
+            let p_page = pa & !0xfff;
             let _ = match access_type {
                 MemoryAccessType::Execute => self.fetch_page_cache.insert(v_page, p_page),
                 MemoryAccessType::Read => self.load_page_cache.insert(v_page, p_page),
@@ -590,17 +611,13 @@ impl Mmu {
             };
         }
 
-        Ok(p_address)
+        Ok(pa)
     }
 
     #[allow(clippy::cast_possible_wrap)]
-    fn translate_address_slow(
-        &mut self,
-        address: u64,
-        access_type: MemoryAccessType,
-    ) -> Result<u64, Trap> {
+    fn translate_address_slow(&mut self, va: u64, access: MemoryAccessType) -> Result<u64, Trap> {
         let effective_priv = if self.mstatus & MSTATUS_MPRV != 0
-            && access_type != MemoryAccessType::Execute
+            && access != MemoryAccessType::Execute
         {
             // Use previous privilege
             let Some(prv) = FromPrimitive::from_u64((self.mstatus >> MSTATUS_MPP_SHIFT) & 3) else {
@@ -614,7 +631,7 @@ impl Mmu {
         if matches!(effective_priv, PrivilegeMode::Machine)
             || matches!(self.addressing_mode, AddressingMode::None)
         {
-            return Ok(address);
+            return Ok(va);
         }
 
         // Sv39 (Sv48 in future)
@@ -624,7 +641,7 @@ impl Mmu {
             AddressingMode::None => unreachable!(),
         };
 
-        let access_shift = match access_type {
+        let access_shift = match access {
             MemoryAccessType::Read => 0,
             MemoryAccessType::Write => 1,
             MemoryAccessType::Execute => 2,
@@ -633,9 +650,9 @@ impl Mmu {
         let pte_size_log2 = 3;
         let vaddr_shift = 64 - (PG_SHIFT + levels * 9);
         // Check for canonical addresses
-        if ((address as i64) << vaddr_shift) >> vaddr_shift != address as i64 {
+        if ((va as i64) << vaddr_shift) >> vaddr_shift != va as i64 {
             // XXX Some debugging logging here might be useful
-            return page_fault(address as i64, access_type);
+            return page_fault(va as i64, access);
         }
         let pte_addr_bits = 44;
         let mut pte_addr = (self.ppn & ((1 << pte_addr_bits) - 1)) << PG_SHIFT;
@@ -644,7 +661,7 @@ impl Mmu {
 
         for i in 0..levels {
             let vaddr_shift = PG_SHIFT + pte_bits * (levels - 1 - i);
-            let pte_idx = (address >> vaddr_shift) & pte_mask;
+            let pte_idx = (va >> vaddr_shift) & pte_mask;
             pte_addr += pte_idx << pte_size_log2;
             // XXX Not only do we need to raise an exception if this
             // fails, but failing here doesn't cause a page fault but
@@ -686,7 +703,7 @@ impl Mmu {
             } else if pte & PTE_U_MASK == 0 {
                 // XXX Debug log would be useful
                 //info!("** {:?} mode access to {address:08x} denied: !U", self.privilege_mode);
-                return page_fault(address as i64, access_type);
+                return page_fault(va as i64, access);
             }
 
             /* protection check */
@@ -719,27 +736,25 @@ impl Mmu {
                     //info!("** {:?} mode access to {address:08x} denied: missing A", self.privilege_mode);
                     break; // Must have A on access
                 }
-                if access_type == MemoryAccessType::Write && pte & PTE_D_MASK == 0 {
+                if access == MemoryAccessType::Write && pte & PTE_D_MASK == 0 {
                     //info!("** {:?} mode access to {address:08x} denied: missing D", self.privilege_mode);
                     break; // Must have D on write
                 }
             } else {
                 let mut new_pte = pte | PTE_A_MASK;
-                if access_type == MemoryAccessType::Write {
+                if access == MemoryAccessType::Write {
                     new_pte |= PTE_D_MASK;
                 }
-                if pte != new_pte {
-                    // XXX must return access fault on failure here
-                    self.store_phys_u64(pte_addr, new_pte);
-                    // return access_fault(address, access_type);
+                if pte != new_pte && self.store_phys_u64(pte_addr, new_pte).is_err() {
+                    return access_fault(va as i64, access);
                 }
             }
 
             let vaddr_mask = (1 << vaddr_shift) - 1;
-            return Ok(paddr & !vaddr_mask | address & vaddr_mask);
+            return Ok(paddr & !vaddr_mask | va & vaddr_mask);
         }
 
-        page_fault(address as i64, access_type)
+        page_fault(va as i64, access)
     }
 
     /// Returns immutable reference to `Clint`.
@@ -766,6 +781,18 @@ const fn page_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T,
             MemoryAccessType::Read => TrapType::LoadPageFault,
             MemoryAccessType::Write => TrapType::StorePageFault,
             MemoryAccessType::Execute => TrapType::InstructionPageFault,
+        },
+        value: address,
+    })
+}
+
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // XXX Try to remove this later when the u64 -> i64 conversion is done
+const fn access_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Trap> {
+    Err::<T, Trap>(Trap {
+        trap_type: match access_type {
+            MemoryAccessType::Read => TrapType::LoadAccessFault,
+            MemoryAccessType::Write => TrapType::StoreAccessFault,
+            MemoryAccessType::Execute => TrapType::InstructionAccessFault,
         },
         value: address,
     })

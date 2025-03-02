@@ -1,7 +1,7 @@
 #![allow(clippy::unreadable_literal)]
 
 // @TODO: temporal
-const TEST_MEMORY_CAPACITY: usize = 1024 * 512;
+const TEST_MEMORY_CAPACITY: usize = 1024 * 1024 * 256;
 const PROGRAM_MEMORY_CAPACITY: usize = 1024 * 1024 * 512; // big enough to run Linux and xv6
 
 pub mod cpu;
@@ -181,9 +181,17 @@ impl Emulator {
             let sh_size = sh.sh_size as usize;
             if sh_addr >= 0x80000000 && sh_offset > 0 && sh_size > 0 {
                 for j in 0..sh_size {
-                    self.cpu
+                    if self
+                        .cpu
                         .get_mut_mmu()
-                        .store_phys_u8(sh_addr + j as u64, analyzer.read_byte(sh_offset + j));
+                        .store_phys_u8(sh_addr + j as u64, analyzer.read_byte(sh_offset + j))
+                        .is_err()
+                    {
+                        panic!(
+                            "Program doesn't fit in memory: 0x{:016x}",
+                            sh_addr + j as u64
+                        );
+                    }
                 }
             }
         }
