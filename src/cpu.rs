@@ -259,11 +259,9 @@ impl Cpu {
             decode_cache: DecodeCache::new(),
         };
         cpu.csr[CSR_MISA as usize] = 0x8000_0000_8014_312f;
+        cpu.csr[CSR_MSTATUS as usize] =
+            2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
         cpu.x[11] = 0x1020; // I don't know why but Linux boot seems to require this initialization
-        cpu.write_csr_raw(
-            CSR_MSTATUS,
-            2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT,
-        );
         cpu
     }
 
@@ -285,6 +283,17 @@ impl Cpu {
         match reg {
             0 => 0, // 0th register is hardwired zero
             _ => self.x[reg as usize],
+        }
+    }
+
+    const fn check_float_access(&self, rm: usize) -> Result<(), Trap> {
+        if self.fs == 0 || rm == 5 || rm == 6 {
+            Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: 0,
+            })
+        } else {
+            Ok(())
         }
     }
 
@@ -619,66 +628,83 @@ impl Cpu {
         privilege as u8 <= get_privilege_encoding(self.privilege_mode)
     }
 
+    // XXX This is still so far from complete; copy the logic from Dromajo and review
+    // each CSR.  Do Not Blanket allow reads and writes from unsupported CSRs
     #[allow(clippy::cast_sign_loss)]
-    fn read_csr(&self, address: u16) -> Result<u64, Trap> {
-        // SATP access in S requires TVM = 0
-        if address == CSR_SATP
-            && self.privilege_mode == PrivilegeMode::Supervisor
-            && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
-        {
-            return Err(Trap {
-                trap_type: TrapType::IllegalInstruction,
-                value: 0,
-            });
+    fn read_csr(&self, csrno: u16) -> Result<u64, Trap> {
+        use PrivilegeMode::Supervisor;
+
+        let illegal = Err(Trap {
+            trap_type: TrapType::IllegalInstruction,
+            value: 0,
+        });
+
+        if !self.has_csr_access_privilege(csrno) {
+            return illegal;
         }
 
-        if self.has_csr_access_privilege(address) {
-            Ok(self.read_csr_raw(address))
-        } else {
-            Err(Trap {
-                trap_type: TrapType::IllegalInstruction,
-                value: 0,
-            })
+        match csrno {
+            CSR_FFLAGS | CSR_FRM | CSR_FCSR => {
+                self.check_float_access(0)?;
+            }
+            // SATP access in S requires TVM = 0
+            CSR_SATP => {
+                if self.privilege_mode == Supervisor
+                    && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+                {
+                    return illegal;
+                }
+            }
+            _ => {}
         }
+        Ok(self.read_csr_raw(csrno))
     }
 
     #[allow(clippy::cast_sign_loss)]
-    fn write_csr(&mut self, address: u16, mut value: u64) -> Result<(), Trap> {
-        // SATP access in S requires TVM = 0
-        if address == CSR_SATP
-            && self.privilege_mode == PrivilegeMode::Supervisor
-            && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
-        {
-            return Err(Trap {
-                trap_type: TrapType::IllegalInstruction,
-                value: 0,
-            });
+    fn write_csr(&mut self, csrno: u16, mut value: u64) -> Result<(), Trap> {
+        use PrivilegeMode::Supervisor;
+
+        let illegal = Err(Trap {
+            trap_type: TrapType::IllegalInstruction,
+            value: 0,
+        });
+
+        if !self.has_csr_access_privilege(csrno) {
+            return illegal;
         }
 
-        if self.has_csr_access_privilege(address) {
-            /*
-            // Checking writability fails some tests so disabling so far
-            let read_only = (address >> 10) & 3 == 3;
-            if read_only {
-                return Err(Exception::IllegalInstruction);
+        match csrno {
+            CSR_FFLAGS | CSR_FRM | CSR_FCSR => {
+                self.check_float_access(0)?;
             }
-            */
-            if address == CSR_MSTATUS {
-                let mask = MSTATUS_MASK & !(MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
-                value = value & mask | self.csr[CSR_MSTATUS as usize] & !mask;
+            // SATP access in S requires TVM = 0
+            CSR_SATP => {
+                if self.privilege_mode == Supervisor
+                    && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+                {
+                    return illegal;
+                }
             }
-
-            self.write_csr_raw(address, value);
-            if address == CSR_SATP {
-                self.update_satp(value);
-            }
-            Ok(())
-        } else {
-            Err(Trap {
-                trap_type: TrapType::IllegalInstruction,
-                value: 0,
-            })
+            _ => {}
         }
+
+        /*
+        // Checking writability fails some tests so disabling so far
+        let read_only = (address >> 10) & 3 == 3;
+        if read_only {
+            return Err(Exception::IllegalInstruction);
+        }
+        */
+        if csrno == CSR_MSTATUS {
+            let mask = MSTATUS_MASK & !(MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
+            value = value & mask | self.csr[CSR_MSTATUS as usize] & !mask;
+        }
+
+        self.write_csr_raw(csrno, value);
+        if csrno == CSR_SATP {
+            self.update_satp(value);
+        }
+        Ok(())
     }
 
     // SSTATUS, SIE, and SIP are subsets of MSTATUS, MIE, and MIP
@@ -688,7 +714,17 @@ impl Cpu {
             CSR_FFLAGS => u64::from(self.read_fflags()), // XXX exception if fs == 0
             CSR_FRM => self.read_frm() as u64,           // XXX exception if fs == 0
             CSR_FCSR => self.read_fcsr() as u64,         // XXX exception if fs == 0
-            CSR_SSTATUS => self.csr[CSR_MSTATUS as usize] & 0x8000_0003_000d_e162,
+            CSR_SSTATUS => {
+                let mut mstatus = self.csr[CSR_MSTATUS as usize];
+                mstatus &= !MSTATUS_FS;
+                mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
+                mstatus & 0x8000_0003_000d_e162
+            }
+            CSR_MSTATUS => {
+                let mut mstatus = self.csr[CSR_MSTATUS as usize];
+                mstatus &= !MSTATUS_FS;
+                mstatus | (u64::from(self.fs) << MSTATUS_FS_SHIFT)
+            }
             CSR_SIE => self.csr[CSR_MIE as usize] & self.csr[CSR_MIDELEG as usize],
             CSR_SIP => self.mmu.mip & self.csr[CSR_MIDELEG as usize],
             CSR_MIP => self.mmu.mip,
@@ -710,6 +746,7 @@ impl Cpu {
             CSR_SSTATUS => {
                 self.csr[CSR_MSTATUS as usize] &= !0x8000_0003_000d_e162;
                 self.csr[CSR_MSTATUS as usize] |= value & 0x8000_0003_000d_e162;
+                self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
                 self.mmu.update_mstatus(self.read_csr_raw(CSR_MSTATUS));
             }
             CSR_SIE => {
@@ -729,6 +766,7 @@ impl Cpu {
             }
             CSR_MSTATUS => {
                 self.csr[CSR_MSTATUS as usize] = value;
+                self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
                 self.mmu.update_mstatus(value);
             }
             CSR_TIME => {
@@ -1234,6 +1272,7 @@ fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
 // has rs3
 struct FormatR2 {
     rd: usize,
+    rm: usize,
     rs1: usize,
     rs2: usize,
     rs3: usize,
@@ -1242,6 +1281,7 @@ struct FormatR2 {
 const fn parse_format_r2(word: u32) -> FormatR2 {
     FormatR2 {
         rd: ((word >> 7) & 0x1f) as usize,   // [11:7]
+        rm: ((word >> 12) & 7) as usize,     // [14:12]
         rs1: ((word >> 15) & 0x1f) as usize, // [19:15]
         rs2: ((word >> 20) & 0x1f) as usize, // [24:20]
         rs3: ((word >> 27) & 0x1f) as usize, // [31:27]
@@ -1356,7 +1396,7 @@ const fn get_register_name(num: usize) -> &'static str {
     ][num]
 }
 
-const INSTRUCTION_NUM: usize = 162;
+const INSTRUCTION_NUM: usize = 163;
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -1784,9 +1824,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0x0000707f,
+        mask: 0xf000707f,
         data: 0x0000000f,
-        name: "FENCE", // Includes FENCE.TSO
+        name: "FENCE",
+        operation: |_cpu, _word, _address| {
+            // Fence memory ops (we are currently TSO already)
+            Ok(())
+        },
+        disassemble: dump_empty,
+    },
+    Instruction {
+        mask: 0xf000707f,
+        data: 0x8000000f,
+        name: "FENCE.TSO",
         operation: |_cpu, _word, _address| {
             // Fence memory ops (we are currently TSO already)
             Ok(())
@@ -1931,7 +1981,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfc00707f,
+        mask: 0xfe00707f,
         data: 0x0000501b,
         name: "SRLIW",
         operation: |_address, word, cpu| {
@@ -1944,7 +1994,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfc00707f,
+        mask: 0xfe00707f,
         data: 0x4000501b,
         name: "SRAIW",
         operation: |_address, word, cpu| {
@@ -2012,7 +2062,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     // RV32/RV64 Zifencei
     Instruction {
-        mask: 0x0000707f,
+        mask: 0xffffffff,
         data: 0x0000100f,
         name: "FENCE.I",
         operation: |_cpu, _word, _address| {
@@ -2850,6 +2900,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLW",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
+            cpu.check_float_access(0)?;
             cpu.f[f.rd] =
                 cpu.mmu.load_virt_u64_(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
             Ok(())
@@ -2861,6 +2912,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0x00002027,
         name: "FSW",
         operation: |_address, word, cpu| {
+            cpu.check_float_access(0)?;
             let f = parse_format_s(word);
             cpu.mmu
                 .store_virt_u32_(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
@@ -2873,6 +2925,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMADD.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             // XXX Update fflags
             cpu.write_f32(
                 f.rd,
@@ -2889,6 +2942,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMSUB.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             cpu.write_f32(
                 f.rd,
                 cpu.read_f32(f.rs1)
@@ -2904,6 +2958,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FNMSUB.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             cpu.write_f32(
                 f.rd,
                 -(cpu
@@ -2920,6 +2975,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FNMADD.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             cpu.write_f32(
                 f.rd,
                 -(cpu
@@ -2936,6 +2992,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FADD.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1) + cpu.read_f32(f.rs2));
             Ok(())
         },
@@ -2947,6 +3004,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSUB.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1) - cpu.read_f32(f.rs2));
             Ok(())
         },
@@ -2959,6 +3017,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             // @TODO: Update fcsr
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1) * cpu.read_f32(f.rs2));
             Ok(())
         },
@@ -2970,6 +3029,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FDIV.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             //let rm = cpu.get_rm(word);
 
             let dividend = cpu.read_f32(f.rs1);
@@ -2996,6 +3056,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSQRT.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f32(f.rd, cpu.read_f32(f.rs1).sqrt());
             Ok(())
         },
@@ -3007,6 +3068,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJ.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
@@ -3021,6 +3083,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJN.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
             let sign_bit = !rs2_bits & (0x80000000u64 as i64);
@@ -3035,6 +3098,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJX.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
@@ -3049,6 +3113,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMIN.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let (f1, f2) = (cpu.read_f32(f.rs1), cpu.read_f32(f.rs2));
             let r = if f1 < f2 { f1 } else { f2 };
             cpu.write_f32(f.rd, r);
@@ -3062,6 +3127,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMAX.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let (f1, f2) = (cpu.read_f32(f.rs1), cpu.read_f32(f.rs2));
             let r = if f1 > f2 { f1 } else { f2 };
             cpu.write_f32(f.rd, r);
@@ -3075,6 +3141,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.W.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
             Ok(())
         },
@@ -3086,6 +3153,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.WU.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) as u32);
             Ok(())
         },
@@ -3097,6 +3165,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.X.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as i32);
             Ok(())
         },
@@ -3108,6 +3177,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FEQ.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) == cpu.read_f32(f.rs2));
             }
@@ -3122,6 +3192,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLT.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) < cpu.read_f32(f.rs2));
             }
@@ -3135,6 +3206,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLE.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) <= cpu.read_f32(f.rs2));
             }
@@ -3148,6 +3220,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCLASS.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
 
             if f.rd != 0 {
                 cpu.x[f.rd] = 1 << fp::fclass_f32(cpu.f[f.rs1] as u32) as usize;
@@ -3162,6 +3235,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_i32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
             cpu.f[f.rd] = r;
             cpu.add_to_fflags(fflags);
@@ -3175,6 +3249,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.WU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_u32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
             cpu.f[f.rd] = r;
             cpu.add_to_fflags(fflags);
@@ -3188,6 +3263,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMV.W.X",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.f[f.rd] = fp::NAN_BOX_F32 | cpu.x[f.rs1];
             Ok(())
         },
@@ -3200,6 +3276,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.L.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f32(f.rs1) as i64;
             }
@@ -3213,6 +3290,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.LU.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f32(f.rs1) as u64 as i64;
             }
@@ -3226,6 +3304,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.L",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_i64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
             cpu.f[f.rd] = r;
             cpu.add_to_fflags(fflags);
@@ -3239,6 +3318,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.LU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
 
             cpu.f[f.rd] = r;
@@ -3255,6 +3335,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLD",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
+            cpu.check_float_access(0)?;
             // FP load/stores loads *bits* thus doesn't pass through f32/f64
             // XXX This really should be `cpu.f[f.rd] = cpu.mmu.ld64(cpu.load_ea(f))?;`
             cpu.f[f.rd] = cpu.mmu.load_virt_u64_(cpu.x[f.rs1].wrapping_add(f.imm))?;
@@ -3267,6 +3348,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0x00003027,
         name: "FSD",
         operation: |_address, word, cpu| {
+            cpu.check_float_access(0)?;
             let f = parse_format_s(word);
             cpu.mmu
                 .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
@@ -3275,11 +3357,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     Instruction {
         mask: 0x0600007f,
-        data: 0x02000043,
+        data: 0x02000043, // Example 7287f7c3 fmadd.d fa5,fa5,fs0,fa4
         name: "FMADD.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
-            // XXX Update fflags
+            cpu.check_float_access(f.rm)?;
+            // XXX Update fflf.rmags
             cpu.write_f64(
                 f.rd,
                 cpu.read_f64(f.rs1)
@@ -3295,6 +3378,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMSUB.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             cpu.write_f64(
                 f.rd,
                 cpu.read_f64(f.rs1)
@@ -3310,6 +3394,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FNMSUB.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             cpu.write_f64(
                 f.rd,
                 -(cpu
@@ -3326,6 +3411,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FNMADD.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r2(word);
+            cpu.check_float_access(f.rm)?;
             cpu.write_f64(
                 f.rd,
                 -(cpu
@@ -3342,6 +3428,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FADD.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1) + cpu.read_f64(f.rs2));
             Ok(())
         },
@@ -3353,6 +3440,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSUB.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1) - cpu.read_f64(f.rs2));
             Ok(())
         },
@@ -3365,6 +3453,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             // @TODO: Update fcsr
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1) * cpu.read_f64(f.rs2));
             Ok(())
         },
@@ -3376,6 +3465,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FDIV.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             let dividend = cpu.read_f64(f.rs1);
             let divisor = cpu.read_f64(f.rs2);
             // Is this implementation correct?
@@ -3399,6 +3489,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSQRT.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, cpu.read_f64(f.rs1).sqrt());
             Ok(())
         },
@@ -3410,6 +3501,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJ.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
             let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
@@ -3424,6 +3516,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJN.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
             let sign_bit = !rs2_bits & (0x8000000000000000u64 as i64);
@@ -3438,6 +3531,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FSGNJX.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let rs1_bits = cpu.f[f.rs1];
             let rs2_bits = cpu.f[f.rs2];
             let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
@@ -3452,6 +3546,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMIN.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let (f1, f2) = (cpu.read_f64(f.rs1), cpu.read_f64(f.rs2));
             let r = if f1 < f2 { f1 } else { f2 };
             cpu.write_f64(f.rd, r);
@@ -3465,6 +3560,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FMAX.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             let (f1, f2) = (cpu.read_f64(f.rs1), cpu.read_f64(f.rs2));
             let r = if f1 > f2 { f1 } else { f2 };
             cpu.write_f64(f.rd, r);
@@ -3478,6 +3574,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.S.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f32(f.rd, cpu.read_f64(f.rs1) as f32);
             Ok(())
         },
@@ -3489,6 +3586,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.S",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, f64::from(cpu.read_f32(f.rs1)));
             Ok(())
         },
@@ -3500,6 +3598,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FEQ.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) == cpu.read_f64(f.rs2));
             Ok(())
         },
@@ -3511,6 +3610,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLT.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) < cpu.read_f64(f.rs2));
             Ok(())
         },
@@ -3522,6 +3622,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FLE.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(0)?;
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) <= cpu.read_f64(f.rs2));
             Ok(())
         },
@@ -3532,6 +3633,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0xe2001053,
         name: "FCLASS.D",
         operation: |_address, word, cpu| {
+            cpu.check_float_access(0)?;
             let f = parse_format_r(word);
 
             if f.rd != 0 {
@@ -3547,17 +3649,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.W.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
     },
     Instruction {
-        mask: 0xfff0007f,
-        data: 0xc2100053,
+        mask: 0xfff0007f, // XXX Suspect
+        data: 0xc2100053, // XXX Suspect
         name: "FCVT.WU.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as u32);
             Ok(())
         },
@@ -3569,6 +3673,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as i32));
             Ok(())
         },
@@ -3580,6 +3685,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.WU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as u32));
             Ok(())
         },
@@ -3587,11 +3693,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
     },
     // RV64D
     Instruction {
-        mask: 0xfff0007f,
-        data: 0xc2200053,
+        mask: 0xfff0007f, // XXX Suspect
+        data: 0xc2200053, // XXX Suspect
         name: "FCVT.L.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f64(f.rs1) as i64;
             }
@@ -3605,6 +3712,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.LU.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
                 cpu.x[f.rd] = cpu.read_f64(f.rs1) as u64 as i64;
             }
@@ -3617,6 +3725,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0xe2000053,
         name: "FMV.X.D",
         operation: |_address, word, cpu| {
+            cpu.check_float_access(0)?;
             let f = parse_format_r(word);
             cpu.x[f.rd] = cpu.f[f.rs1];
             Ok(())
@@ -3629,6 +3738,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.L",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, cpu.x[f.rs1] as f64);
             Ok(())
         },
@@ -3640,6 +3750,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "FCVT.D.LU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
+            cpu.check_float_access(f.funct3)?;
             cpu.write_f64(f.rd, cpu.x[f.rs1] as u64 as f64);
             Ok(())
         },
@@ -3650,6 +3761,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0xf2000053,
         name: "FMV.D.X",
         operation: |_address, word, cpu| {
+            cpu.check_float_access(0)?;
             let f = parse_format_r(word);
             cpu.f[f.rd] = cpu.x[f.rs1];
             Ok(())
