@@ -258,8 +258,8 @@ impl Cpu {
             reservation: None,
             decode_cache: DecodeCache::new(),
         };
+        cpu.csr[CSR_MISA as usize] = 0x8000_0000_8014_312f;
         cpu.x[11] = 0x1020; // I don't know why but Linux boot seems to require this initialization
-        cpu.write_csr_raw(CSR_MISA, 0x8000_0000_8014_312f);
         cpu.write_csr_raw(
             CSR_MSTATUS,
             2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT,
@@ -701,6 +701,7 @@ impl Cpu {
     fn write_csr_raw(&mut self, address: u16, value: u64) {
         // XXX exception if fs == 0 for fflags, frm, fcsr
         match address {
+            CSR_MISA => {} // Not writable
             CSR_FFLAGS => self.write_fflags((value & 0xFF) as u8),
             CSR_FRM => self.write_frm(
                 FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
@@ -1407,7 +1408,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             let tmp = cpu.pc;
-            cpu.pc = cpu.x[f.rs1].wrapping_add(f.imm as i64);
+            cpu.pc = cpu.x[f.rs1].wrapping_add(f.imm as i64) & !1;
             cpu.x[f.rd] = tmp;
             Ok(())
         },
