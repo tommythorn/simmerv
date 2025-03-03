@@ -74,6 +74,7 @@ impl Emulator {
     /// is [`riscv-tests`](https://github.com/riscv/riscv-tests).
     /// Otherwise calls `run_program()`.
     pub fn run(&mut self, trace: bool) {
+    pub fn run(&mut self) {
         if trace {
             self.run_test();
         } else {
@@ -266,7 +267,7 @@ impl Emulator {
             }
         }
 
-        self.cpu.update_pc(header.e_entry as i64);
+        self.cpu.update_pc(/*header.e_entry as i64*/ 0x8000_0000);
     }
 
     /// Loads symbols of program and adds them to `symbol_map`.

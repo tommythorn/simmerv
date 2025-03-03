@@ -13,7 +13,7 @@
 /// XXX Clean this up
 pub const DRAM_BASE: u64 = 0x80000000;
 pub const MEMORY_BASE: i64 = DRAM_BASE as i64;
-pub struct Memory(Vec<u8>);
+pub struct Memory(pub Vec<u8>);
 impl Memory {
     pub const fn new() -> Self {
         Self(vec![])
