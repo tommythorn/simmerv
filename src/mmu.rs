@@ -111,7 +111,13 @@ impl Mmu {
     /// # Arguments
     /// * `capacity`
     pub fn init_memory(&mut self, capacity: usize) {
+	use std::fs::File;
+	use std::io::Read;
+
         self.memory.init(capacity);
+
+        let mut file = File::open("fw_jump.bin").unwrap();
+        file.read_to_end(&mut self.memory.0).unwrap();
     }
 
     /// Initializes Virtio block disk. This method is expected to be called only once.
