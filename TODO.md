@@ -33,6 +33,8 @@
 - handle_interrupt to use clz to optimize the lookup
 - Do Not Keep the file system image in memory (however this raises the
   question of how to handle this for WASM).
+- Sleep in WASM while waiting for input rather than burn cycles (this
+  has proven slightly more tricky)
 
 ## Code Simplicify
 

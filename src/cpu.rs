@@ -309,6 +309,9 @@ impl Cpu {
     pub fn run_soc(&mut self, cpu_steps: usize) {
         for _ in 0..cpu_steps {
             self.run_cpu_tick();
+            if self.wfi {
+                break;
+            }
         }
         self.mmu.service(self.cycle);
         self.handle_interrupt();

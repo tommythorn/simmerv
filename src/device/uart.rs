@@ -56,8 +56,9 @@ impl Uart {
         let mut rx_ip = false;
 
         // Reads input.
-        // 0x38400 is just an arbitary number @TODO: Fix me
-        if (self.clock % 4192) == 0 && self.lsr & LSR_DATA_AVAILABLE == 0 {
+        // We only check the terminal every Nth iteration as it's not cheap
+        // (XXX we could use a better solution)
+        if self.clock % 4096 == 0 && self.lsr & LSR_DATA_AVAILABLE == 0 {
             let value = self.terminal.get_input();
             if value != 0 {
                 self.rbr = value;

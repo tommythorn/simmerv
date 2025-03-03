@@ -120,7 +120,9 @@ impl Emulator {
 
     /// Runs CPU one cycle
     pub fn tick(&mut self) {
-        self.cpu.run_soc(1);
+        // XXX We should be able to set this arbitrarily high, but we seem
+        // to hit a race condition and a Linux hang beyond this value
+        self.cpu.run_soc(40);
     }
 
     /// Sets up program run by the program. This method analyzes the passed content

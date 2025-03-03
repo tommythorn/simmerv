@@ -1,7 +1,7 @@
 #![allow(clippy::unreadable_literal)]
 
 use crate::cpu::{MIP_MSIP, MIP_MTIP};
-// use std::time::SystemTime;
+use wasm_timer::SystemTime;
 
 /// Emulates CLINT known as Timer. Refer to the [specification](https://sifive.cdn.prismic.io/sifive%2Fc89f6e5a-cf9e-44c3-a3db-04420702dcc1_sifive+e31+manual+v19.08.pdf)
 /// for the detail.
@@ -10,7 +10,7 @@ pub struct Clint {
     mtimecmp: u64,
     mtime_system: u64,
     mtime_delta: u64,
-    // t0: SystemTime,
+    t0: SystemTime,
 }
 
 impl Default for Clint {
@@ -22,13 +22,13 @@ impl Default for Clint {
 impl Clint {
     /// Creates a new `Clint`
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             msip: 0,
             mtimecmp: 0,
             mtime_system: 0,
             mtime_delta: 0,
-            // t0: SystemTime::now(),
+            t0: SystemTime::now(),
         }
     }
 
@@ -39,10 +39,12 @@ impl Clint {
     /// * `mip` CPU `mip` register. It can be updated if interrupt occurs.
     #[allow(clippy::cast_possible_truncation)]
     pub fn service(&mut self, cycle: u64, mip: &mut u64) {
-        // if let Ok(t) = self.t0.elapsed() {
-        //    self.mtime_system = (t.as_micros()) as u64; // 1 µs timebase
-        // }
-        self.mtime_system = cycle / 4;
+        let mut msystem_time = cycle / 16; // XXX An arbitrary number that seems to work ok
+
+        if let Ok(t) = self.t0.elapsed() {
+            msystem_time = t.as_micros() as u64; // 1 µs timebase
+        }
+        self.mtime_system = msystem_time;
 
         if (self.msip & 1) != 0 {
             *mip |= MIP_MSIP;
