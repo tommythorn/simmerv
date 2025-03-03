@@ -11,6 +11,7 @@ const IIR_NO_INTERRUPT: u8 = 0x7;
 
 const LSR_DATA_AVAILABLE: u8 = 0x1;
 const LSR_THR_EMPTY: u8 = 0x20;
+const LSR_TEMT: u8 = 0x40; /* Xmitter empty */
 
 /// Emulates UART. Refer to the [specification](http://www.ti.com/lit/ug/sprugp1/sprugp1.pdf)
 /// for the detail.
@@ -41,7 +42,7 @@ impl Uart {
             iir: 0,
             lcr: 0,
             mcr: 0,
-            lsr: LSR_THR_EMPTY,
+            lsr: LSR_THR_EMPTY | LSR_TEMT,
             scr: 0,
             thre_ip: false,
             interrupting: false,
@@ -110,8 +111,8 @@ impl Uart {
     ///
     /// # Arguments
     /// * `address`
-    pub const fn load(&mut self, address: u64) -> u8 {
-        //println!("UART Load AD:{:X}", address);
+    pub fn load(&mut self, address: u64) -> u8 {
+        //println!("UART Load AD:{:08x}", address);
         match address {
             0x10000000 => {
                 if (self.lcr >> 7) == 0 {
@@ -134,7 +135,11 @@ impl Uart {
             0x10000002 => self.iir,
             0x10000003 => self.lcr,
             0x10000004 => self.mcr,
-            0x10000005 => self.lsr,
+            0x10000005 => {
+                let r = self.lsr;
+                //self.lsr |= LSR_THR_EMPTY;
+                r
+            }
             0x10000007 => self.scr,
             _ => 0,
         }
@@ -146,11 +151,12 @@ impl Uart {
     /// * `address`
     /// * `value`
     pub fn store(&mut self, address: u64, value: u8) {
-        //println!("UART Store AD:{:X} VAL:{:X}", address, value);
+        //println!("UART Store {address:08x} <- {value:08x}");
         match address {
             // Transfer Holding Register
             0x10000000 => {
                 if (self.lcr >> 7) == 0 {
+                    //self.lsr &= LSR_THR_EMPTY;
                     self.terminal.put_byte(value);
                 }
             }

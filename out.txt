@@ -1,0 +1,495 @@
+MISA = 800000000014112d
+Read 272560 bytes
+** Handling ebreak requires handling debug mode; reporting it as an illegal instruction **
+** handle_trap: 3 8000e9d4 cause 2, tval 00100073, resuming from 8000e9b0
+** handle_trap: 3 8000a8ca cause 2, tval 000003a0, resuming from 80000b90
+** handle_trap: 3 8000bd40 cause 2, tval 00000b03, resuming from 80000b90
+** handle_trap: 3 8000bd8e cause 2, tval 00000b03, resuming from 80000b90
+** handle_trap: 3 8000be18 cause 2, tval 00000b04, resuming from 80000b90
+** handle_trap: 3 8000be54 cause 2, tval 00000b05, resuming from 80000b90
+** handle_trap: 3 8000be90 cause 2, tval 00000b06, resuming from 80000b90
+** handle_trap: 3 8000becc cause 2, tval 00000b07, resuming from 80000b90
+** handle_trap: 3 8000bf08 cause 2, tval 00000b08, resuming from 80000b90
+** handle_trap: 3 8000bf44 cause 2, tval 00000b09, resuming from 80000b90
+** handle_trap: 3 8000bf80 cause 2, tval 00000b0a, resuming from 80000b90
+** handle_trap: 3 8000bfbc cause 2, tval 00000b0b, resuming from 80000b90
+** handle_trap: 3 8000bff8 cause 2, tval 00000b0c, resuming from 80000b90
+** handle_trap: 3 8000c034 cause 2, tval 00000b0d, resuming from 80000b90
+** handle_trap: 3 8000c070 cause 2, tval 00000b0e, resuming from 80000b90
+** handle_trap: 3 8000c0ac cause 2, tval 00000b0f, resuming from 80000b90
+** handle_trap: 3 8000c0e8 cause 2, tval 00000b10, resuming from 80000b90
+** handle_trap: 3 8000c124 cause 2, tval 00000b11, resuming from 80000b90
+** handle_trap: 3 8000c160 cause 2, tval 00000b12, resuming from 80000b90
+** handle_trap: 3 8000c19c cause 2, tval 00000b13, resuming from 80000b90
+** handle_trap: 3 8000c1d8 cause 2, tval 00000b14, resuming from 80000b90
+** handle_trap: 3 8000c214 cause 2, tval 00000b15, resuming from 80000b90
+** handle_trap: 3 8000c250 cause 2, tval 00000b16, resuming from 80000b90
+** handle_trap: 3 8000c28c cause 2, tval 00000b17, resuming from 80000b90
+** handle_trap: 3 8000c2c8 cause 2, tval 00000b18, resuming from 80000b90
+** handle_trap: 3 8000c304 cause 2, tval 00000b19, resuming from 80000b90
+** handle_trap: 3 8000c340 cause 2, tval 00000b1a, resuming from 80000b90
+** handle_trap: 3 8000c37c cause 2, tval 00000b1b, resuming from 80000b90
+** handle_trap: 3 8000c3b8 cause 2, tval 00000b1c, resuming from 80000b90
+** handle_trap: 3 8000c3f4 cause 2, tval 00000b1d, resuming from 80000b90
+** handle_trap: 3 8000c430 cause 2, tval 00000b1e, resuming from 80000b90
+** handle_trap: 3 8000c46c cause 2, tval 00000b1f, resuming from 80000b90
+** handle_trap: 3 8000c4a8 cause 2, tval 00000306, resuming from 80000b90
+** handle_trap: 3 8000c4d0 cause 2, tval 00000320, resuming from 80000b90
+** handle_trap: 3 8000c4f8 cause 2, tval 0000030a, resuming from 80000b90
+** handle_trap: 3 8000c578 cause 2, tval 00000fb0, resuming from 80000b90
+** handle_trap: 3 8000c61e cause 2, tval 000007a0, resuming from 80000b90
+
+OpenSBI v1.6-42-g1ad1991
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : Tommy's Hacks
+Platform Features           : medeleg
+Platform HART Count         : 1
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 1000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : ---
+Platform Shutdown Device    : ---
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 317 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 61 KB
+Firmware Heap Offset        : 0x46000
+Firmware Heap Size          : 37 KB (total), 2 KB (reserved), 11 KB (used), 23 KB (free)
+Firmware Scratch Size       : 4096 B (total), 408 B (used), 3688 B (free)
+Runtime SBI Version         : 2.0
+Standard SBI Extensions     : base
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 0
+Domain0 HARTs               : 0*
+Domain0 Region00            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region02            : 0x0000000080040000-0x000000008004ffff M: (R,W) S/U: ()
+Domain0 Region03            : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region04            : 0x000000000c000000-0x000000000fffffff M: (I,R,W) S/U: (R,W)
+Domain0 Region05            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x0000000082200000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 0
+Boot HART Domain            : root
+Boot HART Priv Version      : unknown
+Boot HART Base ISA          : rv64imafdc
+Boot HART ISA Extensions    : zicntr
+Boot HART PMP Count         : 0
+Boot HART PMP Granularity   : 0 bits
+Boot HART PMP Address Bits  : 0
+Boot HART MHPM Info         : 0 (0x00000000)
+Boot HART Debug Triggers    : 0 triggers
+Boot HART MIDELEG           : 0x0000000000000222
+Boot HART MEDELEG           : 0x000000000004b109
+** handle_trap: 1 80201530 cause 9, tval 80201530, resuming from 800003c8
+** handle_trap: 1 80201530 cause 9, tval 80201530, resuming from 800003c8
+
+
+U-Boot 2025.01-rc5 (Mar 06 2025 - 22:07:54 -0800)
+
+CPU:   riscv
+Model: Tommy's Hacks
+DRAM:  512 MiB
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+efi_runtime_relocate: Unknown relocation type 0
+** handle_trap: 1 80201530 cause 9, tval 80201530, resuming from 800003c8
+Core:  13 devices, 8 uclasses, devicetree: board
+Loading Environment from nowhere... OK
+In:    serial,usbkbd
+Out:   serial,vidconsole
+Err:   serial,vidconsole
+No USB controllers found
+Net:   No ethernet found.
+[?25h
+Working FDT set to 9eefd3c0
+Hit any key to stop autoboot:  2  1  0 
+
+Device 0: unknown device
+
+Device 0: QEMU VirtIO Block Device
+            Type: Hard Disk
+            Capacity: 10240.0 MB = 10.0 GB (20971520 x 512)
+... is now current device
+Scanning virtio 0:1...
+Found /boot/extlinux/extlinux.conf
+Retrieving file: /boot/extlinux/extlinux.conf
+U-Boot menu
+1:	Debian GNU/Linux trixie/sid 6.12.16-riscv64
+2:	Debian GNU/Linux trixie/sid 6.12.16-riscv64 (rescue target)
+3:	Debian GNU/Linux trixie/sid 6.8.12-riscv64
+4:	Debian GNU/Linux trixie/sid 6.8.12-riscv64 (rescue target)
+Enter choice: 1:	Debian GNU/Linux trixie/sid 6.12.16-riscv64
+Retrieving file: /boot/vmlinux-6.12.16-riscv64
+Retrieving file: /boot/initrd.img-6.12.16-riscv64
+append: root=LABEL=rootfs rw noquiet root=LABEL=rootfs
+Moving Image from 0x84000000 to 0x80200000, end=0x81e66000
+** handle_trap: 1 80201efc cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201efc 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201efc RA: 000000008020ae9a TVAL: 0000000000000000
+EPC: 0000000060ce3efc RA: 0000000060cece9a reloc adjusted
+
+SP:  000000009eefac50 GP:  000000009eefde20 TP:  0000000000000000
+T0:  0000000081e65f81 T1:  0000000000000000 T2:  0000000000000000
+S0:  0000000084000000 S1:  0000000000000003 A0:  0000000080201e80
+A1:  0000000084001f00 A2:  0000000000000000 A3:  0000000000000000
+A4:  0000000000000000 A5:  0000000000000000 A6:  0000000000000000
+A7:  0000000000000013 S2:  0000000000000000 S3:  000000009eefad80
+S4:  00000000802d3200 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  0000000080200000
+
+Code: 0000 0000 0000 0000 0000 0000 0000 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 0000000080224848 TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d06848 reloc adjusted
+
+SP:  000000009eefa980 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  0000000000000000 S1:  000000009eefeec0 A0:  0000000053525354
+A1:  000000009eefaaa0 A2:  0000000000000008 A3:  0000000000000006
+A4:  0000000000001000 A5:  0000000080224838 A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eefaa98 S3:  00000000802abfa0
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eefa740 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eefa858 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eefa500 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eefa618 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eefa2c0 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eefa3d8 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eefa080 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eefa198 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef9e40 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef9f58 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef9c00 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef9d18 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef99c0 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef9ad8 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef9780 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef9898 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef9540 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef9658 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef9300 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef9418 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef90c0 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef91d8 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef8e80 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef8f98 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef8c40 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef8d58 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...
+** handle_trap: 1 80201eac cause 2, tval 00000000, resuming from 800003c8
+Illegal instruction 0000000080201eac 00000000
+Unhandled exception: Illegal instruction
+EPC: 0000000080201eac RA: 000000008022482e TVAL: 0000000000000000
+EPC: 0000000060ce3eac RA: 0000000060d0682e reloc adjusted
+
+SP:  000000009eef8a00 GP:  000000009eefde20 TP:  0000000000000000
+T0:  000000009eefaa60 T1:  0000000000000000 T2:  0000000000000000
+S0:  ffffffffffffffda S1:  0000000000000001 A0:  0000000000000001
+A1:  0000000000000000 A2:  000000000000000a A3:  000000009eefdf28
+A4:  000000009eefee90 A5:  00000000802798ac A6:  000000000000002e
+A7:  0000000000000013 S2:  000000009eef8b18 S3:  ffffffffffffff8d
+S4:  0000000000000003 S5:  000000009eefb808 S6:  000000009eefb808
+S7:  0000000000000000 S8:  0000000000000000 S9:  0000000000000001
+S10: 0000000000000000 S11: 0000000000000000 T3:  0000000000000000
+T4:  0000000000000000 T5:  0000000000000000 T6:  000000009eefaa58
+
+Code: 0013 0000 0013 0000 0013 0000 0013 0000 (0000)
+
+
+resetting ...

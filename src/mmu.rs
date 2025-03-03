@@ -109,7 +109,11 @@ impl Mmu {
         self.memory.init(capacity);
 
         let mut file = File::open("fw_jump.bin").unwrap();
-        file.read_to_end(&mut self.memory.0).unwrap();
+        let mut buf = vec![];
+        file.read_to_end(&mut buf).unwrap();
+        println!("Read {} bytes", buf.len());
+        self.memory.0[0..buf.len()].copy_from_slice(&buf);
+        assert_ne!(self.memory.0[0], 0);
     }
 
     /// Initializes Virtio block disk. This method is expected to be called only once.

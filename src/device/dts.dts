@@ -1,10 +1,10 @@
 /dts-v1/;
 
 / {
-        #address-cells = <0x2>;
-        #size-cells = <0x2>;
+        #address-cells = <2>;
+        #size-cells = <2>;
         compatible = "riscv-virtio";
-        model = "riscv-virtio,qemu";
+        model = "Tommy's Hacks";
 
         chosen {
                 bootargs = "root=/dev/vda rw ttyS0";
@@ -27,14 +27,14 @@
         };
 
         cpus {
-                #address-cells = <0x1>;
-                #size-cells = <0x0>;
+                #address-cells = <1>;
+                #size-cells = <0>;
                 timebase-frequency = <1000000>; // 1 MHz
 
                 cpu-map {
                         cluster0 {
                                 core0 {
-                                        cpu = <0x1>;
+                                        cpu = <1>;
                                 };
                         };
                 };
