@@ -80,7 +80,7 @@ impl Emulator {
     /// Runs program set by `setup_program()`. The emulator will run forever.
     pub fn run_program(&mut self) {
         loop {
-            self.tick();
+            self.tick(40);
         }
     }
 
@@ -97,32 +97,34 @@ impl Emulator {
         loop {
             s.clear();
             let wbr = self.cpu.disassemble(&mut s);
-            self.tick();
-            eprintln!(
+            self.tick(1);
+            println!(
                 "{:5} {s:72} {:16x}",
                 self.cpu.cycle,
                 self.cpu.read_register(wbr as u8)
             );
             //let _ = io::stdout().flush();
 
-            // Riscv-tests terminates by writing the result * 2 + 1 to `tohost`
-            // Zero means pass, anything else encodes where it failed.
-            let endcode = self.cpu.get_mut_mmu().load_phys_u32(self.tohost_addr);
-            if endcode != 0 {
-                match endcode {
-                    1 => eprintln!("Test Passed\n"),
-                    _ => eprintln!("Test Failed with {}\n", endcode / 2),
+            if self.tohost_addr != 0 {
+                // Riscv-tests terminates by writing the result * 2 + 1 to `tohost`
+                // Zero means pass, anything else encodes where it failed.
+                let endcode = self.cpu.get_mut_mmu().load_phys_u32(self.tohost_addr);
+                if endcode != 0 {
+                    match endcode {
+                        1 => println!("Test Passed\n"),
+                        _ => println!("Test Failed with {}\n", endcode / 2),
+                    }
+                    break;
                 }
-                break;
             }
         }
     }
 
     /// Runs CPU one cycle
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self, n: usize) {
         // XXX We should be able to set this arbitrarily high, but we seem
         // to hit a race condition and a Linux hang beyond this value
-        self.cpu.run_soc(40);
+        self.cpu.run_soc(n);
     }
 
     /// Sets up program run by the program. This method analyzes the passed content

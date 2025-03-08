@@ -109,7 +109,7 @@ impl WasmRiscv {
     /// * `cycles`
     pub fn run_cycles(&mut self, cycles: u32) {
         for _i in 0..cycles {
-            self.emulator.tick();
+            self.emulator.tick(40);
         }
     }
 
@@ -143,7 +143,7 @@ impl WasmRiscv {
             table.insert(breakpoint as i64, true);
         }
         for _i in 0..max_cycles {
-            self.emulator.tick();
+            self.emulator.tick(40);
             let pc = self.emulator.get_cpu().read_pc();
             if table.contains_key(&pc) {
                 return true;
