@@ -858,7 +858,7 @@ impl Cpu {
         if va & 0xfff > 0x1000 - size {
             // Slow path. All bytes aren't in the same page so not contigious
             // in memory
-            return self.memop_slow(access, va, v, size);
+            return self.memop_slow(access, va, v, size, side_effect_free);
         }
 
         let pa = match self
@@ -874,7 +874,7 @@ impl Cpu {
         };
 
         let Ok(slice) = self.mmu.memory.slice(pa, size as usize) else {
-            return self.memop_slow(access, va, v, size);
+            return self.memop_slow(access, va, v, size, side_effect_free);
         };
 
         match access {
@@ -899,6 +899,7 @@ impl Cpu {
         va: i64,
         mut v: i64,
         size: i64,
+        side_effect_free: bool,
     ) -> Option<i64> {
         let trap_type = match access {
             Read => TrapType::LoadAccessFault,
@@ -908,7 +909,10 @@ impl Cpu {
 
         let mut r: u64 = 0;
         for i in 0..size {
-            let pa = match self.mmu.translate_address((va + i) as u64, access, false) {
+            let pa = match self
+                .mmu
+                .translate_address((va + i) as u64, access, side_effect_free)
+            {
                 Ok(pa) => pa,
                 Err(trap) => {
                     self.handle_exception(&trap);
@@ -917,13 +921,18 @@ impl Cpu {
             };
 
             let mut b = 0;
-            match self.mmu.memory.slice(pa as i64, 1) {
-                Ok(slice) => match access {
+            if let Ok(slice) = self.mmu.memory.slice(pa as i64, 1) {
+                match access {
                     Write => slice[0] = v as u8,
                     Read | Execute => b = slice[0],
-                },
+                }
+            } else {
+                if side_effect_free {
+                    // XXX todo!("Improve logging of disassembly access errors.  We are trying to {access:?} {size} bytes @ {va:016x}");
+                    return None;
+                }
 
-                Err(()) => match access {
+                match access {
                     Write => {
                         let Ok(()) = self.mmu.store_mmio_u8(pa as i64, v as u8) else {
                             self.handle_exception(&Trap {
@@ -943,7 +952,7 @@ impl Cpu {
                         };
                         b = w;
                     }
-                },
+                }
             }
             r |= u64::from(b) << (i * 8);
             v >>= 8;

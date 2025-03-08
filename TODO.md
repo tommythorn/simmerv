@@ -7,7 +7,9 @@
   individually implement CSR registers we support and trap access to everything else.
 - Pass all of riscv-test
 - Pass all of riscof
-- Fix Ubuntu boot (still unclear why is crashes)
+- Fix Ubuntu boot (still unclear why it segfaults)
+- Fix U-boot boot (still unclear why it crashes)
+- Fix Geekbench/rustc/gdb (still unclear why it segfaults crashes)
 
 ## Performance
 
@@ -48,3 +50,4 @@
 - Implement the B set
 - Implement Svnapot support
 - Maybe: implement the Bytedance 64K page proposal?
+- Snitch extensions
