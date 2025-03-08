@@ -1,17 +1,14 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::cast_possible_wrap)]
 
-// TODO
-// - Do not update pc until instruction has retired (fixes many TODOs)
-// - keep cycle outside CSR
-// - Don't check for interrupts and advance MMU every cycle
-
+mod csr;
 mod fp;
 mod rvc;
 
 use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::terminal::Terminal;
+pub use csr::*;
 use fnv::{self, FnvHashMap};
 pub use fp::RoundingMode;
 use num_derive::FromPrimitive;
@@ -19,120 +16,6 @@ use num_traits::FromPrimitive;
 use std::fmt::Write as _;
 
 pub const CONFIG_SW_MANAGED_A_AND_D: bool = false;
-
-const CSR_CAPACITY: usize = 4096;
-
-const CSR_USTATUS: u16 = 0x000;
-const CSR_FFLAGS: u16 = 0x001;
-const CSR_FRM: u16 = 0x002;
-const CSR_FCSR: u16 = 0x003;
-const CSR_UIE: u16 = 0x004;
-const CSR_UTVEC: u16 = 0x005;
-const _CSR_USCRATCH: u16 = 0x040;
-const CSR_UEPC: u16 = 0x041;
-const CSR_UCAUSE: u16 = 0x042;
-const CSR_UTVAL: u16 = 0x043;
-const _CSR_UIP: u16 = 0x044;
-const CSR_SSTATUS: u16 = 0x100;
-const CSR_SEDELEG: u16 = 0x102;
-const CSR_SIDELEG: u16 = 0x103;
-const CSR_SIE: u16 = 0x104;
-const CSR_STVEC: u16 = 0x105;
-const _CSR_SSCRATCH: u16 = 0x140;
-const CSR_SEPC: u16 = 0x141;
-const CSR_SCAUSE: u16 = 0x142;
-const CSR_STVAL: u16 = 0x143;
-const CSR_SIP: u16 = 0x144;
-const CSR_SATP: u16 = 0x180;
-const CSR_MSTATUS: u16 = 0x300;
-const CSR_MISA: u16 = 0x301;
-const CSR_MEDELEG: u16 = 0x302;
-const CSR_MIDELEG: u16 = 0x303;
-const CSR_MIE: u16 = 0x304;
-
-const CSR_MTVEC: u16 = 0x305;
-const _CSR_MSCRATCH: u16 = 0x340;
-const CSR_MEPC: u16 = 0x341;
-const CSR_MCAUSE: u16 = 0x342;
-const CSR_MTVAL: u16 = 0x343;
-const CSR_MIP: u16 = 0x344;
-const _CSR_PMPCFG0: u16 = 0x3a0;
-const _CSR_PMPADDR0: u16 = 0x3b0;
-const CSR_MCYCLE: u16 = 0xb00;
-const CSR_CYCLE: u16 = 0xc00;
-const CSR_TIME: u16 = 0xc01;
-const _CSR_INSTRET: u16 = 0xc02;
-const _CSR_MHARTID: u16 = 0xf14;
-
-pub const MIP_MEIP: u64 = 0x800;
-pub const MIP_MTIP: u64 = 0x080;
-pub const MIP_MSIP: u64 = 0x008;
-pub const MIP_SEIP: u64 = 0x200;
-const MIP_STIP: u64 = 0x020;
-const MIP_SSIP: u64 = 0x002;
-
-// XXX Surely we can find a better way to handle the bitfields
-pub const MSTATUS_SPIE_SHIFT: u64 = 5;
-pub const MSTATUS_MPIE_SHIFT: u64 = 7;
-pub const MSTATUS_SPP_SHIFT: u64 = 8;
-pub const MSTATUS_VS_SHIFT: u64 = 9;
-pub const MSTATUS_MPP_SHIFT: u64 = 11;
-pub const MSTATUS_FS_SHIFT: u64 = 13;
-pub const MSTATUS_UXL_SHIFT: u64 = 32;
-pub const MSTATUS_SXL_SHIFT: u64 = 34;
-
-pub const MSTATUS_UIE: u64 = 1 << 0;
-pub const MSTATUS_SIE: u64 = 1 << 1;
-pub const MSTATUS_HIE: u64 = 1 << 2;
-pub const MSTATUS_MIE: u64 = 1 << 3;
-pub const MSTATUS_UPIE: u64 = 1 << 4;
-pub const MSTATUS_SPIE: u64 = 1 << MSTATUS_SPIE_SHIFT;
-pub const MSTATUS_HPIE: u64 = 1 << 6;
-pub const MSTATUS_MPIE: u64 = 1 << MSTATUS_MPIE_SHIFT;
-pub const MSTATUS_SPP: u64 = 1 << MSTATUS_SPP_SHIFT;
-pub const MSTATUS_VS: u64 = 3 << MSTATUS_VS_SHIFT;
-pub const MSTATUS_MPP: u64 = 3 << MSTATUS_MPP_SHIFT;
-pub const MSTATUS_FS: u64 = 3 << MSTATUS_FS_SHIFT;
-pub const MSTATUS_XS: u64 = 3 << 15;
-pub const MSTATUS_MPRV: u64 = 1 << 17;
-pub const MSTATUS_SUM: u64 = 1 << 18;
-pub const MSTATUS_MXR: u64 = 1 << 19;
-pub const MSTATUS_TVM: u64 = 1 << 20;
-pub const MSTATUS_TW: u64 = 1 << 21;
-pub const MSTATUS_TSR: u64 = 1 << 22;
-pub const MSTATUS_UXL_MASK: u64 = 3 << MSTATUS_UXL_SHIFT;
-pub const MSTATUS_SXL_MASK: u64 = 3 << MSTATUS_SXL_SHIFT;
-
-// MSTATUS_MASK are fields that are not directly writable with an csr instruction
-const MSTATUS_MASK: u64 = MSTATUS_SIE
-    | MSTATUS_MIE
-    | MSTATUS_SPIE
-    | MSTATUS_MPIE
-    | MSTATUS_SPP
-    | MSTATUS_MPP
-    | MSTATUS_VS
-    | MSTATUS_FS
-    | MSTATUS_MPRV
-    | MSTATUS_SUM
-    | MSTATUS_MXR
-    | MSTATUS_TVM
-    | MSTATUS_TW
-    | MSTATUS_TSR
-    | MSTATUS_UXL_MASK
-    | MSTATUS_SXL_MASK;
-
-pub const SATP_PPN_SHIFT: u64 = 0;
-pub const SATP_ASID_SHIFT: u64 = 44;
-pub const SATP_MODE_SHIFT: u64 = 60;
-pub const SATP_PPN_MASK: u64 = (1 << SATP_ASID_SHIFT) - 1;
-pub const SATP_ASID_MASK: u64 = (1 << (SATP_MODE_SHIFT - SATP_ASID_SHIFT)) - 1;
-pub const SATP_MODE_MASK: u64 = (1 << (64 - SATP_MODE_SHIFT)) - 1;
-
-pub const SATP_MODE_BARE: u64 = 0;
-pub const SATP_MODE_SV39: u64 = 8;
-pub const SATP_MODE_SV48: u64 = 9;
-pub const SATP_MODE_SV57: u64 = 10;
-pub const SATP_MODE_SV64: u64 = 11;
 
 pub const PG_SHIFT: usize = 12; // 4K page size
 
@@ -253,15 +136,19 @@ impl Cpu {
             pc: 0,
             insn_addr: 0,
             insn: 0,
-            csr: vec![0; CSR_CAPACITY].into_boxed_slice(),
+            csr: vec![0; 4096].into_boxed_slice(), // XXX MUST GO AWAY SOON
             mmu: Mmu::new(terminal),
             reservation: None,
             decode_cache: DecodeCache::new(),
         };
-        cpu.csr[CSR_MISA as usize] = 0x8000_0000_8014_312f;
-        cpu.csr[CSR_MSTATUS as usize] =
+        cpu.csr[Csr::Misa as usize] = 1 << 63; // RV64
+        for c in "SUIMAFDC".bytes() {
+            cpu.csr[Csr::Misa as usize] |= 1 << (c as usize - 65);
+        }
+        cpu.csr[Csr::Mstatus as usize] =
             2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
-        cpu.x[11] = 0x1020; // I don't know why but Linux boot seems to require this initialization
+        cpu.x[0] = 0; // boot hart
+        cpu.x[11] = 0x1020; // start of DTB (XXX could put that elsewhere);
         cpu
     }
 
@@ -286,11 +173,11 @@ impl Cpu {
         }
     }
 
-    const fn check_float_access(&self, rm: usize) -> Result<(), Trap> {
+    fn check_float_access(&self, rm: usize) -> Result<(), Trap> {
         if self.fs == 0 || rm == 5 || rm == 6 {
             Err(Trap {
                 trap_type: TrapType::IllegalInstruction,
-                value: 0,
+                value: i64::from(self.insn),
             })
         } else {
             Ok(())
@@ -321,7 +208,7 @@ impl Cpu {
     fn run_cpu_tick(&mut self) {
         self.cycle = self.cycle.wrapping_add(1);
         if self.wfi {
-            if self.mmu.mip & self.read_csr_raw(CSR_MIE) != 0 {
+            if self.mmu.mip & self.read_csr_raw(Csr::Mie) != 0 {
                 self.wfi = false;
             }
             return;
@@ -343,7 +230,6 @@ impl Cpu {
                 trap_type: TrapType::IllegalInstruction,
                 value: word,
             });
-            println!("Illegal instruction {:016x} {word:08x}", self.insn_addr);
             return;
         };
         match (decoded.operation)(self.insn_addr as u64, insn, self) {
@@ -398,7 +284,7 @@ impl Cpu {
             MachineExternalInterrupt, MachineSoftwareInterrupt, MachineTimerInterrupt,
             SupervisorExternalInterrupt, SupervisorSoftwareInterrupt, SupervisorTimerInterrupt,
         };
-        let minterrupt = self.mmu.mip & self.read_csr_raw(CSR_MIE);
+        let minterrupt = self.mmu.mip & self.read_csr_raw(Csr::Mie);
         if minterrupt == 0 {
             return;
         }
@@ -436,14 +322,14 @@ impl Cpu {
         // First, determine which privilege mode should handle the trap.
         // @TODO: Check if this logic is correct
         let mdeleg = if is_interrupt {
-            self.read_csr_raw(CSR_MIDELEG)
+            self.read_csr_raw(Csr::Mideleg)
         } else {
-            self.read_csr_raw(CSR_MEDELEG)
+            self.read_csr_raw(Csr::Medeleg)
         };
         let sdeleg = if is_interrupt {
-            self.read_csr_raw(CSR_SIDELEG)
+            self.read_csr_raw(Csr::Sideleg)
         } else {
-            self.read_csr_raw(CSR_SEDELEG)
+            self.read_csr_raw(Csr::Sedeleg)
         };
         let pos = cause & 0xffff;
 
@@ -457,9 +343,9 @@ impl Cpu {
         let new_privilege_encoding = u64::from(get_privilege_encoding(new_privilege_mode));
 
         let current_status = match self.privilege_mode {
-            PrivilegeMode::Machine => self.read_csr_raw(CSR_MSTATUS),
-            PrivilegeMode::Supervisor => self.read_csr_raw(CSR_SSTATUS),
-            PrivilegeMode::User => self.read_csr_raw(CSR_USTATUS),
+            PrivilegeMode::Machine => self.read_csr_raw(Csr::Mstatus),
+            PrivilegeMode::Supervisor => self.read_csr_raw(Csr::Sstatus),
+            PrivilegeMode::User => self.read_csr_raw(Csr::Ustatus),
             PrivilegeMode::Reserved => panic!(),
         };
 
@@ -467,9 +353,9 @@ impl Cpu {
 
         if is_interrupt {
             let ie = match new_privilege_mode {
-                PrivilegeMode::Machine => self.read_csr_raw(CSR_MIE),
-                PrivilegeMode::Supervisor => self.read_csr_raw(CSR_SIE),
-                PrivilegeMode::User => self.read_csr_raw(CSR_UIE),
+                PrivilegeMode::Machine => self.read_csr_raw(Csr::Mie),
+                PrivilegeMode::Supervisor => self.read_csr_raw(Csr::Sie),
+                PrivilegeMode::User => self.read_csr_raw(Csr::Uie),
                 PrivilegeMode::Reserved => panic!(),
             };
 
@@ -566,27 +452,27 @@ impl Cpu {
         self.privilege_mode = new_privilege_mode;
         self.mmu.update_privilege_mode(self.privilege_mode);
         let csr_epc_address = match self.privilege_mode {
-            PrivilegeMode::Machine => CSR_MEPC,
-            PrivilegeMode::Supervisor => CSR_SEPC,
-            PrivilegeMode::User => CSR_UEPC,
+            PrivilegeMode::Machine => Csr::Mepc,
+            PrivilegeMode::Supervisor => Csr::Sepc,
+            PrivilegeMode::User => Csr::Uepc,
             PrivilegeMode::Reserved => panic!(),
         };
         let csr_cause_address = match self.privilege_mode {
-            PrivilegeMode::Machine => CSR_MCAUSE,
-            PrivilegeMode::Supervisor => CSR_SCAUSE,
-            PrivilegeMode::User => CSR_UCAUSE,
+            PrivilegeMode::Machine => Csr::Mcause,
+            PrivilegeMode::Supervisor => Csr::Scause,
+            PrivilegeMode::User => Csr::Ucause,
             PrivilegeMode::Reserved => panic!(),
         };
         let csr_tval_address = match self.privilege_mode {
-            PrivilegeMode::Machine => CSR_MTVAL,
-            PrivilegeMode::Supervisor => CSR_STVAL,
-            PrivilegeMode::User => CSR_UTVAL,
+            PrivilegeMode::Machine => Csr::Mtval,
+            PrivilegeMode::Supervisor => Csr::Stval,
+            PrivilegeMode::User => Csr::Utval,
             PrivilegeMode::Reserved => panic!(),
         };
         let csr_tvec_address = match self.privilege_mode {
-            PrivilegeMode::Machine => CSR_MTVEC,
-            PrivilegeMode::Supervisor => CSR_STVEC,
-            PrivilegeMode::User => CSR_UTVEC,
+            PrivilegeMode::Machine => Csr::Mtvec,
+            PrivilegeMode::Supervisor => Csr::Stvec,
+            PrivilegeMode::User => Csr::Utvec,
             PrivilegeMode::Reserved => panic!(),
         };
 
@@ -602,33 +488,48 @@ impl Cpu {
 
         match self.privilege_mode {
             PrivilegeMode::Machine => {
-                let status = self.read_csr_raw(CSR_MSTATUS);
+                let status = self.read_csr_raw(Csr::Mstatus);
                 let mie = (status >> 3) & 1;
                 // clear MIE[3], override MPIE[7] with MIE[3], override MPP[12:11] with current privilege encoding
                 let new_status =
                     (status & !0x1888) | (mie << 7) | (current_privilege_encoding << 11);
-                self.write_csr_raw(CSR_MSTATUS, new_status);
+                self.write_csr_raw(Csr::Mstatus, new_status);
             }
             PrivilegeMode::Supervisor => {
-                let status = self.read_csr_raw(CSR_SSTATUS);
+                let status = self.read_csr_raw(Csr::Sstatus);
                 let sie = (status >> 1) & 1;
                 // clear SIE[1], override SPIE[5] with SIE[1], override SPP[8] with current privilege encoding
                 let new_status =
                     (status & !0x122) | (sie << 5) | ((current_privilege_encoding & 1) << 8);
-                self.write_csr_raw(CSR_SSTATUS, new_status);
+                self.write_csr_raw(Csr::Sstatus, new_status);
             }
             PrivilegeMode::User => {
                 panic!("Not implemented yet");
             }
             PrivilegeMode::Reserved => panic!(), // shouldn't happen
         }
-        //println!("Trap! {:x} Cycle:{:x}", cause, self.cycle);
+        /*
+                println!(
+                    "** {:?} {insn_addr:08x} {:08x}  trap {cause}/{:08x} -> {:08x}",
+                    current_privilege_encoding, self.insn, trap.value, self.pc
+                );
+        */
         true
     }
 
-    const fn has_csr_access_privilege(&self, address: u16) -> bool {
-        let privilege = (address >> 8) & 3;
-        privilege as u8 <= get_privilege_encoding(self.privilege_mode)
+    fn has_csr_access_privilege(&self, csrno: u16) -> Option<Csr> {
+        let privilege = (csrno >> 8) & 3;
+        if privilege as u8 > get_privilege_encoding(self.privilege_mode) {
+            return None;
+        }
+
+        let csr = FromPrimitive::from_u16(csrno)?;
+
+        if !csr::legal(csr) {
+            return None;
+        }
+
+        Some(csr)
     }
 
     // XXX This is still so far from complete; copy the logic from Dromajo and review
@@ -639,28 +540,29 @@ impl Cpu {
 
         let illegal = Err(Trap {
             trap_type: TrapType::IllegalInstruction,
-            value: 0,
+            value: i64::from(self.insn),
         });
 
-        if !self.has_csr_access_privilege(csrno) {
+        let Some(csr) = self.has_csr_access_privilege(csrno) else {
             return illegal;
-        }
+        };
 
-        match csrno {
-            CSR_FFLAGS | CSR_FRM | CSR_FCSR => {
+        match csr {
+            Csr::Fflags | Csr::Frm | Csr::Fcsr => {
                 self.check_float_access(0)?;
             }
             // SATP access in S requires TVM = 0
-            CSR_SATP => {
+            Csr::Satp => {
                 if self.privilege_mode == Supervisor
-                    && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+                    && self.csr[Csr::Mstatus as usize] & MSTATUS_TVM != 0
                 {
                     return illegal;
                 }
             }
+
             _ => {}
         }
-        Ok(self.read_csr_raw(csrno))
+        Ok(self.read_csr_raw(csr))
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -669,21 +571,21 @@ impl Cpu {
 
         let illegal = Err(Trap {
             trap_type: TrapType::IllegalInstruction,
-            value: 0,
+            value: i64::from(self.insn),
         });
 
-        if !self.has_csr_access_privilege(csrno) {
+        let Some(csr) = self.has_csr_access_privilege(csrno) else {
             return illegal;
-        }
+        };
 
-        match csrno {
-            CSR_FFLAGS | CSR_FRM | CSR_FCSR => {
+        match csr {
+            Csr::Fflags | Csr::Frm | Csr::Fcsr => {
                 self.check_float_access(0)?;
             }
             // SATP access in S requires TVM = 0
-            CSR_SATP => {
+            Csr::Satp => {
                 if self.privilege_mode == Supervisor
-                    && self.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+                    && self.csr[Csr::Mstatus as usize] & MSTATUS_TVM != 0
                 {
                     return illegal;
                 }
@@ -698,13 +600,13 @@ impl Cpu {
             return Err(Exception::IllegalInstruction);
         }
         */
-        if csrno == CSR_MSTATUS {
+        if matches!(csr, Csr::Mstatus) {
             let mask = MSTATUS_MASK & !(MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
-            value = value & mask | self.csr[CSR_MSTATUS as usize] & !mask;
+            value = value & mask | self.csr[Csr::Mstatus as usize] & !mask;
         }
 
-        self.write_csr_raw(csrno, value);
-        if csrno == CSR_SATP {
+        self.write_csr_raw(csr, value);
+        if matches!(csr, Csr::Satp) {
             self.update_satp(value);
         }
         Ok(())
@@ -712,73 +614,73 @@ impl Cpu {
 
     // SSTATUS, SIE, and SIP are subsets of MSTATUS, MIE, and MIP
     #[allow(clippy::cast_sign_loss)]
-    fn read_csr_raw(&self, address: u16) -> u64 {
-        match address {
-            CSR_FFLAGS => u64::from(self.read_fflags()), // XXX exception if fs == 0
-            CSR_FRM => self.read_frm() as u64,           // XXX exception if fs == 0
-            CSR_FCSR => self.read_fcsr() as u64,         // XXX exception if fs == 0
-            CSR_SSTATUS => {
-                let mut mstatus = self.csr[CSR_MSTATUS as usize];
+    fn read_csr_raw(&self, csr: Csr) -> u64 {
+        match csr {
+            Csr::Fflags => u64::from(self.read_fflags()), // XXX exception if fs == 0
+            Csr::Frm => self.read_frm() as u64,           // XXX exception if fs == 0
+            Csr::Fcsr => self.read_fcsr() as u64,         // XXX exception if fs == 0
+            Csr::Sstatus => {
+                let mut mstatus = self.csr[Csr::Mstatus as usize];
                 mstatus &= !MSTATUS_FS;
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
                 mstatus & 0x8000_0003_000d_e162
             }
-            CSR_MSTATUS => {
-                let mut mstatus = self.csr[CSR_MSTATUS as usize];
+            Csr::Mstatus => {
+                let mut mstatus = self.csr[Csr::Mstatus as usize];
                 mstatus &= !MSTATUS_FS;
                 mstatus | (u64::from(self.fs) << MSTATUS_FS_SHIFT)
             }
-            CSR_SIE => self.csr[CSR_MIE as usize] & self.csr[CSR_MIDELEG as usize],
-            CSR_SIP => self.mmu.mip & self.csr[CSR_MIDELEG as usize],
-            CSR_MIP => self.mmu.mip,
-            CSR_TIME => self.mmu.get_clint().read_mtime(),
-            CSR_CYCLE | CSR_MCYCLE => self.cycle,
-            _ => self.csr[address as usize],
+            Csr::Sie => self.csr[Csr::Mie as usize] & self.csr[Csr::Mideleg as usize],
+            Csr::Sip => self.mmu.mip & self.csr[Csr::Mideleg as usize],
+            Csr::Mip => self.mmu.mip,
+            Csr::Time => self.mmu.get_clint().read_mtime(),
+            Csr::Cycle | Csr::Mcycle => self.cycle,
+            _ => self.csr[csr as usize],
         }
     }
 
-    fn write_csr_raw(&mut self, address: u16, value: u64) {
+    fn write_csr_raw(&mut self, csr: Csr, value: u64) {
         // XXX exception if fs == 0 for fflags, frm, fcsr
-        match address {
-            CSR_MISA => {} // Not writable
-            CSR_FFLAGS => self.write_fflags((value & 0xFF) as u8),
-            CSR_FRM => self.write_frm(
+        match csr {
+            Csr::Misa => {} // Not writable
+            Csr::Fflags => self.write_fflags((value & 0xFF) as u8),
+            Csr::Frm => self.write_frm(
                 FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
             ), // XXX exception?
-            CSR_FCSR => self.write_fcsr(value as i64),
-            CSR_SSTATUS => {
-                self.csr[CSR_MSTATUS as usize] &= !0x8000_0003_000d_e162;
-                self.csr[CSR_MSTATUS as usize] |= value & 0x8000_0003_000d_e162;
+            Csr::Fcsr => self.write_fcsr(value as i64),
+            Csr::Sstatus => {
+                self.csr[Csr::Mstatus as usize] &= !0x8000_0003_000d_e162;
+                self.csr[Csr::Mstatus as usize] |= value & 0x8000_0003_000d_e162;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
-                self.mmu.update_mstatus(self.read_csr_raw(CSR_MSTATUS));
+                self.mmu.update_mstatus(self.read_csr_raw(Csr::Mstatus));
             }
-            CSR_SIE => {
-                self.csr[CSR_MIE as usize] &= !0x222;
-                self.csr[CSR_MIE as usize] |= value & 0x222;
+            Csr::Sie => {
+                self.csr[Csr::Mie as usize] &= !0x222;
+                self.csr[Csr::Mie as usize] |= value & 0x222;
             }
-            CSR_SIP => {
-                let mask = self.csr[CSR_MIDELEG as usize];
+            Csr::Sip => {
+                let mask = self.csr[Csr::Mideleg as usize];
                 self.mmu.mip = value & mask | self.mmu.mip & !mask;
             }
-            CSR_MIP => {
+            Csr::Mip => {
                 let mask = !0; // XXX 0x555 was too restrictive?? Stopped Ubuntu booting
                 self.mmu.mip = value & mask | self.mmu.mip & !mask;
             }
-            CSR_MIDELEG => {
-                self.csr[CSR_MIDELEG as usize] = value & 0x222;
+            Csr::Mideleg => {
+                self.csr[Csr::Mideleg as usize] = value & 0x222;
             }
-            CSR_MSTATUS => {
-                self.csr[CSR_MSTATUS as usize] = value;
+            Csr::Mstatus => {
+                self.csr[Csr::Mstatus as usize] = value;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
                 self.mmu.update_mstatus(value);
             }
-            CSR_TIME => {
+            Csr::Time => {
                 // XXX This should trap actually
                 self.mmu.get_mut_clint().write_mtime(value);
             }
-            /*CSR_CYCLE |*/ CSR_MCYCLE => self.cycle = value,
+            /*Csr::Cycle |*/ Csr::Mcycle => self.cycle = value,
             _ => {
-                self.csr[address as usize] = value;
+                self.csr[csr as usize] = value;
             }
         }
     }
@@ -804,13 +706,14 @@ impl Cpu {
     }
 
     fn update_satp(&mut self, satp: u64) {
-        let addressing_mode = match (satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK {
-            SATP_MODE_BARE => AddressingMode::None,
-            SATP_MODE_SV39 => AddressingMode::SV39,
-            SATP_MODE_SV48 => AddressingMode::SV48,
-            SATP_MODE_SV57 => todo!("Unsupported SATP mode SV57"),
-            SATP_MODE_SV64 => todo!("Unsupported SATP mode SV64"),
-            mode => todo!("Illegal SATP mode {mode:x}"),
+        let satp_mode = (satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK;
+        let addressing_mode = match FromPrimitive::from_u64(satp_mode) {
+            Some(SatpMode::Bare) => AddressingMode::None,
+            Some(SatpMode::Sv39) => AddressingMode::SV39,
+            Some(SatpMode::Sv48) => AddressingMode::SV48,
+            Some(SatpMode::Sv57) => todo!("Unsupported SATP mode SV57"),
+            Some(SatpMode::Sv64) => todo!("Unsupported SATP mode SV64"),
+            _ => todo!("Illegal SATP mode {satp_mode:02x}"),
         };
         self.mmu.update_addressing_mode(addressing_mode);
         self.mmu
@@ -1139,11 +1042,20 @@ fn dump_format_csr(
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rd]);
     }
-    // @TODO: Use CSR name
-    let _ = write!(s, ",{:x}", f.csr);
+
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.read_csr_raw(f.csr));
+        let _ = match FromPrimitive::from_u16(f.csr) {
+            Some(csr) => {
+                write!(s, ", {csr}:{:x}", cpu.read_csr_raw(csr))
+            }
+            None => {
+                write!(s, ", {}:-", f.csr)
+            }
+        };
+    } else {
+        let _ = write!(s, ",{:x}", f.csr);
     }
+
     let _ = write!(s, ",{}", get_register_name(f.rs));
     if evaluate {
         let _ = write!(s, ":{:x}", cpu.x[f.rs]);
@@ -1880,7 +1792,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x00100073,
         name: "EBREAK",
-        operation: |_cpu, _word, _address| todo!("Handling ebreak requires handling debug mode"),
+        operation: |_cpu, word, _address| {
+            println!(
+                "** Handling ebreak requires handling debug mode; reporting it as an illegal instruction **"
+            );
+            Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: word as i64,
+            })
+        },
         disassemble: dump_empty,
     },
     // RV64I
@@ -2081,17 +2001,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRW",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            let data = cpu.read_csr(f.csr)? as i64;
             let tmp = cpu.x[f.rs];
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, tmp as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
+            cpu.write_csr(f.csr, tmp as u64)
         },
         disassemble: dump_format_csr,
     },
@@ -2101,17 +2014,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRS",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            let data = cpu.read_csr(f.csr)? as i64;
             let tmp = cpu.x[f.rs];
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, (cpu.x[f.rd] | tmp) as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
+            cpu.write_csr(f.csr, (cpu.x[f.rd] | tmp) as u64)
         },
         disassemble: dump_format_csr,
     },
@@ -2121,17 +2027,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRC",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            let data = cpu.read_csr(f.csr)? as i64;
             let tmp = cpu.x[f.rs];
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
+            cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64)
         },
         disassemble: dump_format_csr,
     },
@@ -2141,16 +2040,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRWI",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            let data = cpu.read_csr(f.csr)? as i64;
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, f.rs as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
+            cpu.write_csr(f.csr, f.rs as u64)
         },
         disassemble: dump_format_csr,
     },
@@ -2160,16 +2052,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRSI",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            let data = cpu.read_csr(f.csr)? as i64;
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, (cpu.x[f.rd] | f.rs as i64) as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
+            cpu.write_csr(f.csr, (cpu.x[f.rd] | f.rs as i64) as u64)
         },
         disassemble: dump_format_csr,
     },
@@ -2179,16 +2064,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRCI",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = match cpu.read_csr(f.csr) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
+            let data = cpu.read_csr(f.csr)? as i64;
             cpu.x[f.rd] = data;
-            match cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64) {
-                Ok(()) => {}
-                Err(e) => return Err(e),
-            }
-            Ok(())
+            cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64)
         },
         disassemble: dump_format_csr,
     },
@@ -3786,11 +3664,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         data: 0x30200073,
         name: "MRET",
         operation: |_address, _word, cpu| {
-            cpu.pc = match cpu.read_csr(CSR_MEPC) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let status = cpu.read_csr_raw(CSR_MSTATUS);
+            cpu.pc = cpu.read_csr(Csr::Mepc as u16)? as i64;
+            let status = cpu.read_csr_raw(Csr::Mstatus);
             let mpie = (status >> 7) & 1;
             let mpp = (status >> 11) & 0x3;
             let mprv = match get_privilege_mode(mpp) {
@@ -3800,7 +3675,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             // Override MIE[3] with MPIE[7], set MPIE[7] to 1, set MPP[12:11] to 0
             // and override MPRV[17]
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
-            cpu.write_csr_raw(CSR_MSTATUS, new_status);
+            cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.privilege_mode = match mpp {
                 0 => PrivilegeMode::User,
                 1 => PrivilegeMode::Supervisor,
@@ -3816,25 +3691,22 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x10200073,
         name: "SRET",
-        operation: |_address, _word, cpu| {
+        operation: |_address, word, cpu| {
             // @TODO: Throw error if higher privilege return instruction is executed
 
             if cpu.privilege_mode == PrivilegeMode::User
                 || cpu.privilege_mode == PrivilegeMode::Supervisor
-                    && cpu.csr[CSR_MSTATUS as usize] & MSTATUS_TSR != 0
+                    && cpu.csr[Csr::Mstatus as usize] & MSTATUS_TSR != 0
             {
                 cpu.handle_exception(&Trap {
                     trap_type: TrapType::IllegalInstruction,
-                    value: 0,
+                    value: word as i64,
                 });
                 return Ok(());
             }
 
-            cpu.pc = match cpu.read_csr(CSR_SEPC) {
-                Ok(data) => data as i64,
-                Err(e) => return Err(e),
-            };
-            let status = cpu.read_csr_raw(CSR_SSTATUS);
+            cpu.pc = cpu.read_csr(Csr::Sepc as u16)? as i64;
+            let status = cpu.read_csr_raw(Csr::Sstatus);
             let spie = (status >> 5) & 1;
             let spp = (status >> 8) & 1;
             let mprv = match get_privilege_mode(spp) {
@@ -3844,7 +3716,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             // Override SIE[1] with SPIE[5], set SPIE[5] to 1, set SPP[8] to 0,
             // and override MPRV[17]
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
-            cpu.write_csr_raw(CSR_SSTATUS, new_status);
+            cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.privilege_mode = match spp {
                 0 => PrivilegeMode::User,
                 1 => PrivilegeMode::Supervisor,
@@ -3859,14 +3731,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xfe007fff,
         data: 0x12000073,
         name: "SFENCE.VMA",
-        operation: |_address, _word, cpu| {
+        operation: |_address, word, cpu| {
             if cpu.privilege_mode == PrivilegeMode::User
                 || cpu.privilege_mode == PrivilegeMode::Supervisor
-                    && cpu.csr[CSR_MSTATUS as usize] & MSTATUS_TVM != 0
+                    && cpu.csr[Csr::Mstatus as usize] & MSTATUS_TVM != 0
             {
                 cpu.handle_exception(&Trap {
                     trap_type: TrapType::IllegalInstruction,
-                    value: 0,
+                    value: word as i64,
                 });
             } else {
                 /*
@@ -3887,7 +3759,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xffffffff,
         data: 0x10500073,
         name: "WFI",
-        operation: |_address, _word, cpu| {
+        operation: |_address, word, cpu| {
             /*
              * "When TW=1, if WFI is executed in S- mode, and it does
              * not complete within an implementation-specific, bounded
@@ -3896,11 +3768,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
              */
             if matches!(cpu.privilege_mode, PrivilegeMode::User)
                 || matches!(cpu.privilege_mode, PrivilegeMode::Supervisor)
-                    && cpu.read_csr_raw(CSR_MSTATUS) & MSTATUS_TW != 0
+                    && cpu.read_csr_raw(Csr::Mstatus) & MSTATUS_TW != 0
             {
                 cpu.handle_exception(&Trap {
                     trap_type: TrapType::IllegalInstruction,
-                    value: 0,
+                    value: word as i64,
                 });
             } else {
                 cpu.wfi = true;
@@ -4325,10 +4197,10 @@ mod test_cpu {
             assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         }
         // Machine timer interrupt
-        cpu.write_csr_raw(CSR_MIE, MIP_MTIP);
+        cpu.write_csr_raw(Csr::Mie, MIP_MTIP);
         cpu.mmu.mip |= MIP_MTIP;
-        cpu.write_csr_raw(CSR_MSTATUS, 0x8);
-        cpu.write_csr_raw(CSR_MTVEC, 0x0);
+        cpu.write_csr_raw(Csr::Mstatus, 0x8);
+        cpu.write_csr_raw(Csr::Mtvec, 0x0);
         cpu.run_soc(1);
         // Interrupt happened and moved to handler
         assert_eq!(0, cpu.read_pc());
@@ -4348,9 +4220,9 @@ mod test_cpu {
         cpu.update_pc(DRAM_BASE as i64);
 
         // Machine timer interrupt but mie in mstatus is not enabled yet
-        cpu.write_csr_raw(CSR_MIE, MIP_MTIP);
+        cpu.write_csr_raw(Csr::Mie, MIP_MTIP);
         cpu.mmu.mip |= MIP_MTIP;
-        cpu.write_csr_raw(CSR_MTVEC, handler_vector);
+        cpu.write_csr_raw(Csr::Mtvec, handler_vector);
 
         cpu.run_soc(1);
 
@@ -4359,7 +4231,7 @@ mod test_cpu {
 
         cpu.update_pc(DRAM_BASE as i64);
         // Enable mie in mstatus
-        cpu.write_csr_raw(CSR_MSTATUS, 0x8);
+        cpu.write_csr_raw(Csr::Mstatus, 0x8);
 
         cpu.run_soc(1);
 
@@ -4367,7 +4239,7 @@ mod test_cpu {
         assert_eq!(handler_vector as i64, cpu.read_pc());
 
         // CSR Cause register holds the reason what caused the interrupt
-        assert_eq!(0x8000000000000007, cpu.read_csr_raw(CSR_MCAUSE));
+        assert_eq!(0x8000000000000007, cpu.read_csr_raw(Csr::Mcause));
 
         // @TODO: Test post CSR status register
         // @TODO: Test xIE bit in CSR status register
@@ -4387,7 +4259,7 @@ mod test_cpu {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
-        cpu.write_csr_raw(CSR_MTVEC, handler_vector);
+        cpu.write_csr_raw(Csr::Mtvec, handler_vector);
         cpu.update_pc(DRAM_BASE as i64);
 
         cpu.run_soc(1);
@@ -4396,7 +4268,7 @@ mod test_cpu {
         assert_eq!(handler_vector as i64, cpu.read_pc());
 
         // CSR Cause register holds the reason what caused the trap
-        assert_eq!(0xb, cpu.read_csr_raw(CSR_MCAUSE));
+        assert_eq!(0xb, cpu.read_csr_raw(Csr::Mcause));
 
         // @TODO: Test post CSR status register
         // @TODO: Test privilege levels
