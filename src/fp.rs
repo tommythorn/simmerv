@@ -1,4 +1,5 @@
 //! RISC-V floating point
+#![allow(clippy::cast_possible_wrap)]
 
 use num_derive::FromPrimitive;
 
@@ -57,6 +58,7 @@ pub const MANT_MASK64: u64 = (1 << MANT_SIZE64) - 1;
 //pub const RND_SIZE64: usize = IMANT_SIZE64 - MANT_SIZE64;
 pub const QNAN_MASK64: u64 = 1 << (MANT_SIZE64 - 1);
 //pub const F_QNA64: u64 = ????;/* quiet NaN */
+#[must_use]
 pub const fn fclass_f32(a: u32) -> Fclass {
     let a_sign = a >> (32 - 1);
     let a_exp = (a >> MANT_SIZE32) & EXP_MASK32;
@@ -93,6 +95,7 @@ pub const fn fclass_f32(a: u32) -> Fclass {
 }
 
 #[allow(clippy::cast_sign_loss)]
+#[must_use]
 pub const fn fclass_f64(a: i64) -> Fclass {
     let a = a as u64;
     let a_sign = a >> (64 - 1);
@@ -131,6 +134,7 @@ pub const fn fclass_f64(a: i64) -> Fclass {
 
 const F_QNAN32: i64 = 0x7fc00000;
 const F32_HIGH: i64 = 0xffff_ffff_0000_0000u64 as i64;
+#[must_use]
 pub const fn unbox32(r: i64) -> i64 {
     if (r & F32_HIGH) == F32_HIGH {
         r

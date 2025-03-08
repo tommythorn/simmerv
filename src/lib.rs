@@ -5,11 +5,14 @@ const TEST_MEMORY_CAPACITY: usize = 1024 * 1024 * 256;
 const PROGRAM_MEMORY_CAPACITY: usize = 1024 * 1024 * 512; // big enough to run Linux and xv6
 
 pub mod cpu;
+pub mod csr;
 pub mod default_terminal;
 pub mod device;
 pub mod elf_analyzer;
+pub mod fp;
 pub mod memory;
 pub mod mmu;
+pub mod rvc;
 pub mod terminal;
 
 use crate::cpu::Cpu;

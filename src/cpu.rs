@@ -1,12 +1,11 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::cast_possible_wrap)]
 
-mod csr;
-mod fp;
-mod rvc;
-
+use crate::csr;
+use crate::fp;
 use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
+use crate::rvc;
 use crate::terminal::Terminal;
 pub use csr::*;
 use fnv::{self, FnvHashMap};
