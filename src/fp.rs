@@ -1,6 +1,5 @@
 //! RISC-V floating point
-#![allow(clippy::cast_possible_wrap)]
-
+#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 use num_derive::FromPrimitive;
 
 pub const NAN_BOX_F32: i64 = 0xFFFF_FFFF_0000_0000u64 as i64;
@@ -140,5 +139,36 @@ pub const fn unbox32(r: i64) -> i64 {
         r
     } else {
         F_QNAN32
+    }
+}
+
+#[must_use]
+pub const fn isnan_sf64(a: i64) -> bool {
+    let a = a as u64;
+    let a_exp = (a >> MANT_SIZE64) & EXP_MASK64;
+    let a_mant = a & MANT_MASK64;
+    a_exp == EXP_MASK64 && a_mant != 0
+}
+
+#[must_use]
+pub const fn issignan_sf64(a: i64) -> bool {
+    let a = a as u64;
+    let a_exp1 = (a >> (MANT_SIZE64 - 1)) & ((1 << (EXP_SIZE64 + 1)) - 1);
+    let a_mant = a & MANT_MASK64;
+    a_exp1 == (2 * EXP_MASK64) && a_mant != 0
+}
+
+#[must_use]
+pub const fn eq_quiet_sf64(a: i64, b: i64) -> (bool, u8) {
+    if isnan_sf64(a) || isnan_sf64(b) {
+        if issignan_sf64(a) || issignan_sf64(b) {
+            (false, 1 << Fflag::InvalidOp as usize)
+        } else {
+            (false, 0)
+        }
+    } else if ((a | b) << 1) == 0 {
+        (true, 0) /* zero case */
+    } else {
+        (a == b, 0)
     }
 }

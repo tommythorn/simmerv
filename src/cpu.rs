@@ -3488,7 +3488,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) == cpu.read_f64(f.rs2));
+            let (eq, fflags) = fp::eq_quiet_sf64(cpu.f[f.rs1], cpu.f[f.rs2]);
+            cpu.x[f.rd] = i64::from(eq);
+            cpu.add_to_fflags(fflags);
+
             Ok(())
         },
         disassemble: dump_empty,
