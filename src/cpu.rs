@@ -2,8 +2,8 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use crate::csr;
-use crate::fp;
 use crate::fp::Fp;
+use crate::fp::{self, Fp32, Fp64};
 use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::rvc;
@@ -752,7 +752,7 @@ impl Cpu {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn read_f32(&self, r: usize) -> f32 {
         assert_ne!(self.fs, 0);
-        f32::from_bits(i32::unbox(self.f[r]) as u32)
+        f32::from_bits(Fp32::unbox(self.f[r]) as u32)
     }
 
     fn write_f32(&mut self, r: usize, f: f32) {
@@ -2959,8 +2959,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = i32::unbox(cpu.f[f.rs1]);
-            let rs2_bits = i32::unbox(cpu.f[f.rs2]);
+            let rs1_bits = Fp32::unbox(cpu.f[f.rs1]);
+            let rs2_bits = Fp32::unbox(cpu.f[f.rs2]);
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
             cpu.f[f.rd] = fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff);
             Ok(())
@@ -2974,8 +2974,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = i32::unbox(cpu.f[f.rs1]);
-            let rs2_bits = i32::unbox(cpu.f[f.rs2]);
+            let rs1_bits = Fp32::unbox(cpu.f[f.rs1]);
+            let rs2_bits = Fp32::unbox(cpu.f[f.rs2]);
             let sign_bit = !rs2_bits & (0x80000000u64 as i64);
             cpu.f[f.rd] = fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff);
             Ok(())
@@ -2989,8 +2989,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = i32::unbox(cpu.f[f.rs1]);
-            let rs2_bits = i32::unbox(cpu.f[f.rs2]);
+            let rs1_bits = Fp32::unbox(cpu.f[f.rs1]);
+            let rs2_bits = Fp32::unbox(cpu.f[f.rs2]);
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
             cpu.f[f.rd] = fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits);
             Ok(())
@@ -3068,7 +3068,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = i32::feq(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp32::feq(cpu.f[f.rs1], cpu.f[f.rs2]);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3084,7 +3084,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = i32::flt(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp32::flt(cpu.f[f.rs1], cpu.f[f.rs2]);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3100,7 +3100,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = i32::fle(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp32::fle(cpu.f[f.rs1], cpu.f[f.rs2]);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3118,7 +3118,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << i32::fclass(cpu.f[f.rs1]) as usize;
+                cpu.x[f.rd] = 1 << Fp32::fclass(cpu.f[f.rs1]) as usize;
             }
             Ok(())
         },
@@ -3494,7 +3494,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = i64::feq(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp64::feq(cpu.f[f.rs1], cpu.f[f.rs2]);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3511,7 +3511,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = i64::flt(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp64::flt(cpu.f[f.rs1], cpu.f[f.rs2]);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3527,7 +3527,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = i64::fle(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp64::fle(cpu.f[f.rs1], cpu.f[f.rs2]);
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3545,7 +3545,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << i64::fclass(cpu.f[f.rs1]) as usize;
+                cpu.x[f.rd] = 1 << Fp64::fclass(cpu.f[f.rs1]) as usize;
             }
             Ok(())
         },

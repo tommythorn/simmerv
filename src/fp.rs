@@ -161,7 +161,10 @@ pub trait Fp {
     }
 }
 
-impl Fp for i32 {
+pub struct Fp32;
+pub struct Fp64;
+
+impl Fp for Fp32 {
     const N: usize = 32;
     const MANT_SIZE: usize = 23;
     const EXP_SIZE: usize = 8;
@@ -178,7 +181,7 @@ impl Fp for i32 {
     }
 }
 
-impl Fp for i64 {
+impl Fp for Fp64 {
     const N: usize = 64;
     const MANT_SIZE: usize = 52;
     const EXP_SIZE: usize = 11;
