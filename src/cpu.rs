@@ -3,6 +3,7 @@
 
 use crate::csr;
 use crate::fp;
+use crate::fp::Fp;
 use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::rvc;
@@ -3112,7 +3113,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << fp::fclass_f32(cpu.f[f.rs1] as u32) as usize;
+                cpu.x[f.rd] = 1 << i32::fclass(cpu.f[f.rs1]) as usize;
             }
             Ok(())
         },
@@ -3488,7 +3489,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (eq, fflags) = fp::eq_quiet_sf64(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (eq, fflags) = i64::eq_quiet(cpu.f[f.rs1], cpu.f[f.rs2]);
             cpu.x[f.rd] = i64::from(eq);
             cpu.add_to_fflags(fflags);
 
@@ -3529,7 +3530,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << fp::fclass_f64(cpu.f[f.rs1]) as usize;
+                cpu.x[f.rd] = 1 << i64::fclass(cpu.f[f.rs1]) as usize;
             }
             Ok(())
         },
