@@ -814,9 +814,8 @@ impl Cpu {
         let Some(frm) = FromPrimitive::from_i64(frm) else {
             todo!("What is the appropriate behavior on illegal values?");
         };
-        self.fflags_ = (v & 31) as u8;
-        self.frm_ = frm;
-        self.fs = 3;
+        self.write_fflags((v & 31) as u8);
+        self.write_frm(frm);
     }
 
     fn get_rm(&self, insn_rm_field: usize) -> RoundingMode {
