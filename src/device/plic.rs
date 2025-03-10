@@ -116,13 +116,13 @@ impl Plic {
 
     const fn set_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
-        self.ips[index] |= 1 << irq;
+        self.ips[index] |= 1 << (irq & 7);
         self.needs_update_irq = true;
     }
 
     const fn clear_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
-        self.ips[index] &= !(1 << irq);
+        self.ips[index] &= !(1 << (irq & 7));
         self.needs_update_irq = true;
     }
 
