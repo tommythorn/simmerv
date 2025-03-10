@@ -637,7 +637,7 @@ impl Cpu {
         // XXX exception if fs == 0 for fflags, frm, fcsr
         match csr {
             Csr::Misa => {} // Not writable
-            Csr::Fflags => self.write_fflags((value & 0xFF) as u8),
+            Csr::Fflags => self.write_fflags((value & 31) as u8),
             Csr::Frm => self.write_frm(
                 FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
             ), // XXX exception?
