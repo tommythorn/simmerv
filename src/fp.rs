@@ -196,6 +196,66 @@ impl Fp for Fp64 {
     }
 }
 
+// i64 -> f32
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+#[must_use]
+pub fn cvt_i64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as f32;
+    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+}
+
+// u64 -> f32
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+#[must_use]
+pub fn cvt_u64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as u64 as f32;
+    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+}
+
+// u32 -> f32
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+#[must_use]
+pub fn cvt_u32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as u32 as f32;
+    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+}
+
+// i32 -> f32
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+#[must_use]
+pub fn cvt_i32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as i32 as f32;
+    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+}
+
 // The Berkeley Float Test found some issues
 #[cfg(test)]
 mod test {
@@ -207,18 +267,18 @@ mod test {
             (wantr, wantfflag),
             (r, fflag),
             "{f1:08x}, {f2:08x} -> ({}, {fflag:0x}) / ({}, {wantfflag:0x})",
-            r as usize,
-            wantr as usize
+            usize::from(r),
+            usize::from(wantr)
         );
     }
 
     // Convert John's representation to RISC-V NaN-boxed floats
-    fn fp32(sign: i64, exp: i64, mant: i64) -> i64 {
-        NAN_BOX_F32 | sign << 31 | exp << 23 | mant
+    const fn fp32(sign: i64, exp: i64, mant: i64) -> i64 {
+        NAN_BOX_F32 | (sign << 31) | (exp << 23) | mant
     }
 
-    fn fp64(sign: i64, exp: i64, mant: i64) -> i64 {
-        sign << 63 | exp << 52 | mant
+    const fn fp64(sign: i64, exp: i64, mant: i64) -> i64 {
+        (sign << 63) | (exp << 52) | mant
     }
 
     /*    fn fp64(sign: i64, exp: i64, mant: i64) -> i64 {

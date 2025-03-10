@@ -2,15 +2,16 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use crate::csr;
-use crate::fp::Fp;
-use crate::fp::{self, Fp32, Fp64};
+use crate::fp;
+use crate::fp::{
+    Fp, Fp32, Fp64, RoundingMode, cvt_i32_sf32, cvt_i64_sf32, cvt_u32_sf32, cvt_u64_sf32,
+};
 use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::rvc;
 use crate::terminal::Terminal;
 pub use csr::*;
 use fnv::{self, FnvHashMap};
-pub use fp::RoundingMode;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::fmt::Write as _;
@@ -3822,62 +3823,6 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         disassemble: dump_empty,
     },
 ];
-
-// i64 -> f32
-#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn cvt_i64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
-    // XXX The correct implementation, see
-    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
-    // is quite involved and thus slow.  Here we take a horrible
-    // shortcut that ignores rounding modes and flags!
-
-    let f = a as f32;
-    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
-}
-
-// u64 -> f32
-#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn cvt_u64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
-    // XXX The correct implementation, see
-    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
-    // is quite involved and thus slow.  Here we take a horrible
-    // shortcut that ignores rounding modes and flags!
-
-    let f = a as u64 as f32;
-    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
-}
-
-// u32 -> f32
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
-fn cvt_u32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
-    // XXX The correct implementation, see
-    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
-    // is quite involved and thus slow.  Here we take a horrible
-    // shortcut that ignores rounding modes and flags!
-
-    let f = a as u32 as f32;
-    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
-}
-
-// i32 -> f32
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
-fn cvt_i32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
-    // XXX The correct implementation, see
-    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
-    // is quite involved and thus slow.  Here we take a horrible
-    // shortcut that ignores rounding modes and flags!
-
-    let f = a as i32 as f32;
-    (fp::NAN_BOX_F32 | i64::from(f.to_bits()), 0)
-}
 
 /// The number of results [`DecodeCache`](struct.DecodeCache.html) holds.
 /// You need to carefully choose the number. Too small number causes
