@@ -642,13 +642,12 @@ impl Cpu {
     }
 
     fn write_csr_raw(&mut self, csr: Csr, value: u64) {
-        // XXX exception if fs == 0 for fflags, frm, fcsr
         match csr {
             Csr::Misa => {} // Not writable
             Csr::Fflags => self.write_fflags((value & 31) as u8),
             Csr::Frm => self.write_frm(
                 FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
-            ), // XXX exception?
+            ),
             Csr::Fcsr => self.write_fcsr(value as i64),
             Csr::Sstatus => {
                 self.csr[Csr::Mstatus as usize] &= !0x8000_0003_000d_e162;

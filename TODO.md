@@ -5,7 +5,7 @@
 - The whole CSR handling is very suspect
   The access checks looks broken and we shouldn't have a CSR array but instead
   individually implement CSR registers we support and trap access to everything else.
-- Pass all of riscv-test
+- Pass all of riscv-test (status: debug, svnapot, and lots of FP.  Might punt on debug and svnapot)
 - Pass all of riscof
 - Fix Ubuntu boot (still unclear why it segfaults)
 - Fix U-boot boot (still unclear why it crashes)
@@ -47,6 +47,7 @@
 
 ## Features
 
+- Allow for control charactors to be passed through like Ctrl-C, Ctrl-Z etc.
 - Implement the B set
 - Implement Svnapot support
 - Maybe: implement the Bytedance 64K page proposal?
