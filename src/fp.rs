@@ -50,6 +50,11 @@ pub trait Fp {
     const EXP_SIZE: usize;
 
     const MASK: i64 = if Self::N == 64 { !0 } else { 0xFFFF_FFFF };
+    const MASKSIGN: i64 = if Self::N == 64 {
+        0x7FFF_FFFF_FFFF_FFFF
+    } else {
+        0x7FFF_FFFF
+    };
     const EXP_MASK: i64 = (1 << Self::EXP_SIZE) - 1;
     const MANT_MASK: i64 = (1 << Self::MANT_SIZE) - 1;
     const QNAN_MASK: i64 = 1 << (Self::MANT_SIZE - 1);
@@ -125,7 +130,7 @@ pub trait Fp {
             } else {
                 (false, 0)
             }
-        } else if ((a | b) << 1) & Self::MASK == 0 {
+        } else if (a | b) & Self::MASKSIGN == 0 {
             (true, 0) /* zero case */
         } else {
             (a == b, 0)
@@ -138,7 +143,7 @@ pub trait Fp {
         if Self::isnan(a) || Self::isnan(b) {
             (false, 1 << Fflag::InvalidOp as usize)
         } else if Self::sign(a) != Self::sign(b) {
-            (Self::sign(a) != 0 || (a | b) & (Self::MASK >> 1) == 0, 0)
+            (Self::sign(a) != 0 || (a | b) & Self::MASKSIGN == 0, 0)
         } else if Self::sign(a) != 0 {
             (a >= b, 0)
         } else {
@@ -152,7 +157,7 @@ pub trait Fp {
         if Self::isnan(a) || Self::isnan(b) {
             (false, 1 << Fflag::InvalidOp as usize)
         } else if Self::sign(a) != Self::sign(b) {
-            (Self::sign(a) != 0 && (a | b) & (Self::MASK >> 1) != 0, 0)
+            (Self::sign(a) != 0 && (a | b) & Self::MASKSIGN != 0, 0)
         } else if Self::sign(a) != 0 {
             (a > b, 0)
         } else {
@@ -170,10 +175,9 @@ impl Fp for Fp32 {
     const EXP_SIZE: usize = 8;
 
     fn unbox(r: i64) -> i64 {
-        const F32_HIGH: i64 = 0xffff_ffff_0000_0000u64 as i64;
-        const F_QNAN32: i64 = 0x7fc00000;
+        const F_QNAN32: i64 = 0x7fc0_0000;
 
-        if (r & F32_HIGH) == F32_HIGH {
+        if (r & NAN_BOX_F32) == NAN_BOX_F32 {
             r
         } else {
             F_QNAN32
