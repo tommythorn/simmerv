@@ -23,9 +23,9 @@ pub const PG_SHIFT: usize = 12; // 4K page size
 pub struct Cpu {
     // Alignment for the first two is deliberate
     x: [i64; 32],
-    f: [i64; 32],
-    frm: RoundingMode,
-    fflags: u8,
+    f_: [i64; 32],
+    frm_: RoundingMode,
+    fflags_: u8,
     fs: u8,
 
     pub cycle: u64,
@@ -125,9 +125,9 @@ impl Cpu {
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let mut cpu = Self {
             x: [0; 32],
-            f: [0; 32],
-            frm: RoundingMode::RoundNearestEven,
-            fflags: 0,
+            f_: [0; 32],
+            frm_: RoundingMode::RoundNearestEven,
+            fflags_: 0,
             fs: 1,
 
             cycle: 0,
@@ -508,12 +508,6 @@ impl Cpu {
             }
             PrivilegeMode::Reserved => panic!(), // shouldn't happen
         }
-        /*
-                println!(
-                    "** {:?} {insn_addr:08x} {:08x}  trap {cause}/{:08x} -> {:08x}",
-                    current_privilege_encoding, self.insn, trap.value, self.pc
-                );
-        */
         true
     }
 
@@ -616,9 +610,9 @@ impl Cpu {
     #[allow(clippy::cast_sign_loss)]
     fn read_csr_raw(&self, csr: Csr) -> u64 {
         match csr {
-            Csr::Fflags => u64::from(self.read_fflags()), // XXX exception if fs == 0
-            Csr::Frm => self.read_frm() as u64,           // XXX exception if fs == 0
-            Csr::Fcsr => self.read_fcsr() as u64,         // XXX exception if fs == 0
+            Csr::Fflags => u64::from(self.read_fflags()),
+            Csr::Frm => self.read_frm() as u64,
+            Csr::Fcsr => self.read_fcsr() as u64,
             Csr::Sstatus => {
                 let mut mstatus = self.csr[Csr::Mstatus as usize];
                 mstatus &= !MSTATUS_FS;
@@ -752,56 +746,65 @@ impl Cpu {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn read_f32(&self, r: usize) -> f32 {
         assert_ne!(self.fs, 0);
-        f32::from_bits(Fp32::unbox(self.f[r]) as u32)
+        f32::from_bits(Fp32::unbox(self.read_f(r)) as u32)
+    }
+
+    fn read_f(&self, r: usize) -> i64 {
+        assert_ne!(self.fs, 0);
+        self.f_[r]
+    }
+
+    fn write_f(&mut self, r: usize, v: i64) {
+        assert_ne!(self.fs, 0);
+        self.f_[r] = v;
+        self.fs = 3;
     }
 
     fn write_f32(&mut self, r: usize, f: f32) {
-        assert_ne!(self.fs, 0);
-        self.f[r] = fp::NAN_BOX_F32 | i64::from(f.to_bits());
-        self.fs = 3;
+        self.write_f(r, fp::NAN_BOX_F32 | i64::from(f.to_bits()));
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn read_f64(&self, r: usize) -> f64 {
-        assert_ne!(self.fs, 0);
-        f64::from_bits(self.f[r] as u64)
+        f64::from_bits(self.read_f(r) as u64)
     }
 
     fn write_f64(&mut self, r: usize, f: f64) {
-        assert_ne!(self.fs, 0);
-        self.f[r] = f.to_bits() as i64;
-        self.fs = 3;
+        self.write_f(r, f.to_bits() as i64);
     }
 
     fn read_frm(&self) -> RoundingMode {
         assert_ne!(self.fs, 0);
-        self.frm
+        self.frm_
     }
 
     fn write_frm(&mut self, frm: RoundingMode) {
         assert_ne!(self.fs, 0);
-        self.frm = frm;
+        self.fs = 3;
+        self.frm_ = frm;
     }
 
     fn read_fflags(&self) -> u8 {
         assert_ne!(self.fs, 0);
-        self.fflags
+        self.fflags_
     }
 
     fn write_fflags(&mut self, fflags: u8) {
         assert_ne!(self.fs, 0);
-        self.fflags = fflags & 31;
+        self.fs = 3;
+        self.fflags_ = fflags & 31;
     }
 
     fn add_to_fflags(&mut self, fflags: u8) {
         assert_ne!(self.fs, 0);
-        self.fflags |= fflags & 31;
+        self.fs = 3;
+        self.fflags_ |= fflags & 31;
     }
 
     #[allow(clippy::precedence)]
     fn read_fcsr(&self) -> i64 {
         assert_ne!(self.fs, 0);
-        i64::from(self.fflags) | (self.frm as i64) << 5
+        i64::from(self.fflags_) | (self.frm_ as i64) << 5
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -811,13 +814,14 @@ impl Cpu {
         let Some(frm) = FromPrimitive::from_i64(frm) else {
             todo!("What is the appropriate behavior on illegal values?");
         };
-        self.fflags = (v & 31) as u8;
-        self.frm = frm;
+        self.fflags_ = (v & 31) as u8;
+        self.frm_ = frm;
+        self.fs = 3;
     }
 
     fn get_rm(&self, insn_rm_field: usize) -> RoundingMode {
         if insn_rm_field == 7 {
-            self.frm
+            self.frm_
         } else {
             let Some(rm) = FromPrimitive::from_usize(insn_rm_field) else {
                 unreachable!();
@@ -1503,7 +1507,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
-                cpu.x[f.rd] = v as i32 as i64;
+                if f.rd != 0 {
+                    cpu.x[f.rd] = v as i32 as i64;
+                }
             }
             Ok(())
         },
@@ -2791,8 +2797,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.check_float_access(0)?;
-            cpu.f[f.rd] =
-                cpu.mmu.load_virt_u64_(cpu.x[f.rs1].wrapping_add(f.imm))? | fp::NAN_BOX_F32;
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
+                cpu.write_f(f.rd, v as i32 as i64 | fp::NAN_BOX_F32);
+            }
             Ok(())
         },
         disassemble: dump_format_i_mem,
@@ -2805,7 +2812,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let f = parse_format_s(word);
             cpu.mmu
-                .store_virt_u32_(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
+                .store_virt_u32_(cpu.x[f.rs1].wrapping_add(f.imm), cpu.read_f(f.rs2))
         },
         disassemble: dump_format_s,
     },
@@ -2959,10 +2966,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = Fp32::unbox(cpu.f[f.rs1]);
-            let rs2_bits = Fp32::unbox(cpu.f[f.rs2]);
+            let rs1_bits = Fp32::unbox(cpu.read_f(f.rs1));
+            let rs2_bits = Fp32::unbox(cpu.read_f(f.rs2));
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
-            cpu.f[f.rd] = fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff);
+            cpu.write_f(f.rd, fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2974,10 +2981,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = Fp32::unbox(cpu.f[f.rs1]);
-            let rs2_bits = Fp32::unbox(cpu.f[f.rs2]);
+            let rs1_bits = Fp32::unbox(cpu.read_f(f.rs1));
+            let rs2_bits = Fp32::unbox(cpu.read_f(f.rs2));
             let sign_bit = !rs2_bits & (0x80000000u64 as i64);
-            cpu.f[f.rd] = fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff);
+            cpu.write_f(f.rd, fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2989,10 +2996,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = Fp32::unbox(cpu.f[f.rs1]);
-            let rs2_bits = Fp32::unbox(cpu.f[f.rs2]);
+            let rs1_bits = Fp32::unbox(cpu.read_f(f.rs1));
+            let rs2_bits = Fp32::unbox(cpu.read_f(f.rs2));
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
-            cpu.f[f.rd] = fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits);
+            cpu.write_f(f.rd, fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3056,7 +3063,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            cpu.x[f.rd] = i64::from(cpu.f[f.rs1] as i32);
+            cpu.x[f.rd] = i64::from(cpu.read_f(f.rs1) as i32);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3068,7 +3075,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = Fp32::feq(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp32::feq(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3084,7 +3091,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = Fp32::flt(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp32::flt(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3100,7 +3107,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = Fp32::fle(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp32::fle(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3118,7 +3125,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << Fp32::fclass(cpu.f[f.rs1]) as usize;
+                cpu.x[f.rd] = 1 << Fp32::fclass(cpu.read_f(f.rs1)) as usize;
             }
             Ok(())
         },
@@ -3132,7 +3139,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_i32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
-            cpu.f[f.rd] = r;
+            cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
             Ok(())
         },
@@ -3146,7 +3153,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_u32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
-            cpu.f[f.rd] = r;
+            cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
             Ok(())
         },
@@ -3159,7 +3166,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.f[f.rd] = fp::NAN_BOX_F32 | cpu.x[f.rs1];
+            cpu.write_f(f.rd, fp::NAN_BOX_F32 | cpu.x[f.rs1]);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3201,7 +3208,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_i64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
-            cpu.f[f.rd] = r;
+            cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
             Ok(())
         },
@@ -3216,7 +3223,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(f.funct3)?;
             let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
 
-            cpu.f[f.rd] = r;
+            cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
 
             Ok(())
@@ -3231,9 +3238,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.check_float_access(0)?;
-            // FP load/stores loads *bits* thus doesn't pass through f32/f64
-            // XXX This really should be `cpu.f[f.rd] = cpu.mmu.ld64(cpu.load_ea(f))?;`
-            cpu.f[f.rd] = cpu.mmu.load_virt_u64_(cpu.x[f.rs1].wrapping_add(f.imm))?;
+            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 8) {
+                cpu.write_f(f.rd, v);
+            }
             Ok(())
         },
         disassemble: dump_format_i,
@@ -3246,7 +3253,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let f = parse_format_s(word);
             cpu.mmu
-                .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.f[f.rs2])
+                .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.read_f(f.rs2))
         },
         disassemble: dump_format_s,
     },
@@ -3397,10 +3404,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = cpu.f[f.rs1];
-            let rs2_bits = cpu.f[f.rs2];
+            let rs1_bits = cpu.read_f(f.rs1);
+            let rs2_bits = cpu.read_f(f.rs2);
             let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
-            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
+            cpu.write_f(f.rd, sign_bit | (rs1_bits & 0x7fffffffffffffff));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3412,10 +3419,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = cpu.f[f.rs1];
-            let rs2_bits = cpu.f[f.rs2];
+            let rs1_bits = cpu.read_f(f.rs1);
+            let rs2_bits = cpu.read_f(f.rs2);
             let sign_bit = !rs2_bits & (0x8000000000000000u64 as i64);
-            cpu.f[f.rd] = sign_bit | (rs1_bits & 0x7fffffffffffffff);
+            cpu.write_f(f.rd, sign_bit | (rs1_bits & 0x7fffffffffffffff));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3427,10 +3434,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = cpu.f[f.rs1];
-            let rs2_bits = cpu.f[f.rs2];
+            let rs1_bits = cpu.read_f(f.rs1);
+            let rs2_bits = cpu.read_f(f.rs2);
             let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
-            cpu.f[f.rd] = sign_bit ^ rs1_bits;
+            cpu.write_f(f.rd, sign_bit ^ rs1_bits);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3494,7 +3501,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = Fp64::feq(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp64::feq(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3511,7 +3518,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = Fp64::flt(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp64::flt(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3527,7 +3534,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let (r, fflags) = Fp64::fle(cpu.f[f.rs1], cpu.f[f.rs2]);
+            let (r, fflags) = Fp64::fle(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
                 cpu.x[f.rd] = i64::from(r);
             }
@@ -3545,7 +3552,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << Fp64::fclass(cpu.f[f.rs1]) as usize;
+                cpu.x[f.rd] = 1 << Fp64::fclass(cpu.read_f(f.rs1)) as usize;
             }
             Ok(())
         },
@@ -3635,7 +3642,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             cpu.check_float_access(0)?;
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.f[f.rs1];
+            cpu.x[f.rd] = cpu.read_f(f.rs1);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3671,7 +3678,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             cpu.check_float_access(0)?;
             let f = parse_format_r(word);
-            cpu.f[f.rd] = cpu.x[f.rs1];
+            cpu.write_f(f.rd, cpu.x[f.rs1]);
             Ok(())
         },
         disassemble: dump_format_r,
