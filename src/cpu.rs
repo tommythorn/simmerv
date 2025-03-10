@@ -617,12 +617,20 @@ impl Cpu {
                 let mut mstatus = self.csr[Csr::Mstatus as usize];
                 mstatus &= !MSTATUS_FS;
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
-                mstatus & 0x8000_0003_000d_e162
+                mstatus &= 0x8000_0003_000d_e162;
+                if self.fs == 3 {
+                    mstatus |= 1 << 63;
+                }
+                mstatus
             }
             Csr::Mstatus => {
                 let mut mstatus = self.csr[Csr::Mstatus as usize];
                 mstatus &= !MSTATUS_FS;
-                mstatus | (u64::from(self.fs) << MSTATUS_FS_SHIFT)
+                mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
+                if self.fs == 3 {
+                    mstatus |= 1 << 63;
+                }
+                mstatus
             }
             Csr::Sie => self.csr[Csr::Mie as usize] & self.csr[Csr::Mideleg as usize],
             Csr::Sip => self.mmu.mip & self.csr[Csr::Mideleg as usize],
