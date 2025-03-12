@@ -513,14 +513,16 @@ impl Cpu {
     }
 
     fn has_csr_access_privilege(&self, csrno: u16) -> Option<Csr> {
-        let privilege = (csrno >> 8) & 3;
-        if privilege as u8 > get_privilege_encoding(self.privilege_mode) {
-            return None;
-        }
-
         let csr = FromPrimitive::from_u16(csrno)?;
 
         if !csr::legal(csr) {
+            log::info!("** {:016x}: {csr:?} isn't implemented", self.insn_addr);
+            return None;
+        }
+
+        let privilege = (csrno >> 8) & 3;
+        if privilege as u8 > get_privilege_encoding(self.privilege_mode) {
+            log::info!("** {:016x}: Lacking priviledge for {csr:?}", self.insn_addr);
             return None;
         }
 
@@ -577,6 +579,12 @@ impl Cpu {
             Csr::Fflags | Csr::Frm | Csr::Fcsr => {
                 self.check_float_access(0)?;
             }
+
+            Csr::Cycle => {
+                log::info!("** deny cycle writing from {:016x}", self.insn_addr);
+                return illegal;
+            }
+
             // SATP access in S requires TVM = 0
             Csr::Satp => {
                 if self.privilege_mode == Supervisor
@@ -2023,10 +2031,17 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRW",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = cpu.read_csr(f.csr)? as i64;
+
             let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = data;
-            cpu.write_csr(f.csr, tmp as u64)
+            if f.rd == 0 {
+                cpu.write_csr(f.csr, tmp as u64)?;
+            } else {
+                let v = cpu.read_csr(f.csr)? as i64;
+                cpu.write_csr(f.csr, tmp as u64)?;
+                cpu.x[f.rd] = v;
+            }
+
+            Ok(())
         },
         disassemble: dump_format_csr,
     },
@@ -2037,9 +2052,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = cpu.read_csr(f.csr)? as i64;
-            let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = data;
-            cpu.write_csr(f.csr, (cpu.x[f.rd] | tmp) as u64)
+            if f.rs != 0 {
+                cpu.write_csr(f.csr, (data | cpu.x[f.rs]) as u64)?;
+            }
+            if f.rd != 0 {
+                cpu.x[f.rd] = data;
+            }
+            Ok(())
         },
         disassemble: dump_format_csr,
     },
@@ -2050,9 +2069,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = cpu.read_csr(f.csr)? as i64;
-            let tmp = cpu.x[f.rs];
-            cpu.x[f.rd] = data;
-            cpu.write_csr(f.csr, (cpu.x[f.rd] & !tmp) as u64)
+            if f.rs != 0 {
+                cpu.write_csr(f.csr, (data & !cpu.x[f.rs]) as u64)?;
+            }
+            if f.rd != 0 {
+                cpu.x[f.rd] = data;
+            }
+            Ok(())
         },
         disassemble: dump_format_csr,
     },
@@ -2062,9 +2085,16 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "CSRRWI",
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
-            let data = cpu.read_csr(f.csr)? as i64;
-            cpu.x[f.rd] = data;
-            cpu.write_csr(f.csr, f.rs as u64)
+
+            if f.rd == 0 {
+                cpu.write_csr(f.csr, f.rs as u64)?;
+            } else {
+                let v = cpu.read_csr(f.csr)? as i64;
+                cpu.write_csr(f.csr, f.rs as u64)?;
+                cpu.x[f.rd] = v;
+            }
+
+            Ok(())
         },
         disassemble: dump_format_csr,
     },
@@ -2075,8 +2105,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = cpu.read_csr(f.csr)? as i64;
-            cpu.x[f.rd] = data;
-            cpu.write_csr(f.csr, (cpu.x[f.rd] | f.rs as i64) as u64)
+            if f.rs != 0 {
+                cpu.write_csr(f.csr, (data | f.rs as i64) as u64)?;
+            }
+            if f.rd != 0 {
+                cpu.x[f.rd] = data;
+            }
+            Ok(())
         },
         disassemble: dump_format_csr,
     },
@@ -2087,8 +2122,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
             let data = cpu.read_csr(f.csr)? as i64;
-            cpu.x[f.rd] = data;
-            cpu.write_csr(f.csr, (cpu.x[f.rd] & !(f.rs as i64)) as u64)
+            if f.rs != 0 {
+                cpu.write_csr(f.csr, (data & !(f.rs as i64)) as u64)?;
+            }
+            if f.rd != 0 {
+                cpu.x[f.rd] = data;
+            }
+            Ok(())
         },
         disassemble: dump_format_csr,
     },
@@ -3904,6 +3944,7 @@ impl DecodeCache {
     ///
     /// # Arguments
     /// * `word` word instruction data
+    #[allow(clippy::cast_precision_loss)]
     fn get(&mut self, word: u32) -> Option<usize> {
         let result = if let Some(index) = self.hash_map.get(&word) {
             self.hit_count += 1;
@@ -3931,8 +3972,12 @@ impl DecodeCache {
             self.miss_count += 1;
             None
         };
-        //println!("Hit:{:X}, Miss:{:X}, Ratio:{}", self.hit_count, self.miss_count,
-        //      (self.hit_count as f64) / (self.hit_count + self.miss_count) as f64);
+        log::trace!(
+            "hit:{}, miss:{}, ratio:{}",
+            self.hit_count,
+            self.miss_count,
+            (self.hit_count as f64) / (self.hit_count + self.miss_count) as f64
+        );
         result
     }
 
