@@ -29,13 +29,9 @@ here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 - Emulate RISC-V RV64GC processor and peripheral devices (virtio block
   device and a UART)
-- Boots Debian Trixie
-- Stable as [Linux](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html) run on it
-- Linux OpenSBI and legacy BBL boot support
-- Runnable locally
 - Also runnable in browser with WebAssembly
+- Runnable locally
 - Debugger
-- You can import RISC-V emulator into your Rust or JavaScript project
 
 ## Instructions/Features support status
 
@@ -52,6 +48,17 @@ here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 - [ ] PMP (this is intensionally not implemented as it will negatively affect performance)
 
 The emulator supports all instructions listed above but some 
+
+- Boots Debian Trixie
+- Linux OpenSBI and legacy BBL boot support
+
+### Current Known Issues
+
+- gdb, rustc, and Geekbench segfaults
+- Ubuntu boot crashes and hangs
+- Debian boot sees non-fatal crashes
+- U-boot loads but hangs before hand-off
+
 
 ## How to import into your Rust project
 
@@ -78,8 +85,6 @@ $ cargo build --release
 $ cd riscv-rust/cli
 # Run Linux
 $ cargo run --release ../resources/linux/opensbi/fw_payload.elf -f ../resources/linux/rootfs.img
-# Run xv6
-$ cargo run --release ../resources/xv6/kernel -f ../resources/xv6/fs.img
 ```
 
 ## How to run riscv-tests
