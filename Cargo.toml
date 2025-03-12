@@ -32,6 +32,7 @@ fnv = "1.0.7"
 num-traits = "*"
 num-derive = "*"
 wasm-timer = "0.2.5"
+log = "0.4.26"
 
 [dev-dependencies.cargo-husky]
 version = "1"
