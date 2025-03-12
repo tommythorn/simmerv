@@ -4,7 +4,7 @@
 //! Copyright (c) 2016 Fabrice Bellard
 //! Copyright (C) 2017,2018,2019, Esperanto Technologies Inc.
 
-#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::precedence)]
 use num_derive::FromPrimitive;
 
 pub const NAN_BOX_F32: i64 = 0xFFFF_FFFF_0000_0000u64 as i64;
@@ -59,6 +59,8 @@ pub trait Fp {
     const MANT_MASK: i64 = (1 << Self::MANT_SIZE) - 1;
     const QNAN_MASK: i64 = 1 << (Self::MANT_SIZE - 1);
 
+    const QNAN: i64;
+
     #[must_use]
     fn unbox(a: i64) -> i64;
 
@@ -75,6 +77,14 @@ pub trait Fp {
     #[must_use]
     fn mant(a: i64) -> i64 {
         a & Self::MANT_MASK
+    }
+
+    #[must_use]
+    fn pack(sign: i64, exp: i64, mant: i64) -> i64 {
+        assert_eq!(sign & !1, 0);
+        assert_eq!(exp & !Self::EXP_MASK, 0);
+        assert_eq!(mant & !Self::MANT_MASK, 0);
+        sign << (Self::N - 1) | exp << Self::MANT_SIZE | mant
     }
 
     #[must_use]
@@ -111,12 +121,12 @@ pub trait Fp {
     }
 
     #[must_use]
-    fn isnan(a: i64) -> bool {
+    fn is_nan(a: i64) -> bool {
         Self::exp(a) == Self::EXP_MASK && Self::mant(a) != 0
     }
 
     #[must_use]
-    fn issignan(a: i64) -> bool {
+    fn is_signan(a: i64) -> bool {
         let a_exp1 = (a >> (Self::MANT_SIZE - 1)) & ((1 << (Self::EXP_SIZE + 1)) - 1);
         a_exp1 == (2 * Self::EXP_MASK) && Self::mant(a) != 0
     }
@@ -124,8 +134,8 @@ pub trait Fp {
     #[must_use]
     fn feq(a0: i64, b0: i64) -> (bool, u8) {
         let (a, b) = (Self::unbox(a0), Self::unbox(b0));
-        if Self::isnan(a) || Self::isnan(b) {
-            if Self::issignan(a) || Self::issignan(b) {
+        if Self::is_nan(a) || Self::is_nan(b) {
+            if Self::is_signan(a) || Self::is_signan(b) {
                 (false, 1 << Fflag::InvalidOp as usize)
             } else {
                 (false, 0)
@@ -140,7 +150,7 @@ pub trait Fp {
     #[must_use]
     fn fle(a: i64, b: i64) -> (bool, u8) {
         let (a, b) = (Self::unbox(a), Self::unbox(b));
-        if Self::isnan(a) || Self::isnan(b) {
+        if Self::is_nan(a) || Self::is_nan(b) {
             (false, 1 << Fflag::InvalidOp as usize)
         } else if Self::sign(a) != Self::sign(b) {
             (Self::sign(a) != 0 || (a | b) & Self::MASKSIGN == 0, 0)
@@ -154,7 +164,7 @@ pub trait Fp {
     #[must_use]
     fn flt(a: i64, b: i64) -> (bool, u8) {
         let (a, b) = (Self::unbox(a), Self::unbox(b));
-        if Self::isnan(a) || Self::isnan(b) {
+        if Self::is_nan(a) || Self::is_nan(b) {
             (false, 1 << Fflag::InvalidOp as usize)
         } else if Self::sign(a) != Self::sign(b) {
             (Self::sign(a) != 0 && (a | b) & Self::MASKSIGN != 0, 0)
@@ -173,15 +183,14 @@ impl Fp for Fp32 {
     const N: usize = 32;
     const MANT_SIZE: usize = 23;
     const EXP_SIZE: usize = 8;
+    const QNAN: i64 = 0x7fc0_0000;
 
     fn unbox(r: i64) -> i64 {
-        const F_QNAN32: i64 = 0x7fc0_0000;
-
         if (r & NAN_BOX_F32) == NAN_BOX_F32 {
             r
         } else {
             println!("** unboxing {r:016x} -> QNaN32");
-            F_QNAN32
+            Self::QNAN
         }
     }
 }
@@ -190,10 +199,56 @@ impl Fp for Fp64 {
     const N: usize = 64;
     const MANT_SIZE: usize = 52;
     const EXP_SIZE: usize = 11;
+    const QNAN: i64 = 0x7ff8_0000_0000_0000; // XXX Check this
 
     fn unbox(r: i64) -> i64 {
         r
     }
+}
+
+#[must_use]
+pub fn fcvt_d_s(a: i64) -> (i64, u8) {
+    let a = Fp32::unbox(a);
+
+    let a_mant = Fp32::mant(a);
+    let a_exp = Fp32::exp(a);
+    let a_sign = Fp32::sign(a);
+
+    if Fp32::is_nan(a) {
+        if Fp32::is_signan(a) {
+            (Fp64::QNAN, 1 << Fflag::InvalidOp as usize)
+        } else {
+            (Fp64::QNAN, 0)
+        }
+    } else if a_exp == Fp32::EXP_MASK {
+        /* infinity */
+        (Fp64::pack(a_sign, Fp64::EXP_MASK, 0), 0)
+    } else if a_exp == 0 {
+        if a_mant == 0 {
+            (Fp64::pack(a_sign, 0, 0), 0)
+        } else {
+            let (a_exp, a_mant) = normalize_subnormal_sf32(a_exp, a_mant);
+            /* convert the exponent value */
+            let a_exp = a_exp - 0x7f + (Fp64::EXP_MASK / 2);
+            /* shift the mantissa */
+            let a_mant = a_mant << (Fp64::MANT_SIZE - Fp32::MANT_SIZE);
+            /* We assume the target float is large enough to that no
+            normalization is necessary */
+            (Fp64::pack(a_sign, a_exp, a_mant), 0)
+        }
+    } else {
+        /* convert the exponent value */
+        let a_exp = a_exp - 0x7f + (Fp64::EXP_MASK / 2);
+        /* shift the mantissa */
+        let a_mant = a_mant << (Fp64::MANT_SIZE - Fp32::MANT_SIZE);
+        /* We assume the target float is large enough to that no
+        normalization is necessary */
+        (Fp64::pack(a_sign, a_exp, a_mant), 0)
+    }
+}
+
+fn normalize_subnormal_sf32(_exp: i64, _mant: i64) -> (i64, i64) {
+    todo!();
 }
 
 // i64 -> f32

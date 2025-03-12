@@ -3536,7 +3536,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.write_f64(f.rd, f64::from(cpu.read_f32(f.rs1)));
+            let (v, fflags) = fp::fcvt_d_s(cpu.read_f(f.rs1));
+            cpu.write_f(f.rd, v);
+            cpu.add_to_fflags(fflags);
             Ok(())
         },
         disassemble: dump_format_r,
