@@ -23,12 +23,15 @@ pub const PG_SHIFT: usize = 12; // 4K page size
 /// Emulates a RISC-V CPU core
 pub struct Cpu {
     // Alignment for the first two is deliberate
-    x: [i64; 32],
+    x_: [i64; 32],
     f_: [i64; 32],
+    x_seqno: [usize; 32],
+    f_seqno: [usize; 32],
     frm_: RoundingMode,
     fflags_: u8,
     fs: u8,
 
+    pub seqno: usize,
     pub cycle: u64,
     privilege_mode: PrivilegeMode,
     pc: i64,
@@ -125,12 +128,15 @@ impl Cpu {
     #[allow(clippy::precedence)]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let mut cpu = Self {
-            x: [0; 32],
+            x_: [0; 32],
             f_: [0; 32],
+            x_seqno: [0; 32],
+            f_seqno: [0; 32],
             frm_: RoundingMode::RoundNearestEven,
             fflags_: 0,
             fs: 1,
 
+            seqno: 0,
             cycle: 0,
             privilege_mode: PrivilegeMode::Machine,
             wfi: false,
@@ -148,9 +154,22 @@ impl Cpu {
         }
         cpu.csr[Csr::Mstatus as usize] =
             2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
-        cpu.x[0] = 0; // boot hart
-        cpu.x[11] = 0x1020; // start of DTB (XXX could put that elsewhere);
+        cpu.write_x(10, 0); // boot hart
+        cpu.write_x(11, 0x1020); // start of DTB (XXX could put that elsewhere);
         cpu
+    }
+
+    #[inline]
+    const fn read_x(&self, r: usize) -> i64 {
+        self.x_[r]
+    }
+
+    #[inline]
+    fn write_x(&mut self, r: usize, v: i64) {
+        if r != 0 {
+            self.x_[r] = v;
+            self.x_seqno[r] = self.seqno;
+        }
     }
 
     /// Updates Program Counter content
@@ -168,10 +187,7 @@ impl Cpu {
     #[must_use]
     pub fn read_register(&self, reg: u8) -> i64 {
         debug_assert!(reg <= 31, "reg must be 0-31. {reg}");
-        match reg {
-            0 => 0, // 0th register is hardwired zero
-            _ => self.x[reg as usize],
-        }
+        self.read_x(reg as usize)
     }
 
     fn check_float_access(&self, rm: usize) -> Result<(), Trap> {
@@ -215,6 +231,7 @@ impl Cpu {
             return;
         }
 
+        self.seqno = self.seqno.wrapping_add(1);
         self.insn_addr = self.pc;
         let Some(word) = self.memop(Execute, self.insn_addr, 0, 0, 4) else {
             // Exception was triggered
@@ -233,11 +250,9 @@ impl Cpu {
             });
             return;
         };
-        match (decoded.operation)(self.insn_addr as u64, insn, self) {
-            Err(e) => self.handle_exception(&e),
-            Ok(()) => {
-                self.x[0] = 0; // hardwired zero
-            }
+
+        if let Err(e) = (decoded.operation)(self.insn_addr as u64, insn, self) {
+            self.handle_exception(&e);
         }
     }
 
@@ -1034,11 +1049,11 @@ fn dump_format_b(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluat
     let f = parse_format_b(word);
     *s += get_register_name(f.rs1);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs1));
     }
     let _ = write!(s, ",{}", get_register_name(f.rs2));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs2));
     }
     let _ = write!(s, ",{:x}", address.wrapping_add(f.imm));
     0
@@ -1068,7 +1083,7 @@ fn dump_format_csr(
     let f = parse_format_csr(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
     }
 
     if evaluate {
@@ -1086,7 +1101,7 @@ fn dump_format_csr(
 
     let _ = write!(s, ",{}", get_register_name(f.rs));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs));
     }
     f.rd
 }
@@ -1116,11 +1131,11 @@ fn dump_format_i(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
     }
     let _ = write!(s, ",{}", get_register_name(f.rs1));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs1));
     }
     let _ = write!(s, ",{:x}", f.imm);
     f.rd
@@ -1136,11 +1151,11 @@ fn dump_format_i_mem(
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
     }
     let _ = write!(s, ",{:x}({}", f.imm, get_register_name(f.rs1));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs1));
     }
     *s += ")";
     f.rd
@@ -1172,7 +1187,7 @@ fn dump_format_j(s: &mut String, cpu: &mut Cpu, word: u32, address: u64, evaluat
     let f = parse_format_j(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
     }
     let _ = write!(s, ",{:x}", address.wrapping_add(f.imm));
     f.rd
@@ -1199,15 +1214,15 @@ fn dump_format_r(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     let f = parse_format_r(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
     }
     *s += get_register_name(f.rs1);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs1));
     }
     let _ = write!(s, ",{}", get_register_name(f.rs2));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs2));
     }
     f.rd
 }
@@ -1241,19 +1256,19 @@ fn dump_format_r2(
     let f = parse_format_r2(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_f(f.rd));
     }
     let _ = write!(s, ",{}", get_register_name(f.rs1));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.read_f(f.rs1));
     }
     let _ = write!(s, ",{}", get_register_name(f.rs2));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.read_f(f.rs2));
     }
     let _ = write!(s, ",{}", get_register_name(f.rs3));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs3]);
+        let _ = write!(s, ":{:x}", cpu.read_f(f.rs3));
     }
     f.rd
 }
@@ -1284,11 +1299,11 @@ fn dump_format_s(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     let f = parse_format_s(word);
     *s += get_register_name(f.rs2);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs2]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs2));
     }
     let _ = write!(s, ",{:x}({}", f.imm, get_register_name(f.rs1));
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rs1));
     }
     *s += ")";
     0
@@ -1313,7 +1328,7 @@ fn dump_format_u(s: &mut String, cpu: &mut Cpu, word: u32, _address: u64, evalua
     let f = parse_format_u(word);
     *s += get_register_name(f.rd);
     if evaluate {
-        let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+        let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
     }
     let _ = write!(s, ",{:x}", f.imm);
 
@@ -1356,7 +1371,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LUI",
         operation: |_address, word, cpu| {
             let f = parse_format_u(word);
-            cpu.x[f.rd] = f.imm as i64;
+            cpu.write_x(f.rd, f.imm as i64);
             Ok(())
         },
         disassemble: dump_format_u,
@@ -1367,7 +1382,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AUIPC",
         operation: |address, word, cpu| {
             let f = parse_format_u(word);
-            cpu.x[f.rd] = address.wrapping_add(f.imm) as i64;
+            cpu.write_x(f.rd, address.wrapping_add(f.imm) as i64);
             Ok(())
         },
         disassemble: dump_format_u,
@@ -1378,7 +1393,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "JAL",
         operation: |address, word, cpu| {
             let f = parse_format_j(word);
-            cpu.x[f.rd] = cpu.pc;
+            cpu.write_x(f.rd, cpu.pc);
             cpu.pc = address.wrapping_add(f.imm) as i64;
             Ok(())
         },
@@ -1391,19 +1406,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             let tmp = cpu.pc;
-            cpu.pc = cpu.x[f.rs1].wrapping_add(f.imm as i64) & !1;
-            cpu.x[f.rd] = tmp;
+            cpu.pc = cpu.read_x(f.rs1).wrapping_add(f.imm as i64) & !1;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: |s, cpu, word, _address, evaluate| {
             let f = parse_format_i(word);
             *s += get_register_name(f.rd);
             if evaluate {
-                let _ = write!(s, ":{:x}", cpu.x[f.rd]);
+                let _ = write!(s, ":{:x}", cpu.read_x(f.rd));
             }
             let _ = write!(s, ",{:x}({}", f.imm, get_register_name(f.rs1));
             if evaluate {
-                let _ = write!(s, ":{:x}", cpu.x[f.rs1]);
+                let _ = write!(s, ":{:x}", cpu.read_x(f.rs1));
             }
             *s += ")";
             f.rd
@@ -1415,7 +1430,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BEQ",
         operation: |address, word, cpu| {
             let f = parse_format_b(word);
-            if cpu.x[f.rs1] == cpu.x[f.rs2] {
+            if cpu.read_x(f.rs1) == cpu.read_x(f.rs2) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
             }
             Ok(())
@@ -1428,7 +1443,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BNE",
         operation: |address, word, cpu| {
             let f = parse_format_b(word);
-            if cpu.x[f.rs1] != cpu.x[f.rs2] {
+            if cpu.read_x(f.rs1) != cpu.read_x(f.rs2) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
             }
             Ok(())
@@ -1441,7 +1456,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BLT",
         operation: |address, word, cpu| {
             let f = parse_format_b(word);
-            if cpu.x[f.rs1] < cpu.x[f.rs2] {
+            if cpu.read_x(f.rs1) < cpu.read_x(f.rs2) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
             }
             Ok(())
@@ -1454,7 +1469,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BGE",
         operation: |address, word, cpu| {
             let f = parse_format_b(word);
-            if cpu.x[f.rs1] >= cpu.x[f.rs2] {
+            if cpu.read_x(f.rs1) >= cpu.read_x(f.rs2) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
             }
             Ok(())
@@ -1467,7 +1482,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BLTU",
         operation: |address, word, cpu| {
             let f = parse_format_b(word);
-            if (cpu.x[f.rs1] as u64) < (cpu.x[f.rs2] as u64) {
+            if (cpu.read_x(f.rs1) as u64) < (cpu.read_x(f.rs2) as u64) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
             }
             Ok(())
@@ -1480,7 +1495,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "BGEU",
         operation: |address, word, cpu| {
             let f = parse_format_b(word);
-            if (cpu.x[f.rs1] as u64) >= (cpu.x[f.rs2] as u64) {
+            if (cpu.read_x(f.rs1) as u64) >= (cpu.read_x(f.rs2) as u64) {
                 cpu.pc = address.wrapping_add(f.imm) as i64;
             }
             Ok(())
@@ -1493,9 +1508,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LB",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 1) {
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 1) {
                 let v = v as i8 as i64;
-                cpu.x[f.rd] = v;
+                cpu.write_x(f.rd, v);
             }
             Ok(())
         },
@@ -1507,9 +1522,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LH",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 2) {
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 2) {
                 let v = v as i16 as i64;
-                cpu.x[f.rd] = v;
+                cpu.write_x(f.rd, v);
             }
             Ok(())
         },
@@ -1521,9 +1536,9 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LW",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 4) {
                 if f.rd != 0 {
-                    cpu.x[f.rd] = v as i32 as i64;
+                    cpu.write_x(f.rd, v as i32 as i64);
                 }
             }
             Ok(())
@@ -1536,8 +1551,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LBU",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 1) {
-                cpu.x[f.rd] = v;
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 1) {
+                cpu.write_x(f.rd, v);
             }
             Ok(())
         },
@@ -1549,8 +1564,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LHU",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 2) {
-                cpu.x[f.rd] = v;
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 2) {
+                cpu.write_x(f.rd, v);
             }
             Ok(())
         },
@@ -1562,7 +1577,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SB",
         operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 1);
+            cpu.memop(Write, cpu.read_x(f.rs1), f.imm, cpu.read_x(f.rs2), 1);
             Ok(())
         },
         disassemble: dump_format_s,
@@ -1573,7 +1588,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SH",
         operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 2);
+            cpu.memop(Write, cpu.read_x(f.rs1), f.imm, cpu.read_x(f.rs2), 2);
             Ok(())
         },
         disassemble: dump_format_s,
@@ -1584,7 +1599,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SW",
         operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 4);
+            cpu.memop(Write, cpu.read_x(f.rs1), f.imm, cpu.read_x(f.rs2), 4);
             Ok(())
         },
         disassemble: dump_format_s,
@@ -1595,7 +1610,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADDI",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(f.imm);
+            cpu.write_x(f.rd, cpu.read_x(f.rs1).wrapping_add(f.imm));
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1606,7 +1621,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTI",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < f.imm);
+            cpu.write_x(f.rd, i64::from(cpu.read_x(f.rs1) < f.imm));
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1617,7 +1632,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTIU",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u64) < (f.imm as u64));
+            cpu.write_x(f.rd, i64::from((cpu.read_x(f.rs1) as u64) < (f.imm as u64)));
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1628,7 +1643,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "XORI",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] ^ f.imm;
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) ^ f.imm);
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1639,7 +1654,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ORI",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] | f.imm;
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) | f.imm);
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1650,7 +1665,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ANDI",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] & f.imm;
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) & f.imm);
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1664,7 +1679,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADD",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]);
+            cpu.write_x(f.rd, cpu.read_x(f.rs1).wrapping_add(cpu.read_x(f.rs2)));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1675,7 +1690,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SUB",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]);
+            cpu.write_x(f.rd, cpu.read_x(f.rs1).wrapping_sub(cpu.read_x(f.rs2)));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1686,7 +1701,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLL",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shl(cpu.x[f.rs2] as u32);
+            cpu.write_x(
+                f.rd,
+                cpu.read_x(f.rs1).wrapping_shl(cpu.read_x(f.rs2) as u32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1697,7 +1715,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLT",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1] < cpu.x[f.rs2]);
+            cpu.write_x(f.rd, i64::from(cpu.read_x(f.rs1) < cpu.read_x(f.rs2)));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1708,7 +1726,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLTU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u64) < (cpu.x[f.rs2] as u64));
+            cpu.write_x(
+                f.rd,
+                i64::from((cpu.read_x(f.rs1) as u64) < (cpu.read_x(f.rs2) as u64)),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1719,7 +1740,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "XOR",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] ^ cpu.x[f.rs2];
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) ^ cpu.read_x(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1730,7 +1751,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRL",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = (cpu.x[f.rs1] as u64).wrapping_shr(cpu.x[f.rs2] as u32) as i64;
+            cpu.write_x(
+                f.rd,
+                (cpu.read_x(f.rs1) as u64).wrapping_shr(cpu.read_x(f.rs2) as u32) as i64,
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1741,7 +1765,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRA",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_shr(cpu.x[f.rs2] as u32);
+            cpu.write_x(
+                f.rd,
+                cpu.read_x(f.rs1).wrapping_shr(cpu.read_x(f.rs2) as u32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1752,7 +1779,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "OR",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] | cpu.x[f.rs2];
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) | cpu.read_x(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1763,7 +1790,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AND",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1] & cpu.x[f.rs2];
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) & cpu.read_x(f.rs2));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1840,8 +1867,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LWU",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
-                cpu.x[f.rd] = v;
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 4) {
+                cpu.write_x(f.rd, v);
             }
             Ok(())
         },
@@ -1853,8 +1880,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "LD",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 8) {
-                cpu.x[f.rd] = v;
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 8) {
+                cpu.write_x(f.rd, v);
             }
             Ok(())
         },
@@ -1866,7 +1893,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SD",
         operation: |_address, word, cpu| {
             let f = parse_format_s(word);
-            cpu.memop(Write, cpu.x[f.rs1], f.imm, cpu.x[f.rs2], 8);
+            cpu.memop(Write, cpu.read_x(f.rs1), f.imm, cpu.read_x(f.rs2), 8);
             Ok(())
         },
         disassemble: dump_format_s,
@@ -1879,7 +1906,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.x[f.rs1] << shamt;
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) << shamt);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1892,7 +1919,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = ((cpu.x[f.rs1] as u64) >> shamt) as i64;
+            cpu.write_x(f.rd, ((cpu.read_x(f.rs1) as u64) >> shamt) as i64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1905,7 +1932,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = cpu.x[f.rs1] >> shamt;
+            cpu.write_x(f.rd, cpu.read_x(f.rs1) >> shamt);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1916,7 +1943,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADDIW",
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(f.imm) as i32);
+            cpu.write_x(
+                f.rd,
+                i64::from(cpu.read_x(f.rs1).wrapping_add(f.imm) as i32),
+            );
             Ok(())
         },
         disassemble: dump_format_i,
@@ -1928,7 +1958,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let shamt = f.rs2 as u32;
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] << shamt) as i32);
+            cpu.write_x(f.rd, i64::from((cpu.read_x(f.rs1) << shamt) as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1941,7 +1971,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             let mask = 0x3f;
             let shamt = (word >> 20) & mask;
-            cpu.x[f.rd] = i64::from(((cpu.x[f.rs1] as u32) >> shamt) as i32);
+            cpu.write_x(
+                f.rd,
+                i64::from(((cpu.read_x(f.rs1) as u32) >> shamt) as i32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1953,7 +1986,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             let shamt = (word >> 20) & 0x1f;
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32) >> shamt);
+            cpu.write_x(f.rd, i64::from((cpu.read_x(f.rs1) as i32) >> shamt));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1964,7 +1997,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "ADDW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_add(cpu.x[f.rs2]) as i32);
+            cpu.write_x(
+                f.rd,
+                i64::from(cpu.read_x(f.rs1).wrapping_add(cpu.read_x(f.rs2)) as i32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1975,7 +2011,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SUBW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from(cpu.x[f.rs1].wrapping_sub(cpu.x[f.rs2]) as i32);
+            cpu.write_x(
+                f.rd,
+                i64::from(cpu.read_x(f.rs1).wrapping_sub(cpu.read_x(f.rs2)) as i32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1986,7 +2025,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SLLW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shl(cpu.x[f.rs2] as u32) as i32);
+            cpu.write_x(
+                f.rd,
+                i64::from((cpu.read_x(f.rs1) as u32).wrapping_shl(cpu.read_x(f.rs2) as u32) as i32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -1997,7 +2039,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRLW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as u32).wrapping_shr(cpu.x[f.rs2] as u32) as i32);
+            cpu.write_x(
+                f.rd,
+                i64::from((cpu.read_x(f.rs1) as u32).wrapping_shr(cpu.read_x(f.rs2) as u32) as i32),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2008,7 +2053,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRAW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_shr(cpu.x[f.rs2] as u32));
+            cpu.write_x(
+                f.rd,
+                i64::from((cpu.read_x(f.rs1) as i32).wrapping_shr(cpu.read_x(f.rs2) as u32)),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2032,13 +2080,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_csr(word);
 
-            let tmp = cpu.x[f.rs];
+            let tmp = cpu.read_x(f.rs);
             if f.rd == 0 {
                 cpu.write_csr(f.csr, tmp as u64)?;
             } else {
                 let v = cpu.read_csr(f.csr)? as i64;
                 cpu.write_csr(f.csr, tmp as u64)?;
-                cpu.x[f.rd] = v;
+                cpu.write_x(f.rd, v);
             }
 
             Ok(())
@@ -2053,10 +2101,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_csr(word);
             let data = cpu.read_csr(f.csr)? as i64;
             if f.rs != 0 {
-                cpu.write_csr(f.csr, (data | cpu.x[f.rs]) as u64)?;
+                cpu.write_csr(f.csr, (data | cpu.read_x(f.rs)) as u64)?;
             }
             if f.rd != 0 {
-                cpu.x[f.rd] = data;
+                cpu.write_x(f.rd, data);
             }
             Ok(())
         },
@@ -2070,10 +2118,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_csr(word);
             let data = cpu.read_csr(f.csr)? as i64;
             if f.rs != 0 {
-                cpu.write_csr(f.csr, (data & !cpu.x[f.rs]) as u64)?;
+                cpu.write_csr(f.csr, (data & !cpu.read_x(f.rs)) as u64)?;
             }
             if f.rd != 0 {
-                cpu.x[f.rd] = data;
+                cpu.write_x(f.rd, data);
             }
             Ok(())
         },
@@ -2091,7 +2139,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             } else {
                 let v = cpu.read_csr(f.csr)? as i64;
                 cpu.write_csr(f.csr, f.rs as u64)?;
-                cpu.x[f.rd] = v;
+                cpu.write_x(f.rd, v);
             }
 
             Ok(())
@@ -2109,7 +2157,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 cpu.write_csr(f.csr, (data | f.rs as i64) as u64)?;
             }
             if f.rd != 0 {
-                cpu.x[f.rd] = data;
+                cpu.write_x(f.rd, data);
             }
             Ok(())
         },
@@ -2126,7 +2174,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 cpu.write_csr(f.csr, (data & !(f.rs as i64)) as u64)?;
             }
             if f.rd != 0 {
-                cpu.x[f.rd] = data;
+                cpu.write_x(f.rd, data);
             }
             Ok(())
         },
@@ -2139,7 +2187,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MUL",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.x[f.rs1].wrapping_mul(cpu.x[f.rs2]);
+            cpu.write_x(f.rd, cpu.read_x(f.rs1).wrapping_mul(cpu.read_x(f.rs2)));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2150,7 +2198,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULH",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = ((i128::from(cpu.x[f.rs1]) * i128::from(cpu.x[f.rs2])) >> 64) as i64;
+            cpu.write_x(
+                f.rd,
+                ((i128::from(cpu.read_x(f.rs1)) * i128::from(cpu.read_x(f.rs2))) >> 64) as i64,
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2161,8 +2212,11 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULHSU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] =
-                ((cpu.x[f.rs1] as u128).wrapping_mul(u128::from(cpu.x[f.rs2] as u64)) >> 64) as i64;
+            cpu.write_x(
+                f.rd,
+                ((cpu.read_x(f.rs1) as u128).wrapping_mul(u128::from(cpu.read_x(f.rs2) as u64))
+                    >> 64) as i64,
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2173,9 +2227,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULHU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = (u128::from(cpu.x[f.rs1] as u64)
-                .wrapping_mul(u128::from(cpu.x[f.rs2] as u64))
-                >> 64) as i64;
+            cpu.write_x(
+                f.rd,
+                (u128::from(cpu.read_x(f.rs1) as u64)
+                    .wrapping_mul(u128::from(cpu.read_x(f.rs2) as u64))
+                    >> 64) as i64,
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2186,14 +2243,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "DIV",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1];
-            let divisor = cpu.x[f.rs2];
+            let dividend = cpu.read_x(f.rs1);
+            let divisor = cpu.read_x(f.rs2);
             if divisor == 0 {
-                cpu.x[f.rd] = -1;
+                cpu.write_x(f.rd, -1);
             } else if dividend == i64::MIN && divisor == -1 {
-                cpu.x[f.rd] = dividend;
+                cpu.write_x(f.rd, dividend);
             } else {
-                cpu.x[f.rd] = dividend.wrapping_div(divisor);
+                cpu.write_x(f.rd, dividend.wrapping_div(divisor));
             }
             Ok(())
         },
@@ -2205,12 +2262,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "DIVU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as u64;
-            let divisor = cpu.x[f.rs2] as u64;
+            let dividend = cpu.read_x(f.rs1) as u64;
+            let divisor = cpu.read_x(f.rs2) as u64;
             if divisor == 0 {
-                cpu.x[f.rd] = -1;
+                cpu.write_x(f.rd, -1);
             } else {
-                cpu.x[f.rd] = dividend.wrapping_div(divisor) as i64;
+                cpu.write_x(f.rd, dividend.wrapping_div(divisor) as i64);
             }
             Ok(())
         },
@@ -2222,14 +2279,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "REM",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1];
-            let divisor = cpu.x[f.rs2];
+            let dividend = cpu.read_x(f.rs1);
+            let divisor = cpu.read_x(f.rs2);
             if divisor == 0 {
-                cpu.x[f.rd] = dividend;
+                cpu.write_x(f.rd, dividend);
             } else if dividend == i64::MIN && divisor == -1 {
-                cpu.x[f.rd] = 0;
+                cpu.write_x(f.rd, 0);
             } else {
-                cpu.x[f.rd] = cpu.x[f.rs1].wrapping_rem(cpu.x[f.rs2]);
+                cpu.write_x(f.rd, cpu.read_x(f.rs1).wrapping_rem(cpu.read_x(f.rs2)));
             }
             Ok(())
         },
@@ -2241,12 +2298,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "REMU",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as u64;
-            let divisor = cpu.x[f.rs2] as u64;
-            cpu.x[f.rd] = match divisor {
-                0 => dividend as i64,
-                _ => dividend.wrapping_rem(divisor) as i64,
-            };
+            let dividend = cpu.read_x(f.rs1) as u64;
+            let divisor = cpu.read_x(f.rs2) as u64;
+            cpu.write_x(
+                f.rd,
+                match divisor {
+                    0 => dividend as i64,
+                    _ => dividend.wrapping_rem(divisor) as i64,
+                },
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2258,7 +2318,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "MULW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            cpu.x[f.rd] = i64::from((cpu.x[f.rs1] as i32).wrapping_mul(cpu.x[f.rs2] as i32));
+            cpu.write_x(
+                f.rd,
+                i64::from((cpu.read_x(f.rs1) as i32).wrapping_mul(cpu.read_x(f.rs2) as i32)),
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2269,14 +2332,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "DIVW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as i32;
-            let divisor = cpu.x[f.rs2] as i32;
+            let dividend = cpu.read_x(f.rs1) as i32;
+            let divisor = cpu.read_x(f.rs2) as i32;
             if divisor == 0 {
-                cpu.x[f.rd] = -1;
+                cpu.write_x(f.rd, -1);
             } else if dividend == i32::MIN && divisor == -1 {
-                cpu.x[f.rd] = i64::from(dividend as i32);
+                cpu.write_x(f.rd, i64::from(dividend as i32));
             } else {
-                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
+                cpu.write_x(f.rd, i64::from(dividend.wrapping_div(divisor) as i32));
             }
             Ok(())
         },
@@ -2288,12 +2351,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "DIVUW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as u32;
-            let divisor = cpu.x[f.rs2] as u32;
+            let dividend = cpu.read_x(f.rs1) as u32;
+            let divisor = cpu.read_x(f.rs2) as u32;
             if divisor == 0 {
-                cpu.x[f.rd] = -1;
+                cpu.write_x(f.rd, -1);
             } else {
-                cpu.x[f.rd] = i64::from(dividend.wrapping_div(divisor) as i32);
+                cpu.write_x(f.rd, i64::from(dividend.wrapping_div(divisor) as i32));
             }
             Ok(())
         },
@@ -2305,14 +2368,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "REMW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as i32;
-            let divisor = cpu.x[f.rs2] as i32;
+            let dividend = cpu.read_x(f.rs1) as i32;
+            let divisor = cpu.read_x(f.rs2) as i32;
             if divisor == 0 {
-                cpu.x[f.rd] = i64::from(dividend);
+                cpu.write_x(f.rd, i64::from(dividend));
             } else if dividend == i32::MIN && divisor == -1 {
-                cpu.x[f.rd] = 0;
+                cpu.write_x(f.rd, 0);
             } else {
-                cpu.x[f.rd] = i64::from(dividend.wrapping_rem(divisor));
+                cpu.write_x(f.rd, i64::from(dividend.wrapping_rem(divisor)));
             }
             Ok(())
         },
@@ -2324,12 +2387,15 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "REMUW",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let dividend = cpu.x[f.rs1] as u32;
-            let divisor = cpu.x[f.rs2] as u32;
-            cpu.x[f.rd] = match divisor {
-                0 => i64::from(dividend as i32),
-                _ => i64::from(dividend.wrapping_rem(divisor) as i32),
-            };
+            let dividend = cpu.read_x(f.rs1) as u32;
+            let divisor = cpu.read_x(f.rs2) as u32;
+            cpu.write_x(
+                f.rd,
+                match divisor {
+                    0 => i64::from(dividend as i32),
+                    _ => i64::from(dividend.wrapping_rem(divisor) as i32),
+                },
+            );
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2342,10 +2408,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => {
-                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
-                    i64::from(data as i32)
+                    cpu.reservation = Some(cpu.read_x(f.rs1)); // Is virtual address ok?
+                    cpu.write_x(f.rd, i64::from(data as i32));
                 }
                 Err(e) => return Err(e),
             };
@@ -2360,19 +2426,13 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
-                match cpu
-                    .mmu
-                    .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32)
-                {
-                    Ok(()) => {
-                        cpu.reservation = None;
-                        0
-                    }
-                    Err(e) => return Err(e),
-                }
+            if cpu.reservation == Some(cpu.read_x(f.rs1)) {
+                cpu.mmu
+                    .store_virt_u32(cpu.read_x(f.rs1) as u64, cpu.read_x(f.rs2) as u32)?;
+                cpu.reservation = None;
+                cpu.write_x(f.rd, 0);
             } else {
-                1
+                cpu.write_x(f.rd, 1);
             };
             Ok(())
         },
@@ -2384,18 +2444,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOSWAP.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32)
+                .store_virt_u32(cpu.read_x(f.rs1) as u64, cpu.read_x(f.rs2) as u32)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2406,18 +2466,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOADD.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
-            match cpu
-                .mmu
-                .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u32)
-            {
+            match cpu.mmu.store_virt_u32(
+                cpu.read_x(f.rs1) as u64,
+                cpu.read_x(f.rs2).wrapping_add(tmp) as u32,
+            ) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2428,18 +2488,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOXOR.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u32(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u32 ^ tmp)
+                .store_virt_u32(cpu.read_x(f.rs1) as u64, cpu.read_x(f.rs2) as u32 ^ tmp)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = i64::from(tmp as i32);
+            cpu.write_x(f.rd, i64::from(tmp as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2450,18 +2510,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOAND.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u32(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u32)
+                .store_virt_u32(cpu.read_x(f.rs1) as u64, (cpu.read_x(f.rs2) & tmp) as u32)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2472,18 +2532,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOOR.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => i64::from(data as i32),
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u32(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u32)
+                .store_virt_u32(cpu.read_x(f.rs1) as u64, (cpu.read_x(f.rs2) | tmp) as u32)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2494,20 +2554,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMIN.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i32,
                 Err(e) => return Err(e),
             };
-            let min = if (cpu.x[f.rs2] as i32) < tmp {
-                cpu.x[f.rs2] as i32
+            let min = if (cpu.read_x(f.rs2) as i32) < tmp {
+                cpu.read_x(f.rs2) as i32
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, min as u32) {
+            match cpu.mmu.store_virt_u32(cpu.read_x(f.rs1) as u64, min as u32) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = i64::from(tmp);
+            cpu.write_x(f.rd, i64::from(tmp));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2518,20 +2578,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMAX.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i32,
                 Err(e) => return Err(e),
             };
-            let max = if cpu.x[f.rs2] as i32 >= tmp {
-                cpu.x[f.rs2] as i32
+            let max = if cpu.read_x(f.rs2) as i32 >= tmp {
+                cpu.read_x(f.rs2) as i32
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, max as u32) {
+            match cpu.mmu.store_virt_u32(cpu.read_x(f.rs1) as u64, max as u32) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = i64::from(tmp);
+            cpu.write_x(f.rd, i64::from(tmp));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2542,21 +2602,21 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMINU.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
-            let min = if cpu.x[f.rs2] as u32 <= tmp {
-                cpu.x[f.rs2] as u32
+            let min = if cpu.read_x(f.rs2) as u32 <= tmp {
+                cpu.read_x(f.rs2) as u32
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, min) {
+            match cpu.mmu.store_virt_u32(cpu.read_x(f.rs1) as u64, min) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(tmp as i32);
+                cpu.write_x(f.rd, i64::from(tmp as i32));
             }
             Ok(())
         },
@@ -2568,20 +2628,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMAXU.W",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u32(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u32(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
-            let max = if cpu.x[f.rs2] as u32 >= tmp {
-                cpu.x[f.rs2] as u32
+            let max = if cpu.read_x(f.rs2) as u32 >= tmp {
+                cpu.read_x(f.rs2) as u32
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u32(cpu.x[f.rs1] as u64, max) {
+            match cpu.mmu.store_virt_u32(cpu.read_x(f.rs1) as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = i64::from(tmp as i32);
+            cpu.write_x(f.rd, i64::from(tmp as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2594,10 +2654,10 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => {
-                    cpu.reservation = Some(cpu.x[f.rs1]); // Is virtual address ok?
-                    data as i64
+                    cpu.reservation = Some(cpu.read_x(f.rs1)); // Is virtual address ok?
+                    cpu.write_x(f.rd, data as i64);
                 }
                 Err(e) => return Err(e),
             };
@@ -2612,20 +2672,14 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             // @TODO: Implement properly
-            cpu.x[f.rd] = if cpu.reservation == Some(cpu.x[f.rs1]) {
-                match cpu
-                    .mmu
-                    .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
-                {
-                    Ok(()) => {
-                        cpu.reservation = None;
-                        0
-                    }
-                    Err(e) => return Err(e),
-                }
+            if cpu.reservation == Some(cpu.read_x(f.rs1)) {
+                cpu.mmu
+                    .store_virt_u64(cpu.read_x(f.rs1) as u64, cpu.read_x(f.rs2) as u64)?;
+                cpu.reservation = None;
+                cpu.write_x(f.rd, 0);
             } else {
-                1
-            };
+                cpu.write_x(f.rd, 1);
+            }
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2636,18 +2690,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOSWAP.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64)
+                .store_virt_u64(cpu.read_x(f.rs1) as u64, cpu.read_x(f.rs2) as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2658,18 +2712,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOADD.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
-            match cpu
-                .mmu
-                .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2].wrapping_add(tmp) as u64)
-            {
+            match cpu.mmu.store_virt_u64(
+                cpu.read_x(f.rs1) as u64,
+                cpu.read_x(f.rs2).wrapping_add(tmp) as u64,
+            ) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2680,18 +2734,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOXOR.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u64(cpu.x[f.rs1] as u64, cpu.x[f.rs2] as u64 ^ tmp)
+                .store_virt_u64(cpu.read_x(f.rs1) as u64, cpu.read_x(f.rs2) as u64 ^ tmp)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp as i64;
+            cpu.write_x(f.rd, tmp as i64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2702,18 +2756,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOAND.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u64(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] & tmp) as u64)
+                .store_virt_u64(cpu.read_x(f.rs1) as u64, (cpu.read_x(f.rs2) & tmp) as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2724,18 +2778,18 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOOR.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
             match cpu
                 .mmu
-                .store_virt_u64(cpu.x[f.rs1] as u64, (cpu.x[f.rs2] | tmp) as u64)
+                .store_virt_u64(cpu.read_x(f.rs1) as u64, (cpu.read_x(f.rs2) | tmp) as u64)
             {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2746,20 +2800,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMIN.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
-            let min = if cpu.x[f.rs2] < tmp {
-                cpu.x[f.rs2]
+            let min = if cpu.read_x(f.rs2) < tmp {
+                cpu.read_x(f.rs2)
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, min as u64) {
+            match cpu.mmu.store_virt_u64(cpu.read_x(f.rs1) as u64, min as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2770,20 +2824,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMAX.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data as i64,
                 Err(e) => return Err(e),
             };
-            let max = if cpu.x[f.rs2] >= tmp {
-                cpu.x[f.rs2]
+            let max = if cpu.read_x(f.rs2) >= tmp {
+                cpu.read_x(f.rs2)
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, max as u64) {
+            match cpu.mmu.store_virt_u64(cpu.read_x(f.rs1) as u64, max as u64) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp;
+            cpu.write_x(f.rd, tmp);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2794,20 +2848,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMINU.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
-            let min = if cpu.x[f.rs2] as u64 <= tmp {
-                cpu.x[f.rs2] as u64
+            let min = if cpu.read_x(f.rs2) as u64 <= tmp {
+                cpu.read_x(f.rs2) as u64
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, min) {
+            match cpu.mmu.store_virt_u64(cpu.read_x(f.rs1) as u64, min) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp as i64;
+            cpu.write_x(f.rd, tmp as i64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2818,20 +2872,20 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "AMOMAXU.D",
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
-            let tmp = match cpu.mmu.load_virt_u64(cpu.x[f.rs1] as u64) {
+            let tmp = match cpu.mmu.load_virt_u64(cpu.read_x(f.rs1) as u64) {
                 Ok(data) => data,
                 Err(e) => return Err(e),
             };
-            let max = if cpu.x[f.rs2] as u64 >= tmp {
-                cpu.x[f.rs2] as u64
+            let max = if cpu.read_x(f.rs2) as u64 >= tmp {
+                cpu.read_x(f.rs2) as u64
             } else {
                 tmp
             };
-            match cpu.mmu.store_virt_u64(cpu.x[f.rs1] as u64, max) {
+            match cpu.mmu.store_virt_u64(cpu.read_x(f.rs1) as u64, max) {
                 Ok(()) => {}
                 Err(e) => return Err(e),
             }
-            cpu.x[f.rd] = tmp as i64;
+            cpu.write_x(f.rd, tmp as i64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -2844,7 +2898,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.check_float_access(0)?;
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 4) {
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 4) {
                 cpu.write_f(f.rd, v as i32 as i64 | fp::NAN_BOX_F32);
             }
             Ok(())
@@ -2859,7 +2913,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let f = parse_format_s(word);
             cpu.mmu
-                .store_virt_u32_(cpu.x[f.rs1].wrapping_add(f.imm), cpu.read_f(f.rs2))
+                .store_virt_u32_(cpu.read_x(f.rs1).wrapping_add(f.imm), cpu.read_f(f.rs2))
         },
         disassemble: dump_format_s,
     },
@@ -3086,7 +3140,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) as i32);
+            cpu.write_x(f.rd, i64::from(cpu.read_f32(f.rs1) as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3098,7 +3152,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.x[f.rd] = i64::from(cpu.read_f32(f.rs1) as u32);
+            cpu.write_x(f.rd, i64::from(cpu.read_f32(f.rs1) as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3110,7 +3164,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            cpu.x[f.rd] = i64::from(cpu.read_f(f.rs1) as i32);
+            cpu.write_x(f.rd, i64::from(cpu.read_f(f.rs1) as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3124,7 +3178,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let (r, fflags) = Sf32::feq(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(r);
+                cpu.write_x(f.rd, i64::from(r));
             }
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3140,7 +3194,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let (r, fflags) = Sf32::flt(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(r);
+                cpu.write_x(f.rd, i64::from(r));
             }
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3156,7 +3210,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let (r, fflags) = Sf32::fle(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(r);
+                cpu.write_x(f.rd, i64::from(r));
             }
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3172,7 +3226,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << Sf32::fclass(cpu.read_f(f.rs1)) as usize;
+                cpu.write_x(f.rd, 1 << Sf32::fclass(cpu.read_f(f.rs1)) as usize);
             }
             Ok(())
         },
@@ -3185,7 +3239,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            let (r, fflags) = cvt_i32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            let (r, fflags) = cvt_i32_sf32(cpu.read_x(f.rs1), cpu.get_rm(f.funct3));
             cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3199,7 +3253,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            let (r, fflags) = cvt_u32_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            let (r, fflags) = cvt_u32_sf32(cpu.read_x(f.rs1), cpu.get_rm(f.funct3));
             cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3213,7 +3267,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.write_f(f.rd, fp::NAN_BOX_F32 | cpu.x[f.rs1]);
+            cpu.write_f(f.rd, fp::NAN_BOX_F32 | cpu.read_x(f.rs1));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3227,7 +3281,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
-                cpu.x[f.rd] = cpu.read_f32(f.rs1) as i64;
+                cpu.write_x(f.rd, cpu.read_f32(f.rs1) as i64);
             }
             Ok(())
         },
@@ -3241,7 +3295,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
-                cpu.x[f.rd] = cpu.read_f32(f.rs1) as u64 as i64;
+                cpu.write_x(f.rd, cpu.read_f32(f.rs1) as u64 as i64);
             }
             Ok(())
         },
@@ -3254,7 +3308,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            let (r, fflags) = cvt_i64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            let (r, fflags) = cvt_i64_sf32(cpu.read_x(f.rs1), cpu.get_rm(f.funct3));
             cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3268,7 +3322,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            let (r, fflags) = cvt_u64_sf32(cpu.x[f.rs1], cpu.get_rm(f.funct3));
+            let (r, fflags) = cvt_u64_sf32(cpu.read_x(f.rs1), cpu.get_rm(f.funct3));
 
             cpu.write_f(f.rd, r);
             cpu.add_to_fflags(fflags);
@@ -3285,7 +3339,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_i(word);
             cpu.check_float_access(0)?;
-            if let Some(v) = cpu.memop(Read, cpu.x[f.rs1], f.imm, 0, 8) {
+            if let Some(v) = cpu.memop(Read, cpu.read_x(f.rs1), f.imm, 0, 8) {
                 cpu.write_f(f.rd, v);
             }
             Ok(())
@@ -3300,7 +3354,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let f = parse_format_s(word);
             cpu.mmu
-                .store64(cpu.x[f.rs1].wrapping_add(f.imm), cpu.read_f(f.rs2))
+                .store64(cpu.read_x(f.rs1).wrapping_add(f.imm), cpu.read_f(f.rs2))
         },
         disassemble: dump_format_s,
     },
@@ -3552,7 +3606,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let (r, fflags) = Sf64::feq(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(r);
+                cpu.write_x(f.rd, i64::from(r));
             }
             cpu.add_to_fflags(fflags);
 
@@ -3569,7 +3623,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let (r, fflags) = Sf64::flt(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(r);
+                cpu.write_x(f.rd, i64::from(r));
             }
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3585,7 +3639,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let (r, fflags) = Sf64::fle(cpu.read_f(f.rs1), cpu.read_f(f.rs2));
             if f.rd != 0 {
-                cpu.x[f.rd] = i64::from(r);
+                cpu.write_x(f.rd, i64::from(r));
             }
             cpu.add_to_fflags(fflags);
             Ok(())
@@ -3601,7 +3655,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
 
             if f.rd != 0 {
-                cpu.x[f.rd] = 1 << Sf64::fclass(cpu.read_f(f.rs1)) as usize;
+                cpu.write_x(f.rd, 1 << Sf64::fclass(cpu.read_f(f.rs1)) as usize);
             }
             Ok(())
         },
@@ -3614,7 +3668,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as i32);
+            cpu.write_x(f.rd, i64::from(cpu.read_f64(f.rs1) as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3626,7 +3680,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.x[f.rd] = i64::from(cpu.read_f64(f.rs1) as u32);
+            cpu.write_x(f.rd, i64::from(cpu.read_f64(f.rs1) as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3638,7 +3692,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as i32));
+            cpu.write_f64(f.rd, f64::from(cpu.read_x(f.rs1) as i32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3650,7 +3704,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.write_f64(f.rd, f64::from(cpu.x[f.rs1] as u32));
+            cpu.write_f64(f.rd, f64::from(cpu.read_x(f.rs1) as u32));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3664,7 +3718,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
-                cpu.x[f.rd] = cpu.read_f64(f.rs1) as i64;
+                cpu.write_x(f.rd, cpu.read_f64(f.rs1) as i64);
             }
             Ok(())
         },
@@ -3678,7 +3732,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
             if f.rd != 0 {
-                cpu.x[f.rd] = cpu.read_f64(f.rs1) as u64 as i64;
+                cpu.write_x(f.rd, cpu.read_f64(f.rs1) as u64 as i64);
             }
             Ok(())
         },
@@ -3691,7 +3745,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             cpu.check_float_access(0)?;
             let f = parse_format_r(word);
-            cpu.x[f.rd] = cpu.read_f(f.rs1);
+            cpu.write_x(f.rd, cpu.read_f(f.rs1));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3703,7 +3757,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.write_f64(f.rd, cpu.x[f.rs1] as f64);
+            cpu.write_f64(f.rd, cpu.read_x(f.rs1) as f64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3715,7 +3769,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(f.funct3)?;
-            cpu.write_f64(f.rd, cpu.x[f.rs1] as u64 as f64);
+            cpu.write_f64(f.rd, cpu.read_x(f.rs1) as u64 as f64);
             Ok(())
         },
         disassemble: dump_format_r,
@@ -3727,7 +3781,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             cpu.check_float_access(0)?;
             let f = parse_format_r(word);
-            cpu.write_f(f.rd, cpu.x[f.rs1]);
+            cpu.write_f(f.rd, cpu.read_x(f.rs1));
             Ok(())
         },
         disassemble: dump_format_r,
@@ -4072,46 +4126,6 @@ mod test_cpu {
         assert_eq!(0, cpu.read_pc());
         cpu.update_pc(0xffffffffffffffffu64 as i64);
         assert_eq!(0xfffffffffffffffeu64 as i64, cpu.read_pc());
-    }
-
-    #[test]
-    fn read_register() {
-        let mut cpu = create_cpu();
-        // Initial register values are 0 other than 0xb th register.
-        // Initial value of 0xb th register is temporal for Linux boot and
-        // I'm not sure if the value is correct. Then skipping so far.
-        for i in 0..31 {
-            if i != 0xb {
-                assert_eq!(0, cpu.read_register(i));
-            }
-        }
-
-        for i in 0..31 {
-            cpu.x[i] = i as i64 + 1;
-        }
-
-        for i in 0..31 {
-            match i {
-                // 0th register is hardwired zero
-                0 => assert_eq!(0, cpu.read_register(i)),
-                _ => assert_eq!(i64::from(i) + 1, cpu.read_register(i)),
-            }
-        }
-
-        for i in 0..31 {
-            cpu.x[i] = (0xffffffffffffffff - i) as i64;
-        }
-
-        for i in 0..31 {
-            match i {
-                // 0th register is hardwired zero
-                0 => assert_eq!(0, cpu.read_register(i)),
-                _ => assert_eq!(-(i64::from(i) + 1), cpu.read_register(i)),
-            }
-        }
-
-        // @TODO: Should I test the case where the argument equals to or is
-        // greater than 32?
     }
 
     #[test]

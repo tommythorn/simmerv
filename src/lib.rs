@@ -83,7 +83,7 @@ impl Emulator {
     /// Runs program set by `setup_program()`. The emulator will run forever.
     pub fn run_program(&mut self) {
         loop {
-            self.tick(40);
+            self.tick(52);
         }
     }
 
