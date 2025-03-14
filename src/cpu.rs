@@ -762,7 +762,7 @@ impl Cpu {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn read_f32(&self, r: usize) -> f32 {
         assert_ne!(self.fs, 0);
-        f32::from_bits(Sf32::unbox(self.read_f(r)) as u32)
+        f32::from_bits(Sf32::read(self.read_f(r)) as u32)
     }
 
     fn read_f(&self, r: usize) -> i64 {
@@ -3013,8 +3013,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = Sf32::unbox(cpu.read_f(f.rs1));
-            let rs2_bits = Sf32::unbox(cpu.read_f(f.rs2));
+            let rs1_bits = Sf32::read(cpu.read_f(f.rs1));
+            let rs2_bits = Sf32::read(cpu.read_f(f.rs2));
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
             cpu.write_f(f.rd, fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff));
             Ok(())
@@ -3028,8 +3028,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = Sf32::unbox(cpu.read_f(f.rs1));
-            let rs2_bits = Sf32::unbox(cpu.read_f(f.rs2));
+            let rs1_bits = Sf32::read(cpu.read_f(f.rs1));
+            let rs2_bits = Sf32::read(cpu.read_f(f.rs2));
             let sign_bit = !rs2_bits & (0x80000000u64 as i64);
             cpu.write_f(f.rd, fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff));
             Ok(())
@@ -3043,8 +3043,8 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_address, word, cpu| {
             let f = parse_format_r(word);
             cpu.check_float_access(0)?;
-            let rs1_bits = Sf32::unbox(cpu.read_f(f.rs1));
-            let rs2_bits = Sf32::unbox(cpu.read_f(f.rs2));
+            let rs1_bits = Sf32::read(cpu.read_f(f.rs1));
+            let rs2_bits = Sf32::read(cpu.read_f(f.rs2));
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
             cpu.write_f(f.rd, fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits));
             Ok(())
