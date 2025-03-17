@@ -283,7 +283,7 @@ fn normalize_subnormal_sf64(mant: i64) -> (i64, i64) {
         "Normalize 64 0x{mant:x} -> shift {shift} -> new mantissa {:x}",
         mant << shift
     );
-    (1 - shift as i64, mant << shift)
+    (1 - shift as i64, (mant << shift) & Sf64::MANT_MASK)
 }
 
 // i64 -> f32
