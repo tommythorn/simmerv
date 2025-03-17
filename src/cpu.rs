@@ -10,8 +10,9 @@ use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::rvc;
 use crate::terminal::Terminal;
+use crate::tree_decoder;
 pub use csr::*;
-use fnv::{self, FnvHashMap};
+use log;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::fmt::Write as _;
@@ -39,7 +40,7 @@ pub struct Cpu {
 
     mmu: Mmu,
     reservation: Option<i64>,
-    decode_cache: DecodeCache,
+    decode_tree: Vec<u16>,
 }
 
 #[allow(dead_code)]
@@ -124,6 +125,11 @@ impl Cpu {
     #[must_use]
     #[allow(clippy::precedence)]
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
+        let mut patterns = Vec::new();
+        for (p, insn) in INSTRUCTIONS[0..INSTRUCTION_NUM - 1].iter().enumerate() {
+            patterns.push((insn.mask & !3, insn.data & !3, p));
+        }
+
         let mut cpu = Self {
             x: [0; 32],
             f_: [0; 32],
@@ -140,8 +146,9 @@ impl Cpu {
             csr: vec![0; 4096].into_boxed_slice(), // XXX MUST GO AWAY SOON
             mmu: Mmu::new(terminal),
             reservation: None,
-            decode_cache: DecodeCache::new(),
+            decode_tree: tree_decoder::new(&patterns),
         };
+        log::info!("FDT is {} entries", cpu.decode_tree.len());
         cpu.csr[Csr::Misa as usize] = 1 << 63; // RV64
         for c in "SUIMAFDC".bytes() {
             cpu.csr[Csr::Misa as usize] |= 1 << (c as usize - 65);
@@ -226,7 +233,7 @@ impl Cpu {
 
         let (insn, npc) = decompress(self.insn_addr, word as u32);
         self.pc = npc;
-        let Ok(decoded) = self.decode(insn) else {
+        let Ok(decoded) = decode(&self.decode_tree, insn) else {
             self.handle_exception(&Trap {
                 trap_type: TrapType::IllegalInstruction,
                 value: word,
@@ -239,44 +246,6 @@ impl Cpu {
                 self.x[0] = 0; // hardwired zero
             }
         }
-    }
-
-    /// Decodes a word instruction data and returns a reference to
-    /// [`Instruction`](struct.Instruction.html). Using [`DecodeCache`](struct.DecodeCache.html)
-    /// so if cache hits this method returns the result very quickly.
-    /// The result will be stored to cache.
-    fn decode(&mut self, word: u32) -> Result<&Instruction, ()> {
-        if let Some(index) = self.decode_cache.get(word) {
-            return Ok(&INSTRUCTIONS[index]);
-        }
-
-        let index = self.decode_and_get_instruction_index(word)?;
-        self.decode_cache.insert(word, index);
-        Ok(&INSTRUCTIONS[index])
-    }
-
-    /// Decodes a word instruction data and returns a reference to
-    /// [`Instruction`](struct.Instruction.html). Not Using [`DecodeCache`](struct.DecodeCache.html)
-    /// so if you don't want to pollute the cache you should use this method
-    /// instead of `decode`.
-    fn decode_raw(&self, word: u32) -> Result<&Instruction, ()> {
-        let index = self.decode_and_get_instruction_index(word)?;
-        Ok(&INSTRUCTIONS[index])
-    }
-
-    /// Decodes a word instruction data and returns an index of
-    /// [`INSTRUCTIONS`](constant.INSTRUCTIONS.html)
-    ///
-    /// # Arguments
-    /// * `word` word instruction data decoded
-    #[allow(clippy::unused_self)]
-    fn decode_and_get_instruction_index(&self, word: u32) -> Result<usize, ()> {
-        for (i, inst) in INSTRUCTIONS.iter().enumerate() {
-            if word & inst.mask == inst.data {
-                return Ok(i);
-            }
-        }
-        Err(())
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -740,7 +709,7 @@ impl Cpu {
         };
         let word32 = (word32 & 0xffffffff) as u32;
         let (insn, _) = decompress(0, word32);
-        let Ok(decoded) = self.decode_raw(insn) else {
+        let Ok(decoded) = decode(&self.decode_tree, insn) else {
             let _ = write!(s, "{:016x} {word32:08x} Illegal instruction", self.pc);
             return 0;
         };
@@ -985,6 +954,16 @@ impl Cpu {
     }
 }
 
+const fn decode(fdt: &[u16], word: u32) -> Result<&Instruction, ()> {
+    let inst = &INSTRUCTIONS[tree_decoder::patmatch(fdt, word)];
+    if word & inst.mask == inst.data {
+        Ok(inst)
+    } else {
+        Err(())
+    }
+}
+
+#[derive(Debug)]
 struct Instruction {
     mask: u32,
     data: u32, // @TODO: rename
@@ -1772,7 +1751,12 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         mask: 0xf000707f,
         data: 0x0000000f,
         name: "FENCE",
-        operation: |_cpu, _word, _address| {
+        operation: |_cpu, word, _address| {
+            if word == 0x0100000f {
+                // Nothing to do here, but it would be interesting to see
+                // it used.
+                todo!("pause");
+            }
             // Fence memory ops (we are currently TSO already)
             Ok(())
         },
@@ -1785,18 +1769,6 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         operation: |_cpu, _word, _address| {
             // Fence memory ops (we are currently TSO already)
             Ok(())
-        },
-        disassemble: dump_empty,
-    },
-    Instruction {
-        mask: 0xffffffff,
-        data: 0x0100000f,
-        name: "PAUSE",
-        operation: |_cpu, _word, _address| {
-            // Nothing to do here, but it would be interesting to see
-            // it used.
-            todo!("pause");
-            //Ok(())
         },
         disassemble: dump_empty,
     },
@@ -3864,190 +3836,19 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         },
         disassemble: dump_empty,
     },
+    Instruction {
+        mask: 0,
+        data: 0,
+        name: "INVALID",
+        operation: |_address, _word, _cpu| {
+            Err(Trap {
+                trap_type: TrapType::IllegalInstruction,
+                value: 0,
+            })
+        },
+        disassemble: dump_empty,
+    },
 ];
-
-/// The number of results [`DecodeCache`](struct.DecodeCache.html) holds.
-/// You need to carefully choose the number. Too small number causes
-/// bad cache hit ratio. Too large number causes memory consumption
-/// and host hardware CPU cache memory miss.
-const DECODE_CACHE_ENTRY_NUM: usize = 0x1000;
-
-const INVALID_CACHE_ENTRY: usize = INSTRUCTION_NUM;
-const NULL_ENTRY: usize = DECODE_CACHE_ENTRY_NUM;
-
-/// `DecodeCache` provides a cache system for instruction decoding.
-/// It holds the recent [`DECODE_CACHE_ENTRY_NUM`](constant.DECODE_CACHE_ENTRY_NUM.html)
-/// instruction decode results. If it has a cache (called "hit") for passed
-/// word data, it returns decoding result very quickly. Decoding is one of the
-/// slowest parts in CPU. This cache system improves the CPU processing speed
-/// by skipping decoding. Especially it should work well for loop. It is said
-/// that some loops in a program consume the majority of time then this cache
-/// system is expected to reduce the decoding time very well.
-///
-/// This cache system is based on LRU algorithm, and consists of a hash map and
-/// a linked list. Linked list is for LRU, front means recently used and back
-/// means least recently used. A content in hash map points to an entry in the
-/// linked list. This is the key to achieve computing in O(1).
-///
-// @TODO: Write performance benchmark test to confirm this cache actually
-//        improves the speed.
-struct DecodeCache {
-    /// Holds mappings from word instruction data to an index of `entries`
-    /// pointing to the entry having the decoding result. Containing the word
-    /// means cache hit.
-    hash_map: FnvHashMap<u32, usize>,
-
-    /// Holds the entries [`DecodeCacheEntry`](struct.DecodeCacheEntry.html)
-    /// forming linked list.
-    entries: Vec<DecodeCacheEntry>,
-
-    /// An index of `entries` pointing to the head entry in the linked list
-    front_index: usize,
-
-    /// An index of `entries` pointing to the tail entry in the linked list
-    back_index: usize,
-
-    /// Cache hit count for debugging purpose
-    hit_count: u64,
-
-    /// Cache miss count for debugging purpose
-    miss_count: u64,
-}
-
-impl DecodeCache {
-    /// Creates a new `DecodeCache`.
-    fn new() -> Self {
-        // Initialize linked list
-        let mut entries = Vec::new();
-        for i in 0..DECODE_CACHE_ENTRY_NUM {
-            let next_index = if i == DECODE_CACHE_ENTRY_NUM - 1 {
-                NULL_ENTRY
-            } else {
-                i + 1
-            };
-            let prev_index = if i == 0 { NULL_ENTRY } else { i - 1 };
-            entries.push(DecodeCacheEntry::new(next_index, prev_index));
-        }
-
-        Self {
-            hash_map: FnvHashMap::default(),
-            entries,
-            front_index: 0,
-            back_index: DECODE_CACHE_ENTRY_NUM - 1,
-            hit_count: 0,
-            miss_count: 0,
-        }
-    }
-
-    /// Gets the cached decoding result. If hits this method moves the
-    /// cache entry to front of the linked list and returns an index of
-    /// [`INSTRUCTIONS`](constant.INSTRUCTIONS.html).
-    /// Otherwise returns `None`. This operation should compute in O(1) time.
-    ///
-    /// # Arguments
-    /// * `word` word instruction data
-    #[allow(clippy::cast_precision_loss)]
-    fn get(&mut self, word: u32) -> Option<usize> {
-        let result = if let Some(index) = self.hash_map.get(&word) {
-            self.hit_count += 1;
-            // Move the entry to front of the list unless it is at front.
-            if self.front_index != *index {
-                let next_index = self.entries[*index].next_index;
-                let prev_index = self.entries[*index].prev_index;
-
-                // Remove the entry from the list
-                if self.back_index == *index {
-                    self.back_index = prev_index;
-                } else {
-                    self.entries[next_index].prev_index = prev_index;
-                }
-                self.entries[prev_index].next_index = next_index;
-
-                // Push the entry to front
-                self.entries[*index].prev_index = NULL_ENTRY;
-                self.entries[*index].next_index = self.front_index;
-                self.entries[self.front_index].prev_index = *index;
-                self.front_index = *index;
-            }
-            Some(self.entries[*index].instruction_index)
-        } else {
-            self.miss_count += 1;
-            None
-        };
-        log::trace!(
-            "hit:{}, miss:{}, ratio:{}",
-            self.hit_count,
-            self.miss_count,
-            (self.hit_count as f64) / (self.hit_count + self.miss_count) as f64
-        );
-        result
-    }
-
-    /// Inserts a new decode result to front of the linked list while removing
-    /// the least recently used result from the list. This operation should
-    /// compute in O(1) time.
-    ///
-    /// # Arguments
-    /// * `word`
-    /// * `instruction_index`
-    fn insert(&mut self, word: u32, instruction_index: usize) {
-        let index = self.back_index;
-
-        // Remove the least recently used entry. The entry resource
-        // is reused as new entry.
-        if self.entries[index].instruction_index != INVALID_CACHE_ENTRY {
-            self.hash_map.remove(&self.entries[index].word);
-        }
-        self.back_index = self.entries[index].prev_index;
-        self.entries[self.back_index].next_index = NULL_ENTRY;
-
-        // Push the new entry to front of the linked list
-        self.hash_map.insert(word, index);
-        self.entries[index].prev_index = NULL_ENTRY;
-        self.entries[index].next_index = self.front_index;
-        self.entries[index].word = word;
-        self.entries[index].instruction_index = instruction_index;
-        self.entries[self.front_index].prev_index = index;
-        self.front_index = index;
-    }
-}
-
-/// An entry of linked list managed by [`DecodeCache`](struct.DecodeCache.html).
-/// An entry consists of a mapping from word instruction data to an index of
-/// [`INSTRUCTIONS`](constant.INSTRUCTIONS.html) and next/previous entry index
-/// in the linked list.
-struct DecodeCacheEntry {
-    /// Instruction word data
-    word: u32,
-
-    /// The result of decoding `word`. An index of [`INSTRUCTIONS`](constant.INSTRUCTIONS.html).
-    instruction_index: usize,
-
-    /// Next entry index in the linked list. [`NULL_ENTRY`](constant.NULL_ENTRY.html)
-    /// represents no next entry, meaning the entry is at tail.
-    next_index: usize,
-
-    /// Previous entry index in the linked list. [`NULL_ENTRY`](constant.NULL_ENTRY.html)
-    /// represents no previous entry, meaning the entry is at head.
-    prev_index: usize,
-}
-
-impl DecodeCacheEntry {
-    /// Creates a new entry. Initial `instruction_index` is
-    /// `INVALID_CACHE_ENTRY` meaning the entry is invalid.
-    ///
-    /// # Arguments
-    /// * `next_index`
-    /// * `prev_index`
-    const fn new(next_index: usize, prev_index: usize) -> Self {
-        Self {
-            word: 0,
-            instruction_index: INVALID_CACHE_ENTRY,
-            next_index,
-            prev_index,
-        }
-    }
-}
 
 #[cfg(test)]
 mod test_cpu {
@@ -4175,16 +3976,16 @@ mod test_cpu {
 
     #[test]
     #[allow(clippy::match_wild_err_arm)]
-    fn decode() {
-        let mut cpu = create_cpu();
+    fn decode_test() {
+        let cpu = create_cpu();
         // 0x13 is addi instruction
-        match cpu.decode(0x13) {
+        match decode(&cpu.decode_tree, 0x13) {
             Ok(inst) => assert_eq!(inst.name, "ADDI"),
             Err(_e) => panic!("Failed to decode"),
         }
         // .decode() returns error for invalid word data.
         assert!(
-            cpu.decode(0x0).is_err(),
+            decode(&cpu.decode_tree, 0x0).is_err(),
             "Unexpectedly succeeded in decoding"
         );
         // @TODO: Should I test all instructions?
@@ -4193,10 +3994,10 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn test_decompress() {
-        let mut cpu = create_cpu();
+        let cpu = create_cpu();
         // .decompress() doesn't directly return an instruction but
         // it returns decompressed word. Then you need to call .decode().
-        match cpu.decode(decompress(0, 0x20).0) {
+        match decode(&cpu.decode_tree, decompress(0, 0x20).0) {
             Ok(inst) => assert_eq!(inst.name, "ADDI"),
             Err(_e) => panic!("Failed to decode"),
         }
@@ -4209,7 +4010,7 @@ mod test_cpu {
         let wfi_instruction = 0x10500073;
         let mut cpu = create_cpu();
         // Just in case
-        match cpu.decode(wfi_instruction) {
+        match decode(&cpu.decode_tree, wfi_instruction) {
             Ok(inst) => assert_eq!(inst.name, "WFI"),
             Err(_e) => panic!("Failed to decode"),
         }
@@ -4337,75 +4138,5 @@ mod test_cpu {
         cpu.run_soc(1); // Execute  "addi x1, x1, 1"
         // x1 is not hardcoded zero
         assert_eq!(1, cpu.read_register(1));
-    }
-}
-
-#[cfg(test)]
-mod test_decode_cache {
-    use super::*;
-
-    #[test]
-    fn initialize() {
-        let _cache = DecodeCache::new();
-    }
-
-    #[test]
-    fn insert() {
-        let mut cache = DecodeCache::new();
-        cache.insert(0, 0);
-    }
-
-    #[test]
-    fn get() {
-        let mut cache = DecodeCache::new();
-        cache.insert(1, 2);
-
-        // Cache hit test
-        match cache.get(1) {
-            Some(index) => assert_eq!(2, index),
-            None => panic!("Unexpected cache miss"),
-        }
-
-        // Cache miss test
-        if let Some(_index) = cache.get(2) {
-            panic!("Unexpected cache hit")
-        }
-    }
-
-    #[test]
-    #[allow(clippy::match_wild_err_arm, clippy::cast_possible_truncation)]
-    fn lru() {
-        let mut cache = DecodeCache::new();
-        cache.insert(0, 1);
-
-        match cache.get(0) {
-            Some(index) => assert_eq!(1, index),
-            None => panic!("Unexpected cache miss"),
-        }
-
-        for i in 1..=DECODE_CACHE_ENTRY_NUM {
-            cache.insert(i as u32, i + 1);
-        }
-
-        // The oldest entry should have been removed because of the overflow
-        if let Some(_index) = cache.get(0) {
-            panic!("Unexpected cache hit")
-        }
-
-        // With this .get(), the entry with the word "1" moves to the tail of the list
-        // and the entry with the word "2" becomes the oldest entry.
-        if let Some(index) = cache.get(1) {
-            assert_eq!(2, index);
-        }
-
-        // The oldest entry with the word "2" will be removed due to the overflow
-        cache.insert(
-            DECODE_CACHE_ENTRY_NUM as u32 + 1,
-            DECODE_CACHE_ENTRY_NUM + 2,
-        );
-
-        if let Some(_index) = cache.get(2) {
-            panic!("Unexpected cache hit")
-        }
     }
 }

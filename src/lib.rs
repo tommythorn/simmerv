@@ -14,6 +14,7 @@ pub mod memory;
 pub mod mmu;
 pub mod rvc;
 pub mod terminal;
+mod tree_decoder;
 
 use crate::cpu::Cpu;
 use crate::elf_analyzer::ElfAnalyzer;
