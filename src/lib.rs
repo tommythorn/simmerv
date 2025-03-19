@@ -6,6 +6,7 @@ const PROGRAM_MEMORY_CAPACITY: usize = 1024 * 1024 * 512; // big enough to run L
 
 pub mod cpu;
 pub mod csr;
+mod dag_decoder;
 pub mod default_terminal;
 pub mod device;
 pub mod elf_analyzer;
@@ -14,7 +15,6 @@ pub mod memory;
 pub mod mmu;
 pub mod rvc;
 pub mod terminal;
-mod tree_decoder;
 
 use crate::cpu::Cpu;
 use crate::elf_analyzer::ElfAnalyzer;

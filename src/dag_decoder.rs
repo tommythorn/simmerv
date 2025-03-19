@@ -1,4 +1,4 @@
-/// Decoder Tree takes a list of (mask,data,value) patterns a
+/// Decoder DAG takes a list of (mask,data,value) patterns a
 /// generates a good (optimal?) tree.  For the fastest possible
 /// decoder we assume an unrolled decoder of fixed depth.  This
 /// also implies that some branches have trial leafs.
@@ -22,6 +22,8 @@ enum DecoderTree {
 }
 
 impl DecoderTree {
+    // Flatten turns the tree into a dag by sharing leafs
+
     #[allow(clippy::unwrap_used)]
     #[allow(clippy::missing_panics_doc)]
     fn flatten(&self, tab: &mut Vec<u16>) -> u16 {

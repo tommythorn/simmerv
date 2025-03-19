@@ -2,6 +2,7 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use crate::csr;
+use crate::dag_decoder;
 use crate::fp;
 use crate::fp::{
     RoundingMode, Sf, Sf32, Sf64, cvt_i32_sf32, cvt_i64_sf32, cvt_u32_sf32, cvt_u64_sf32,
@@ -10,7 +11,6 @@ use crate::mmu::MemoryAccessType::{Execute, Read, Write};
 use crate::mmu::{AddressingMode, MemoryAccessType, Mmu};
 use crate::rvc;
 use crate::terminal::Terminal;
-use crate::tree_decoder;
 pub use csr::*;
 use log;
 use num_derive::FromPrimitive;
@@ -40,7 +40,7 @@ pub struct Cpu {
 
     mmu: Mmu,
     reservation: Option<i64>,
-    decode_tree: Vec<u16>,
+    decode_dag: Vec<u16>,
 }
 
 #[allow(dead_code)]
@@ -146,9 +146,9 @@ impl Cpu {
             csr: vec![0; 4096].into_boxed_slice(), // XXX MUST GO AWAY SOON
             mmu: Mmu::new(terminal),
             reservation: None,
-            decode_tree: tree_decoder::new(&patterns),
+            decode_dag: dag_decoder::new(&patterns),
         };
-        log::info!("FDT is {} entries", cpu.decode_tree.len());
+        log::info!("FDT is {} entries", cpu.decode_dag.len());
         cpu.csr[Csr::Misa as usize] = 1 << 63; // RV64
         for c in "SUIMAFDC".bytes() {
             cpu.csr[Csr::Misa as usize] |= 1 << (c as usize - 65);
@@ -233,7 +233,7 @@ impl Cpu {
 
         let (insn, npc) = decompress(self.insn_addr, word as u32);
         self.pc = npc;
-        let Ok(decoded) = decode(&self.decode_tree, insn) else {
+        let Ok(decoded) = decode(&self.decode_dag, insn) else {
             self.handle_exception(&Trap {
                 trap_type: TrapType::IllegalInstruction,
                 value: word,
@@ -709,7 +709,7 @@ impl Cpu {
         };
         let word32 = (word32 & 0xffffffff) as u32;
         let (insn, _) = decompress(0, word32);
-        let Ok(decoded) = decode(&self.decode_tree, insn) else {
+        let Ok(decoded) = decode(&self.decode_dag, insn) else {
             let _ = write!(s, "{:016x} {word32:08x} Illegal instruction", self.pc);
             return 0;
         };
@@ -955,7 +955,7 @@ impl Cpu {
 }
 
 const fn decode(fdt: &[u16], word: u32) -> Result<&Instruction, ()> {
-    let inst = &INSTRUCTIONS[tree_decoder::patmatch(fdt, word)];
+    let inst = &INSTRUCTIONS[dag_decoder::patmatch(fdt, word)];
     if word & inst.mask == inst.data {
         Ok(inst)
     } else {
@@ -3979,13 +3979,13 @@ mod test_cpu {
     fn decode_test() {
         let cpu = create_cpu();
         // 0x13 is addi instruction
-        match decode(&cpu.decode_tree, 0x13) {
+        match decode(&cpu.decode_dag, 0x13) {
             Ok(inst) => assert_eq!(inst.name, "ADDI"),
             Err(_e) => panic!("Failed to decode"),
         }
         // .decode() returns error for invalid word data.
         assert!(
-            decode(&cpu.decode_tree, 0x0).is_err(),
+            decode(&cpu.decode_dag, 0x0).is_err(),
             "Unexpectedly succeeded in decoding"
         );
         // @TODO: Should I test all instructions?
@@ -3997,7 +3997,7 @@ mod test_cpu {
         let cpu = create_cpu();
         // .decompress() doesn't directly return an instruction but
         // it returns decompressed word. Then you need to call .decode().
-        match decode(&cpu.decode_tree, decompress(0, 0x20).0) {
+        match decode(&cpu.decode_dag, decompress(0, 0x20).0) {
             Ok(inst) => assert_eq!(inst.name, "ADDI"),
             Err(_e) => panic!("Failed to decode"),
         }
@@ -4010,7 +4010,7 @@ mod test_cpu {
         let wfi_instruction = 0x10500073;
         let mut cpu = create_cpu();
         // Just in case
-        match decode(&cpu.decode_tree, wfi_instruction) {
+        match decode(&cpu.decode_dag, wfi_instruction) {
             Ok(inst) => assert_eq!(inst.name, "WFI"),
             Err(_e) => panic!("Failed to decode"),
         }
