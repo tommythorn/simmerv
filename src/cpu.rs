@@ -155,7 +155,7 @@ impl Cpu {
         }
         cpu.csr[Csr::Mstatus as usize] =
             2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
-        cpu.x[0] = 0; // boot hart
+        cpu.x[10] = 0; // boot hart
         cpu.x[11] = 0x1020; // start of DTB (XXX could put that elsewhere);
         cpu
     }
