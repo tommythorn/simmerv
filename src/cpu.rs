@@ -1318,7 +1318,7 @@ const fn get_register_name(num: usize) -> &'static str {
     ][num]
 }
 
-const INSTRUCTION_NUM: usize = 171;
+const INSTRUCTION_NUM: usize = 173;
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -3938,6 +3938,33 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
                 let mask = 0x3f;
                 let shamt = (word >> 20) & mask;
                 cpu.x[f.rd] = ((cpu.x[f.rs1] & 0xffffffff) << shamt) as i64;
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // Zicond extension
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0e005033,
+        name: "CZERO.EQZ",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = if cpu.x[f.rs2] == 0 { 0 } else { cpu.x[f.rs1] };
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0e007033,
+        name: "CZERO.NEZ",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = if cpu.x[f.rs2] == 0 { cpu.x[f.rs1] } else { 0 };
             }
             Ok(())
         },
