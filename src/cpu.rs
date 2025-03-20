@@ -1318,7 +1318,7 @@ const fn get_register_name(num: usize) -> &'static str {
     ][num]
 }
 
-const INSTRUCTION_NUM: usize = 163;
+const INSTRUCTION_NUM: usize = 171;
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -3836,6 +3836,114 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         },
         disassemble: dump_empty,
     },
+    // Zba -- AKA, my only favorite extension
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0800003b,
+        name: "ADD.UW",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add(cpu.x[f.rs1] & 0xffffffff);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x20002033,
+        name: "SH1ADD",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add(cpu.x[f.rs1] << 1);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x2000203b,
+        name: "SH1ADD.UW",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add((cpu.x[f.rs1] & 0xffffffff) << 1);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x20004033,
+        name: "SH2ADD",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add(cpu.x[f.rs1] << 2);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x2000403b,
+        name: "SH2ADD.UW",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add((cpu.x[f.rs1] & 0xffffffff) << 2);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x20006033,
+        name: "SH3ADD",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add(cpu.x[f.rs1] << 3);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x2000603b,
+        name: "SH3ADD.UW",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                cpu.x[f.rd] = cpu.x[f.rs2].wrapping_add((cpu.x[f.rs1] & 0xffffffff) << 3);
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    Instruction {
+        mask: 0xfe00707f,
+        data: 0x0800101b,
+        name: "SLLI.UW",
+        operation: |_address, word, cpu| {
+            let f = parse_format_r(word);
+            if f.rd != 0 {
+                let mask = 0x3f;
+                let shamt = (word >> 20) & mask;
+                cpu.x[f.rd] = ((cpu.x[f.rs1] & 0xffffffff) << shamt) as i64;
+            }
+            Ok(())
+        },
+        disassemble: dump_format_r,
+    },
+    // Last one is a sentiel and must always be this illegal instruction
     Instruction {
         mask: 0,
         data: 0,
@@ -3873,6 +3981,16 @@ mod test_cpu {
         assert_eq!(0, cpu.read_pc());
         cpu.update_pc(0xffffffffffffffffu64 as i64);
         assert_eq!(0xfffffffffffffffeu64 as i64, cpu.read_pc());
+    }
+
+    #[test]
+    fn decode_sh2add() {
+        let cpu = create_cpu();
+        //    10894:       20e74633                sh2add  a2,a4,a4
+        match decode(&cpu.decode_dag, 0x20e74633) {
+            Ok(inst) => assert_eq!(inst.name, "SH2ADD"),
+            Err(_e) => panic!("Failed to decode"),
+        }
     }
 
     #[test]
