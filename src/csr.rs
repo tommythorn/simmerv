@@ -34,7 +34,7 @@ pub enum Csr {
     Mideleg = 0x303,
     Mie = 0x304,
     Mtvec = 0x305,
-    Csr306 = 0x306,
+    Mcounteren = 0x306,
     Menvcfg = 0x30a, // Unsupported Mostly Just Configure S Access To Timecmp
     Mscratch = 0x340,
     Mepc = 0x341,
@@ -148,6 +148,7 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Instret
             | Csr::Marchid
             | Csr::Mcause
+            | Csr::Mcounteren
             | Csr::Mcycle
             | Csr::Minstret
             | Csr::Medeleg
@@ -184,6 +185,61 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Ustatus
             | Csr::Utval
             | Csr::Utvec
-            | Csr::Csr306
     )
+}
+
+pub struct CsrFile {
+    pub mcause: u64,
+    pub medeleg: u64,
+    pub mepc: u64,
+    pub mhartid: u64,
+    pub mideleg: u64,
+    pub mie: u64,
+    pub misa: u64,
+    pub mscratch: u64,
+    pub mtval: u64,
+    pub mtvec: u64,
+    pub scause: u64,
+    pub sedeleg: u64,
+    pub sepc: u64,
+    pub sideleg: u64,
+    pub sscratch: u64,
+    pub stval: u64,
+    pub stvec: u64,
+    pub ustatus: u64,
+}
+
+impl Default for CsrFile {
+    fn default() -> Self { Self::new() }
+}
+
+impl CsrFile {
+    #[must_use]
+    pub fn new() -> Self {
+        let mut misa = 1 << 63; // RV64
+        for c in "SUIMAFDC".bytes() {
+            misa |= 1 << (c as usize - 65);
+        }
+
+        Self {
+            mcause: 0,
+            medeleg: 0,
+            mepc: 0,
+            mhartid: 0,
+            mideleg: 0,
+            mie: 0,
+            misa,
+            mscratch: 0,
+            mtval: 0,
+            mtvec: 0,
+            scause: 0,
+            sedeleg: 0,
+            sepc: 0,
+            sideleg: 0,
+            sscratch: 0,
+            stval: 0,
+            stvec: 0,
+            ustatus: 0,
+        }
+    }
 }
