@@ -36,12 +36,12 @@ here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 ## Instructions/Features support status
 
 - [x] RV64IMAC
-- [x] RV64FD (flags/rounding modes very lacking)
+- [x] RV64FD (*PARTIALLY* flags/rounding modes very lacking)
 - [x] RV64Zifencei
 - [x] RV64Zicsr
-- [ ] RV64B
+- [ ] RV64B (Zicond and Zba done)
 - [ ] Svnapot
-- [x] CSR (almost?)
+- [x] CSR (mostly done)
 - [x] Sv39
 - [x] Sv48 (untested, but should work)
 - [x] Privileged instructions
