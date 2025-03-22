@@ -1,5 +1,5 @@
-use riscv_emu_rust::default_terminal::DefaultTerminal;
-use riscv_emu_rust::Emulator;
+use simmerv::default_terminal::DefaultTerminal;
+use simmerv::Emulator;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
@@ -207,7 +207,7 @@ impl WasmRiscv {
 
     /// Enables or disables page cache optimization.
     /// Page cache optimization is an experimental feature.
-    /// Refer to [`Mmu`](../riscv_emu_rust/mmu/struct.Mmu.html) for the detail.
+    /// Refer to [`Mmu`](../simmerv/mmu/struct.Mmu.html) for the detail.
     ///
     /// # Arguments
     /// * `enabled`

@@ -1,18 +1,18 @@
-[riscv-rust/wasm/web](https://github.com/tommythorn/riscv-rust/tree/master/wasm/web) is a directory for WebAssembly RISC-V emulator compiled from [riscv-rust](https://github.com/tommythorn/riscv-rust) and its online demo. You can import the emulator into your web page.
+[simmerv/wasm/web](https://github.com/tommythorn/simmerv/tree/master/wasm/web) is a directory for WebAssembly RISC-V emulator compiled from [simmerv](https://github.com/tommythorn/simmerv) and its online demo. You can import the emulator into your web page.
 
 ## Online Demo
 
-[index.html](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
+[index.html](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
 ## How to import in a web page
 
-Download [riscv_emu_rust_wasm.js](https://github.com/tommythorn/riscv-rust/blob/master/wasm/web/riscv_emu_rust_wasm.js) and [riscv_emu_rust_wasm_bg.wasm](https://github.com/tommythorn/riscv-rust/blob/master/wasm/web/riscv_emu_rust_wasm_bg.wasm), and place them to where a web page can access.
+Download [simmerv_wasm.js](https://github.com/tommythorn/simmerv/blob/master/wasm/web/simmerv_wasm.js) and [simmerv_wasm_bg.wasm](https://github.com/tommythorn/simmerv/blob/master/wasm/web/simmerv_wasm_bg.wasm), and place them to where a web page can access.
 
 Below is the example code to import and use them.
 
 ```javascript
 <script type="module">
-  import init, { WasmRiscv } from "./riscv_emu_rust_wasm.js";
+  import init, { WasmRiscv } from "./simmerv_wasm.js";
   init().then(async wasm => {
     const riscv = WasmRiscv.new();
     const programBuffer = await fetch(path_to_program).then(res => res.arrayBuffer());
@@ -52,7 +52,7 @@ Below is the example code to import and use them.
 
 ## API
 
-Refer to the comments in [`WasmRiscv`](https://github.com/tommythorn/riscv-rust/blob/master/wasm/src/lib.rs)
+Refer to the comments in [`WasmRiscv`](https://github.com/tommythorn/simmerv/blob/master/wasm/src/lib.rs)
 
 ## How to build WebAssembly RISC-V emulator and run demo in web browser locally
 
@@ -60,8 +60,8 @@ Prerequirements
 - Install [wasm-bindgen client](https://rustwasm.github.io/docs/wasm-bindgen/)
 
 ```sh
-$ git clone https://github.com/tommythorn/riscv-rust.git
-$ cd riscv-rust/wasm
+$ git clone https://github.com/tommythorn/simmerv.git
+$ cd simmerv/wasm
 $ bash build.sh
-# boot local server and access riscv-rust/wasm/web/index.html
+# boot local server and access simmerv/wasm/web/index.html
 ```

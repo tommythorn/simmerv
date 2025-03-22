@@ -7,7 +7,7 @@
   <body>
     <script type="module">
       import App from './App.js';
-      import init, { WasmRiscv } from "./riscv_emu_rust_wasm.js";
+      import init, { WasmRiscv } from "./simmerv_wasm.js";
 
       const resourcePath = '../../resources/';
       const COLUMNS = 80;
@@ -189,7 +189,7 @@
     <input id="debugger-checkbox" type="checkbox" disabled>Debugger</input>
     <div id="terminal"></div>
     <div>
-      <a href="https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html">Linux</a>, <a href="https://github.com/mit-pdos/xv6-riscv" target="_blank">xv6</a> on <a href="https://github.com/tommythorn/riscv-rust" target="_blank">RISC-V processor emulator in Rust+WASM</a>
+      <a href="https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html">Linux</a>, <a href="https://github.com/mit-pdos/xv6-riscv" target="_blank">xv6</a> on <a href="https://github.com/tommythorn/simmerv" target="_blank">RISC-V processor emulator in Rust+WASM</a>
     </div>
   </body>
 </html>

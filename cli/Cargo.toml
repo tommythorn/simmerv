@@ -1,5 +1,5 @@
 [package]
-name = "riscv_emu_rust_cli"
+name = "simmerv_cli"
 version = "0.1.0"
 authors = ["Takahiro", "Tommy Thorn <tommy-github2@thorn.ws>"]
 edition = "2021"
@@ -8,5 +8,5 @@ edition = "2021"
 libc = "0.2.155"
 termios = "0.3.3"
 getopts = "0.2"
-riscv_emu_rust = {path = "../"}
+simmerv = {path = "../"}
 env_logger = "0.11.7"

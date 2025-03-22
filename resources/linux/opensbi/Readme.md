@@ -1,4 +1,4 @@
-# How to build Linux + OpenSBI for riscv-rust
+# How to build Linux + OpenSBI for simmerv
 
 ## Prerequirement
 
@@ -77,8 +77,8 @@ $ sudo rmdir /mnt/rootfs
 
 ```sh
 $ cd riscv64-linux
-$ cp opensbi/build/platform/generic/firmware/fw_payload.elf path_to_riscv-rust/resources/linux/opensbi/
-$ cp rootfs/rootfs.img path_to_riscv-rust/resources/linux/
+$ cp opensbi/build/platform/generic/firmware/fw_payload.elf path_to_simmerv/resources/linux/opensbi/
+$ cp rootfs/rootfs.img path_to_simmerv/resources/linux/
 ```
 
 ## Appendix : Build QEMU

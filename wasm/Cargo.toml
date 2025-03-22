@@ -1,14 +1,14 @@
 [package]
 edition = "2021"
-name = "riscv_emu_rust_wasm"
+name = "simmerv_wasm"
 version = "0.1.0"
 authors = ["Takahiro"]
 
 [dependencies]
 wasm-bindgen = "*"
-riscv_emu_rust = {path = "../"}
+simmerv = {path = "../"}
 
 [lib]
-name = "riscv_emu_rust_wasm"
+name = "simmerv_wasm"
 path = "src/lib.rs"
 crate-type = ["cdylib"]

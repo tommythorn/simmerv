@@ -1,8 +1,8 @@
-# Riscv-rust
+# Simmerv
 
-Riscv-rust is a [RISC-V](https://riscv.org/) processor and peripheral
-devices emulator project written in Rust and compilable to
-WebAssembly.
+Simmerv is a virtual [RISC-V](https://riscv.org/) processor
+and peripheral devices emulator project written in Rust and
+compilable to WebAssembly.
 
 This is a substantially enhanced fork of [Takahiro's riscv-rust
 original emulator](https://github.com/takahirox/riscv-rust).  This
@@ -14,20 +14,16 @@ run benchmarks and off-the-shelf Linux distributions.
 ## Online Demo
 
 You can run Linux on the emulator in your browser. [Online demo is
-here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
+here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
 ## Screenshots
 
 ![animation](./screenshots/animation.gif)
 ![debugger](./screenshots/debugger.gif)
 
-## Documents
-
-* [Document](https://docs.rs/riscv_emu_rust/0.2.0/riscv_emu_rust/)
-
 ## Features
 
-- Emulate RISC-V RV64GC processor and peripheral devices (virtio block
+- Emulate RISC-V RV64GC_Zba_Zicond processor and peripheral devices (virtio block
   device and a UART)
 - Also runnable in browser with WebAssembly
 - Runnable locally
@@ -49,7 +45,7 @@ here](https://tommythorn.github.io/riscv-rust/wasm/web/index.html)
 
 The emulator supports all instructions listed above but some 
 
-- Boots Debian Trixie
+- Boots Buildroot and Debian Trixie
 - Linux OpenSBI and legacy BBL boot support
 
 ### Current Known Issues
@@ -60,63 +56,32 @@ The emulator supports all instructions listed above but some
 - U-boot loads but hangs before hand-off
 
 
-## How to import into your Rust project
-
-Add the following line into Cargo.toml of your Rust project.
-
-```
-[dependencies]
-riscv_rust = { git = "https://github.com/tommythorn/rust-rust" }
-```
-
-Refer to [Document](https://docs.rs/riscv_emu_rust/0.2.0/riscv_emu_rust/struct.Emulator.html) for the API.
-
-## How to build core library locally
+## How to run Linux
 
 ```sh
-$ git clone https://github.com/tommythorn/riscv-rust.git
-$ cd riscv-rust
-$ cargo build --release
-```
-
-## How to run Linux or xv6 as desktop application
-
-```sh
-$ cd riscv-rust/cli
-# Run Linux
-$ cargo run --release ../resources/linux/opensbi/fw_payload.elf -f ../resources/linux/rootfs.img
+$ cargo b -r --all
+$ target/release/simmerv_cli ../resources/linux/opensbi/fw_payload.elf -f ../resources/linux/rootfs.img
 ```
 
 ## How to run riscv-tests
 
-Prerequirements
-- Install [riscv-gnu-toolchain](https://github.com/riscv/riscv-gnu-toolchain)
-- Install [riscv-tests](https://github.com/riscv/riscv-tests)
-
 ```sh
-$ cd riscv-rust/cli
-$ cargo run $path_to_riscv_tets/isa/rv64ui-p-add -n
+$ ./run-riscv-tests.sh
 ```
 
 ## How to import and use WebAssembly RISC-V emulator in a web browser
 
-See [wasm/web](https://github.com/tommythorn/riscv-rust/tree/master/wasm/web)
+See [wasm/web](https://github.com/tommythorn/simmerv/tree/master/wasm/web)
 
 ## How to install and use WebAssembly RISC-V emulator npm package
 
-See [wasm/npm](https://github.com/tommythorn/riscv-rust/tree/master/wasm/npm)
+See [wasm/npm](https://github.com/tommythorn/simmerv/tree/master/wasm/npm)
 
 ## Links
 
 ### Linux RISC-V port
 
 [Running 64-bit RISC-V Linux on QEMU](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html)
-
-### xv6-riscv
-
-[xv6-riscv](https://github.com/mit-pdos/xv6-riscv) is the RISC-V port
-of [xv6](https://pdos.csail.mit.edu/6.828/2019/xv6.html) which is UNIX
-V6 rewritten by MIT for x86 in the current C language.
 
 ### Specifications
 

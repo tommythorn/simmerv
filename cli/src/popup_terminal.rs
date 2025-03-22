@@ -1,5 +1,5 @@
 use crate::nonblocknoecho::NonblockNoEcho;
-use riscv_emu_rust::terminal::Terminal;
+use simmerv::terminal::Terminal;
 use std::io::{self, Stdout, Write};
 
 /// Popup `Terminal` used for desktop program.

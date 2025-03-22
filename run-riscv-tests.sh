@@ -4,6 +4,6 @@ do echo
    echo "$class:"
    for x in riscv-tests/$class/*
    do printf "%-25s " `basename $x`
-      target/release/riscv_emu_rust_cli 2>&1 $x|tail -2|head -1
+      target/release/simmerv_cli 2>&1 $x|tail -2|head -1
    done
 done

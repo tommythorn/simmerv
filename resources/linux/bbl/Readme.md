@@ -1,4 +1,4 @@
-# How to build Linux + BBL for riscv-rust
+# How to build Linux + BBL for simmerv
 
 ## Prerequirement
 
@@ -12,7 +12,7 @@ $ mkdir riscv64-linux
 
 ## Build Linux kernel
 
-See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#build-linux-kernel
+See https://github.com/tommythorn/simmerv/tree/master/resources/linux/opensbi#build-linux-kernel
 
 ## Build BBL
 
@@ -29,23 +29,23 @@ $ make -j $(nproc)
 
 ## Build busybox
 
-See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#build-busybox
+See https://github.com/tommythorn/simmerv/tree/master/resources/linux/opensbi#build-busybox
 
 ## Make root file system image
 
-See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#make-root-file-system-image
+See https://github.com/tommythorn/simmerv/tree/master/resources/linux/opensbi#make-root-file-system-image
 
 ## Copy the files
 
 ```sh
 $ cd riscv64-linux
-$ cp riscv-pk/build/bbl path_to_riscv-rust/resources/linux/bbl/
-$ cp rootfs/rootfs.img path_to_riscv-rust/resources/linux/
+$ cp riscv-pk/build/bbl path_to_simmerv/resources/linux/bbl/
+$ cp rootfs/rootfs.img path_to_simmerv/resources/linux/
 ```
 
 ## Appendix : Build QEMU
 
-See https://github.com/tommythorn/riscv-rust/tree/master/resources/linux/opensbi#appendix--build-qemu
+See https://github.com/tommythorn/simmerv/tree/master/resources/linux/opensbi#appendix--build-qemu
 
 ```sh
 $ cd riscv64-linux

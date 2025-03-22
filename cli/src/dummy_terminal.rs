@@ -1,7 +1,7 @@
 use std::io::{stdout, Write};
 use std::str;
 
-use riscv_emu_rust::terminal::Terminal;
+use simmerv::terminal::Terminal;
 
 /// Dummy `Terminal`. Output will be displayed in command line
 /// and input will not be handled.

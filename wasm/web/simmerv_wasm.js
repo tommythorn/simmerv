@@ -346,7 +346,7 @@ export class WasmRiscv {
     /**
      * Enables or disables page cache optimization.
      * Page cache optimization is an experimental feature.
-     * Refer to [`Mmu`](../riscv_emu_rust/mmu/struct.Mmu.html) for the detail.
+     * Refer to [`Mmu`](../simmerv/mmu/struct.Mmu.html) for the detail.
      *
      * # Arguments
      * * `enabled`
@@ -487,7 +487,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (typeof module_or_path === 'undefined') {
-        module_or_path = new URL('riscv_emu_rust_wasm_bg.wasm', import.meta.url);
+        module_or_path = new URL('simmerv_wasm_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 
