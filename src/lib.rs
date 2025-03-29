@@ -102,21 +102,22 @@ impl Emulator {
             s.clear();
             let wbr = self.cpu.disassemble(&mut s);
             self.tick(1);
-            println!(
-                "{:5} {s:72} {:16x}",
-                self.cpu.cycle,
-                self.cpu.read_register(wbr as u8)
-            );
+            print!("{:5} {s:72}", self.cpu.cycle);
+            if wbr != 0 {
+                println!("{:16x}", self.cpu.read_register(wbr as u8));
+            } else {
+                println!();
+            }
             //let _ = io::stdout().flush();
 
             if self.tohost_addr != 0 {
                 // Riscv-tests terminates by writing the result * 2 + 1 to `tohost`
                 // Zero means pass, anything else encodes where it failed.
-                let endcode = self.cpu.get_mut_mmu().load_phys_u32(self.tohost_addr);
-                if endcode != 0 {
-                    match endcode {
+                let tohost = self.cpu.get_mut_mmu().load_phys_u32(self.tohost_addr);
+                if tohost != 0 {
+                    match tohost {
                         1 => println!("Test Passed\n"),
-                        _ => println!("Test Failed with {}\n", endcode / 2),
+                        _ => println!("Test Failed with {}  ({tohost:x})\n", tohost / 2),
                     }
                     break;
                 }
