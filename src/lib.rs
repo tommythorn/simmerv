@@ -73,8 +73,8 @@ impl Emulator {
     /// Runs program set by `setup_program()`. Calls `run_test()` if the program
     /// is [`riscv-tests`](https://github.com/riscv/riscv-tests).
     /// Otherwise calls `run_program()`.
-    pub fn run(&mut self) {
-        if self.is_test {
+    pub fn run(&mut self, trace: bool) {
+        if trace {
             self.run_test();
         } else {
             self.run_program();
@@ -85,6 +85,9 @@ impl Emulator {
     pub fn run_program(&mut self) {
         loop {
             self.tick(40);
+            if self.handle_htif() {
+                break;
+            }
         }
     }
 
@@ -112,60 +115,67 @@ impl Emulator {
             }
             //let _ = io::stdout().flush();
 
-            // The insanity: https://github.com/riscv-software-src/riscv-isa-sim/issues/364#issuecomment-607657754
-            if self.tohost_addr == 0 {
-                continue;
-            }
-            let tohost = self.cpu.get_mut_mmu().load_phys_u64(self.tohost_addr);
-            if tohost == 0 {
-                continue;
-            }
-
-            let device = tohost >> 56;
-            let command = (tohost >> 48) & 0xff;
-            let payload = tohost & 0xFFFF_FFFF_FFFF;
-            if payload % 2 == 1 {
-                // Riscv-tests terminates by writing the result * 2 + 1 to `tohost`
-                // Zero means pass, anything else encodes where it failed.
-                match payload / 2 {
-                    0 => println!("Test Passed"),
-                    exit_code => println!("Test Failed with {exit_code}"),
-                }
+            if self.handle_htif() {
                 break;
             }
-
-            if device == 0 {
-                // System call
-                //  magic_mem[0] = which;
-                //  magic_mem[1] = arg0;
-                //  magic_mem[2] = arg1;
-                //  magic_mem[3] = arg2;
-                let which = self.cpu.get_mut_mmu().load_phys_u64(payload);
-                let arg0 = self.cpu.get_mut_mmu().load_phys_u64(payload + 8);
-                let arg1 = self.cpu.get_mut_mmu().load_phys_u64(payload + 16);
-                let arg2 = self.cpu.get_mut_mmu().load_phys_u64(payload + 24);
-                match which {
-                    0x40 => {
-                        // write
-                        assert_eq!(arg0, 1);
-                        for i in 0..arg2 {
-                            print!("{}", self.cpu.get_mut_mmu().load_phys_u8(arg1 + i) as char);
-                        }
-                    }
-                    syscall => todo!("System call {syscall}"),
-                }
-            } else if device == 1 {
-                assert_eq!(command, 1); // Command 0 is read a char, not supported
-                print!("{}", command as u8 as char);
-            }
-
-            // Ack
-            let _ = self.cpu.get_mut_mmu().store_phys_u64(self.tohost_addr, 0);
-            let _ = self
-                .cpu
-                .get_mut_mmu()
-                .store_phys_u64(self.tohost_addr + 64, 1); // from_host
         }
+    }
+
+    fn handle_htif(&mut self) -> bool {
+        // The insanity: https://github.com/riscv-software-src/riscv-isa-sim/issues/364#issuecomment-607657754
+        if self.tohost_addr == 0 {
+            return false;
+        }
+        let tohost = self.cpu.get_mut_mmu().load_phys_u64(self.tohost_addr);
+        if tohost == 0 {
+            return false;
+        }
+
+        let device = tohost >> 56;
+        let command = (tohost >> 48) & 0xff;
+        let payload = tohost & 0xFFFF_FFFF_FFFF;
+        if payload % 2 == 1 {
+            // Riscv-tests terminates by writing the result * 2 + 1 to `tohost`
+            // Zero means pass, anything else encodes where it failed.
+            match payload / 2 {
+                0 => println!("Test Passed"),
+                exit_code => println!("Test Failed with {exit_code}"),
+            }
+            return true;
+        }
+
+        if device == 0 {
+            // System call
+            //  magic_mem[0] = which;
+            //  magic_mem[1] = arg0;
+            //  magic_mem[2] = arg1;
+            //  magic_mem[3] = arg2;
+            let which = self.cpu.get_mut_mmu().load_phys_u64(payload);
+            let arg0 = self.cpu.get_mut_mmu().load_phys_u64(payload + 8);
+            let arg1 = self.cpu.get_mut_mmu().load_phys_u64(payload + 16);
+            let arg2 = self.cpu.get_mut_mmu().load_phys_u64(payload + 24);
+            match which {
+                0x40 => {
+                    // write
+                    assert_eq!(arg0, 1);
+                    for i in 0..arg2 {
+                        print!("{}", self.cpu.get_mut_mmu().load_phys_u8(arg1 + i) as char);
+                    }
+                }
+                syscall => todo!("System call {syscall}"),
+            }
+        } else if device == 1 {
+            assert_eq!(command, 1); // Command 0 is read a char, not supported
+            print!("{}", command as u8 as char);
+        }
+
+        // Ack
+        let _ = self.cpu.get_mut_mmu().store_phys_u64(self.tohost_addr, 0);
+        let _ = self
+            .cpu
+            .get_mut_mmu()
+            .store_phys_u64(self.tohost_addr + 64, 1); // from_host
+        false
     }
 
     /// Runs CPU one cycle

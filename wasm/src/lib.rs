@@ -100,7 +100,7 @@ impl WasmRiscv {
     /// unless [`riscv-tests`](https://github.com/riscv/riscv-tests) programs.
     /// The emulator stops if program is `riscv-tests` program and it finishes.
     pub fn run(&mut self) {
-        self.emulator.run();
+        self.emulator.run(false);
     }
 
     /// Runs program set by `setup_program()` in `cycles` cycles.

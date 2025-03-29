@@ -39,6 +39,7 @@ fn main() -> std::io::Result<()> {
     opts.optopt("d", "dtb", "Device tree file", "linux/dtb");
     opts.optflag("n", "no_terminal", "No popup terminal");
     opts.optflag("h", "help", "Show this help menu");
+    opts.optflag("t", "trace", "Run with trace");
     opts.optflag(
         "p",
         "page_cache",
@@ -110,6 +111,6 @@ fn main() -> std::io::Result<()> {
     if matches.opt_present("p") {
         emulator.enable_page_cache(true);
     }
-    emulator.run();
+    emulator.run(matches.opt_present("t"));
     Ok(())
 }
