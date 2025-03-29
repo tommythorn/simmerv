@@ -485,13 +485,13 @@ impl Cpu {
         let csr = FromPrimitive::from_u16(csrno)?;
 
         if !csr::legal(csr) {
-            log::info!("** {:016x}: {csr:?} isn't implemented", self.insn_addr);
+            log::warn!("** {:016x}: {csr:?} isn't implemented", self.insn_addr);
             return None;
         }
 
         let privilege = (csrno >> 8) & 3;
         if privilege as u8 > get_privilege_encoding(self.privilege_mode) {
-            log::info!("** {:016x}: Lacking priviledge for {csr:?}", self.insn_addr);
+            log::warn!("** {:016x}: Lacking priviledge for {csr:?}", self.insn_addr);
             return None;
         }
 
