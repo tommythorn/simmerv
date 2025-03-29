@@ -1,7 +1,5 @@
 #![allow(clippy::unreadable_literal)]
 
-// @TODO: temporal
-const TEST_MEMORY_CAPACITY: usize = 1024 * 1024 * 256;
 const PROGRAM_MEMORY_CAPACITY: usize = 1024 * 1024 * 512; // big enough to run Linux and xv6
 
 pub mod cpu;
@@ -9,7 +7,6 @@ pub mod csr;
 mod dag_decoder;
 pub mod default_terminal;
 pub mod device;
-pub mod elf_analyzer;
 pub mod fp;
 pub mod memory;
 pub mod mmu;
@@ -18,9 +15,9 @@ pub mod rvc;
 pub mod terminal;
 
 use crate::cpu::Cpu;
-use crate::elf_analyzer::ElfAnalyzer;
 use crate::terminal::Terminal;
 use fnv::FnvHashMap;
+use xmas_elf;
 
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
@@ -41,11 +38,6 @@ pub struct Emulator {
     /// Stores mapping from symbol to virtual address
     symbol_map: FnvHashMap<String, u64>,
 
-    /// [`riscv-tests`](https://github.com/riscv/riscv-tests) program specific
-    /// properties. Whether the program set by `setup_program()` is
-    /// [`riscv-tests`](https://github.com/riscv/riscv-tests) program.
-    is_test: bool,
-
     /// [`riscv-tests`](https://github.com/riscv/riscv-tests) specific properties.
     /// The address where data will be sent to terminal
     tohost_addr: u64,
@@ -65,7 +57,6 @@ impl Emulator {
             symbol_map: FnvHashMap::default(),
 
             // These can be updated in setup_program()
-            is_test: false,
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists
         }
     }
@@ -194,79 +185,70 @@ impl Emulator {
     /// * `data` Program binary
     /// # Panics
     /// Will panic if given a non-Elf file
-    // @TODO: Make ElfAnalyzer and move the core logic there.
-    // @TODO: Returns `Err` if the passed contend doesn't seem ELF file
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    pub fn setup_program(&mut self, data: Vec<u8>) {
-        let analyzer = ElfAnalyzer::new(data);
+    pub fn setup_program(&mut self, buf: Vec<u8>) {
+        self.cpu.get_mut_mmu().init_memory(PROGRAM_MEMORY_CAPACITY);
 
-        assert!(analyzer.validate(), "This file does not seem ELF file");
+        let elf_file = xmas_elf::ElfFile::new(&buf).unwrap();
 
-        let header = analyzer.read_header();
-        //let program_headers = analyzer._read_program_headers(&header);
-        let section_headers = analyzer.read_section_headers(&header);
-
-        let mut program_data_section_headers = vec![];
-        let mut symbol_table_section_headers = vec![];
-        let mut string_table_section_headers = vec![];
-
-        for sh in &section_headers {
-            match sh.sh_type {
-                1 => program_data_section_headers.push(sh),
-                2 => symbol_table_section_headers.push(sh),
-                3 => string_table_section_headers.push(sh),
-                _ => {}
-            }
-        }
-
-        // Find program data section named .tohost to detect if the elf file is riscv-tests
-        self.tohost_addr = analyzer
-            .find_tohost_addr(&program_data_section_headers, &string_table_section_headers)
-            .unwrap_or(0);
-
-        // Creates symbol - virtual address mapping
-        if !string_table_section_headers.is_empty() {
-            let entries = analyzer.read_symbol_entries(&header, &symbol_table_section_headers);
-            // Assuming symbols are in the first string table section.
-            // @TODO: What if symbol can be in the second or later string table sections?
-            let map = analyzer.create_symbol_map(&entries, string_table_section_headers[0]);
-            for (key, value) in map {
-                self.symbol_map.insert(key, value);
-            }
-        }
-
-        // Detected whether the elf file is riscv-tests.
-        // Setting up CPU and Memory depending on it.
-        if self.tohost_addr != 0 {
-            self.is_test = true;
-            self.cpu.get_mut_mmu().init_memory(TEST_MEMORY_CAPACITY);
+        xmas_elf::header::sanity_check(&elf_file).unwrap();
+        log::info!("ELF {:?}", elf_file.header.pt2.type_());
+        let relocation_offset = if matches!(
+            elf_file.header.pt2.type_().as_type(),
+            xmas_elf::header::Type::SharedObject
+        ) {
+            log::info!("Relocating it");
+            0x80000000
         } else {
-            self.is_test = false;
-            self.cpu.get_mut_mmu().init_memory(PROGRAM_MEMORY_CAPACITY);
-        }
+            0
+        };
 
-        for sh in program_data_section_headers {
-            let sh_addr = sh.sh_addr;
-            let sh_offset = sh.sh_offset as usize;
-            let sh_size = sh.sh_size as usize;
-            if sh_addr >= 0x80000000 && sh_offset > 0 && sh_size > 0 {
-                for j in 0..sh_size {
-                    if self
-                        .cpu
-                        .get_mut_mmu()
-                        .store_phys_u8(sh_addr + j as u64, analyzer.read_byte(sh_offset + j))
-                        .is_err()
-                    {
-                        panic!(
-                            "Program doesn't fit in memory: 0x{:016x}",
-                            sh_addr + j as u64
-                        );
+        let ph_iter = elf_file.program_iter();
+        log::info!("ELF program headers");
+        for sect in ph_iter {
+            if !matches!(
+                sect.get_type(),
+                Ok(xmas_elf::program::Type::Load)
+            ) {
+                log::trace!("Skipping {sect}");
+                continue;
+            }
+
+            log::trace!("setup_program: loading {sect}");
+            //xmas_elf::program::sanity_check(sect, &elf_file).unwrap();
+            let addr = sect.physical_addr() + relocation_offset;
+            let size = sect.mem_size();
+            match sect.get_data(&elf_file).unwrap() {
+                xmas_elf::program::SegmentData::Undefined(data) => {
+                    log::info!(
+                        "ELF program data section [{addr:x}, {:x}) (size {size} vs {})",
+                        addr + size,
+                        data.len()
+                    );
+
+                    // XXX such an insane stupid way to do this
+                    let mmu = self.cpu.get_mut_mmu();
+                    for (j, b) in data.iter().enumerate() {
+                        if mmu.store_phys_u8(addr + j as u64, *b).is_err() {
+                            panic!("Program doesn't fit in memory: 0x{:016x}", addr + j as u64);
+                        }
                     }
                 }
+                xmas_elf::program::SegmentData::Dynamic64(_) => {
+                    todo!("In over my head here");
+                }
+                _ => {
+                    // XXX error handling
+                    panic!(
+                        "didn't find my data, got {:?}",
+                        sect.get_data(&elf_file).unwrap()
+                    );
+                }
             }
-        }
 
-        self.cpu.update_pc(/*header.e_entry as i64*/ 0x8000_0000);
+            self.cpu
+                .update_pc((elf_file.header.pt2.entry_point() + relocation_offset) as i64);
+        }
     }
 
     /// Loads symbols of program and adds them to `symbol_map`.
@@ -275,37 +257,40 @@ impl Emulator {
     /// * `content` Program binary
     /// # Panics
     /// Panics on non-Elf files
-    pub fn load_program_for_symbols(&mut self, content: Vec<u8>) {
-        let analyzer = ElfAnalyzer::new(content);
+    pub fn load_program_for_symbols(&mut self, _content: Vec<u8>) {
+        panic!();
+        /*
+            let analyzer = xmas_elf::ElfAnalyzer::new(content);
 
-        assert!(analyzer.validate(), "This file does not seem ELF file");
+            assert!(analyzer.validate(), "This file does not seem ELF file");
 
-        let header = analyzer.read_header();
-        let section_headers = analyzer.read_section_headers(&header);
+            let header = analyzer.read_header();
+            let section_headers = analyzer.read_section_headers(&header);
 
-        //let mut program_data_section_headers = vec![];
-        let mut symbol_table_section_headers = vec![];
-        let mut string_table_section_headers = vec![];
+            //let mut program_data_section_headers = vec![];
+            let mut symbol_table_section_headers = vec![];
+            let mut string_table_section_headers = vec![];
 
-        for sh in &section_headers {
-            match sh.sh_type {
-                //1 => program_data_section_headers.push(sh),
-                2 => symbol_table_section_headers.push(sh),
-                3 => string_table_section_headers.push(sh),
-                _ => {}
+            for sh in &section_headers {
+                match sh.sh_type {
+                    //1 => program_data_section_headers.push(sh),
+                    2 => symbol_table_section_headers.push(sh),
+                    3 => string_table_section_headers.push(sh),
+                    _ => {}
+                }
             }
-        }
 
-        // Creates symbol - virtual address mapping
-        if !string_table_section_headers.is_empty() {
-            let entries = analyzer.read_symbol_entries(&header, &symbol_table_section_headers);
-            // Assuming symbols are in the first string table section.
-            // @TODO: What if symbol can be in the second or later string table sections?
-            let map = analyzer.create_symbol_map(&entries, string_table_section_headers[0]);
-            for (key, value) in map {
-                self.symbol_map.insert(key, value);
-            }
+            // Creates symbol - virtual address mapping
+            if !string_table_section_headers.is_empty() {
+                let entries = analyzer.read_symbol_entries(&header, &symbol_table_section_headers);
+                // Assuming symbols are in the first string table section.
+                // @TODO: What if symbol can be in the second or later string table sections?
+                let map = analyzer.create_symbol_map(&entries, string_table_section_headers[0]);
+                for (key, value) in map {
+                    self.symbol_map.insert(key, value);
+                }
         }
+            */
     }
 
     /// Sets up filesystem. Use this method if program (e.g. Linux) uses

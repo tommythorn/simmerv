@@ -251,6 +251,13 @@ impl Cpu {
     fn handle_exception(&mut self, exc: &Exception) {
         // XXX If we pass in the address we don't need
         // self.pc, but that requires us to call handle exception from a centrol location with access to the pc.
+        if matches!(exc.trap, Trap::IllegalInstruction) {
+            log::info!(
+                "Illegal instruction {:016x} {:x}",
+                self.insn_addr,
+                self.insn
+            );
+        }
         self.handle_trap(exc, self.insn_addr, false);
     }
 
@@ -520,6 +527,14 @@ impl Cpu {
                 let mode = (value >> SATP_MODE_SHIFT) & SATP_MODE_MASK;
                 if mode != 0 && mode != SatpMode::Sv39 as u64 && mode != SatpMode::Sv48 as u64 {
                     log::warn!("Illegal SATP mode {mode:02x}");
+                    return illegal;
+                }
+
+                if !matches!(
+                    FromPrimitive::from_u64((value >> SATP_MODE_SHIFT) & SATP_MODE_MASK),
+                    Some(SatpMode::Bare | SatpMode::Sv39 | SatpMode::Sv48 | SatpMode::Sv57) // XXX grr why?
+                ) {
+                    log::warn!("wrote illegal value {value:x} to satp");
                     return illegal;
                 }
             }
@@ -1717,7 +1732,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
             if word == 0x0100000f {
                 // Nothing to do here, but it would be interesting to see
                 // it used.
-                todo!("pause");
+                log::trace!("pause isn't yet implemented");
             }
             // Fence memory ops (we are currently TSO already)
             Ok(())

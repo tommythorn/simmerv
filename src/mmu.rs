@@ -103,8 +103,8 @@ impl Mmu {
     /// # Arguments
     /// * `capacity`
     pub fn init_memory(&mut self, capacity: usize) {
-	use std::fs::File;
-	use std::io::Read;
+        use std::fs::File;
+        use std::io::Read;
 
         self.memory.init(capacity);
 
