@@ -1,5 +1,5 @@
-use simmerv::default_terminal::DefaultTerminal;
 use simmerv::Emulator;
+use simmerv::default_terminal::DefaultTerminal;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 

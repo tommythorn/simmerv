@@ -1,8 +1,11 @@
 [package]
-edition = "2021"
+edition = "2024"
 name = "simmerv_wasm"
 version = "0.1.0"
-authors = ["Takahiro"]
+authors = ["Takahiro", "Tommy Thorn <tommy-github2@thorn.ws>"]
+description = "RISC-V emulator written in Rust"
+license = "MIT"
+repository = "http://github.com/tommythorn/simmerv"
 
 [dependencies]
 wasm-bindgen = "*"
