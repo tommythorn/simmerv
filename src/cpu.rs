@@ -614,7 +614,7 @@ impl Cpu {
             Csr::Sip => self.mmu.mip & self.csr[Csr::Mideleg as usize],
             Csr::Mip => self.mmu.mip,
             Csr::Time => self.mmu.get_clint().read_mtime(),
-            Csr::Cycle | Csr::Mcycle => self.cycle,
+            Csr::Cycle | Csr::Mcycle | Csr::Minstret => self.cycle,
             _ => self.csr[csr as usize],
         }
     }

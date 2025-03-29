@@ -40,6 +40,7 @@ pub enum Csr {
     Pmpcfg0 = 0x3a0,
     Pmpaddr0 = 0x3b0,
     Mcycle = 0xb00,
+    Minstret = 0xb02,
     Cycle = 0xc00,
     Time = 0xc01,
     Instret = 0xc02,
@@ -143,6 +144,7 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Marchid
             | Csr::Mcause
             | Csr::Mcycle
+            | Csr::Minstret
             | Csr::Medeleg
             | Csr::Mepc
             | Csr::Mhartid
