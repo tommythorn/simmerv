@@ -312,8 +312,10 @@ impl Mmu {
     /// * `width` Must be 1, 2, 4, or 8
     /// # Errors
     /// Exceptions are returned as errors
+    /// # Panics
+    /// width must be 1, 2, 4, or 8
     #[allow(clippy::cast_possible_truncation)]
-    fn store_virt_bytes(&mut self, va: u64, value: u64, width: u64) -> Result<(), Trap> {
+    pub fn store_virt_bytes(&mut self, va: u64, value: u64, width: u64) -> Result<(), Trap> {
         debug_assert!(
             width == 1 || width == 2 || width == 4 || width == 8,
             "Width must be 1, 2, 4, or 8. {width:X}"
@@ -401,7 +403,7 @@ impl Mmu {
     /// # Panics
     /// Can panic ...
     #[allow(clippy::cast_possible_truncation, clippy::unwrap_used)]
-    fn load_phys_u8(&mut self, pa: u64) -> u8 {
+    pub fn load_phys_u8(&mut self, pa: u64) -> u8 {
         // @TODO: Mapping should be configurable with dtb
         if pa >= DRAM_BASE {
             self.memory.read_u8(pa)
@@ -467,7 +469,7 @@ impl Mmu {
     ///
     /// # Arguments
     /// * `pa` Physical address
-    fn load_phys_u64(&mut self, pa: u64) -> u64 {
+    pub fn load_phys_u64(&mut self, pa: u64) -> u64 {
         if pa >= DRAM_BASE && pa.wrapping_add(7) > pa {
             self.memory.read_u64(pa)
         } else {
@@ -528,7 +530,8 @@ impl Mmu {
     /// It can panic which is bad and which is why it's going away soon
     /// # Errors
     /// If any part of the access is outside of memory, a unit error is returned
-    fn store_phys_u16(&mut self, pa: u64, value: u16) -> Result<(), ()> {
+    #[allow(clippy::result_unit_err)]
+    pub fn store_phys_u16(&mut self, pa: u64, value: u16) -> Result<(), ()> {
         if pa >= DRAM_BASE {
             self.memory.write_u16(pa, value)
         } else {
@@ -547,7 +550,8 @@ impl Mmu {
     /// * `value` data written
     /// # Errors
     /// If any part of the access is outside of memory, a unit error is returned
-    fn store_phys_u32(&mut self, pa: u64, value: u32) -> Result<(), ()> {
+    #[allow(clippy::result_unit_err)]
+    pub fn store_phys_u32(&mut self, pa: u64, value: u32) -> Result<(), ()> {
         if pa >= DRAM_BASE {
             self.memory.write_u32(pa, value)
         } else {
@@ -566,7 +570,8 @@ impl Mmu {
     /// * `value` data written
     /// # Errors
     /// If any part of the access is outside of memory, a unit error is returned
-    fn store_phys_u64(&mut self, pa: u64, value: u64) -> Result<(), ()> {
+    #[allow(clippy::result_unit_err)]
+    pub fn store_phys_u64(&mut self, pa: u64, value: u64) -> Result<(), ()> {
         if pa >= DRAM_BASE {
             self.memory.write_u64(pa, value)
         } else {
