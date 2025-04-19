@@ -1,0 +1,1 @@
+qemu-system-riscv64 -machine virt -cpu rv64 -m 512M -kernel empty.bin -bios linux/fw_payload.elf -device virtio-blk-device,drive=hd -drive file=../../debian-riscv64/image.img,if=none,id=hd,format=raw -nographic --append "root=/dev/vda1 console=ttyS0"
