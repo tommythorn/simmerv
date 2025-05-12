@@ -99,7 +99,15 @@ impl VirtioBlockDisk {
     /// # Arguments
     /// * `contents` filesystem content binary
     #[allow(clippy::cast_lossless)]
-    pub fn init(&mut self, contents: Vec<u8>) { self.contents = contents; }
+    pub fn init(&mut self, contents: Vec<u8>) {
+        if contents.len() % SECTOR_SIZE != 0 {
+            log::warn!(
+                "Contents isn't a multiple of {SECTOR_SIZE}; {}B in last block",
+                contents.len() % SECTOR_SIZE
+            );
+        }
+        self.contents = contents;
+    }
 
     /// Runs one cycle. Data transfer between main memory and block device
     /// can happen depending on condition.
@@ -333,14 +341,7 @@ impl VirtioBlockDisk {
                 self.queue_notify = (self.queue_notify & !(0xff << 24)) | ((value as u32) << 24);
                 self.notify_cycles.push(self.cycle);
             }
-            0x10001064 => {
-                // interrupt ack
-                if value & 1 == 1 {
-                    self.interrupt_status &= !1;
-                } else {
-                    panic!("Unknown ack {value:X}");
-                }
-            }
+            0x10001064 => self.interrupt_status &= !(value as u32), // interrupt ack
             0x10001070 => {
                 self.status = (self.status & !0xff) | (value as u32);
             }
