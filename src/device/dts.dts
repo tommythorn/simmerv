@@ -7,7 +7,9 @@
         model = "riscv-virtio,qemu";
 
         chosen {
-                bootargs = "root=/dev/vda rw ttyS0";
+                linux,initrd-start = <0 0x86000000>;
+                linux,initrd-end   = <0 0x8cb6cc00>;
+                bootargs = "root=/dev/raw rw ttyS0";
                 stdout-path = "/uart@10000000";
         };
 
