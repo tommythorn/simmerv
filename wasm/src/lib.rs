@@ -68,7 +68,11 @@ impl WasmRiscv {
     /// * `content` Program binary
     pub fn setup_program(&mut self, content: Vec<u8>) {
         self.emulator
-            .setup_program(&content, 0x80000000, &mut std::collections::BTreeMap::new())
+            .load_image(
+                &content,
+                Some(0x80000000),
+                &mut std::collections::BTreeMap::new(),
+            )
             .unwrap();
     }
 

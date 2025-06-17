@@ -34,10 +34,10 @@ use xmas_elf::symbol_table::Entry;
 /// emulator.run();
 /// ```
 pub struct Emulator {
-    cpu: Cpu,
+    pub cpu: Cpu,
 
     /// Stores mapping from symbol to virtual address
-    symbol_map: FnvHashMap<String, u64>,
+    pub symbol_map: FnvHashMap<String, u64>,
 
     /// [`riscv-tests`](https://github.com/riscv/riscv-tests) specific properties.
     /// The address where data will be sent to terminal
@@ -187,29 +187,27 @@ impl Emulator {
     /// # Arguments
     /// * `data` Program binary
     /// # Panics
-    /// Will panic if given a non-Elf file
+    /// When Existential Angst Hits
     /// # Errors
     /// Elf loading issues are reported as errors
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     #[allow(clippy::verbose_bit_mask)]
-    pub fn setup_program(
+    pub fn load_image(
         &mut self,
         buf: &[u8],
-        load_addr: u64,
+        load_addr: Option<u64>,
         symbols: &mut BTreeMap<String, u64>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<i64, &'static str> {
         let elf_file = xmas_elf::ElfFile::new(buf)?;
 
         xmas_elf::header::sanity_check(&elf_file)?;
         log::info!("ELF {:?}", elf_file.header.pt2.type_());
-        let relocation_offset = if matches!(
-            elf_file.header.pt2.type_().as_type(),
-            xmas_elf::header::Type::SharedObject
-        ) {
-            log::info!("Relocating it to {load_addr:#x}");
-            load_addr
-        } else {
-            0
+        let relocation_offset = match (elf_file.header.pt2.type_().as_type(), load_addr) {
+            (xmas_elf::header::Type::SharedObject, Some(load_addr)) => {
+                log::info!("Relocating it to {load_addr:#x}");
+                load_addr
+            }
+            _ => 0,
         };
         let ph_iter = elf_file.program_iter();
         log::info!("ELF program headers");
@@ -239,9 +237,6 @@ impl Emulator {
                     addr + j as u64
                 );
             }
-
-            self.cpu
-                .update_pc((elf_file.header.pt2.entry_point() + relocation_offset) as i64);
         }
 
         for sect in elf_file.section_iter().skip(1) {
@@ -255,7 +250,7 @@ impl Emulator {
             }
         }
 
-        Ok(())
+        Ok((elf_file.header.pt2.entry_point() + relocation_offset) as i64)
     }
 
     /// Sets up filesystem. Use this method if program (e.g. Linux) uses

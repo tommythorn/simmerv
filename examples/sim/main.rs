@@ -5,21 +5,46 @@ mod popup_terminal;
 use crate::dummy_terminal::DummyTerminal;
 use crate::popup_terminal::PopupTerminal;
 use anyhow::anyhow;
-use getopts::Options;
+use anyhow::bail;
+use argh::FromArgs;
 use simmerv::Emulator;
 use simmerv::terminal::Terminal;
-use std::env;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
+
+#[derive(FromArgs)]
+/// Simulate a RISC-V RV64GC SoC
+struct Args {
+    /// file system image files
+    #[argh(option, short = 'f')]
+    fs: Vec<String>,
+
+    /// device Tree Binary
+    #[argh(option, short = 'd')]
+    dtb: Option<String>,
+
+    /// no popup terminal
+    #[argh(switch, short = 'n')]
+    no_terminal: bool,
+
+    /// run with tracing
+    #[argh(switch, short = 't')]
+    tracing: bool,
+
+    /// enable experimental page cache optimization
+    #[argh(switch, short = 'p')]
+    page_cache: bool,
+
+    /// memory images, with optional comma separated options,
+    /// such as '0x8200000'
+    #[argh(positional)]
+    images: Vec<String>,
+}
 
 enum TerminalType {
     PopupTerminal,
     DummyTerminal,
-}
-
-fn print_usage(program: &str, opts: &Options) {
-    let usage = format!("Usage: {program} program_file [options]");
-    print!("{}", opts.usage(&usage));
 }
 
 fn get_terminal(terminal_type: &TerminalType) -> Box<dyn Terminal> {
@@ -32,91 +57,67 @@ fn get_terminal(terminal_type: &TerminalType) -> Box<dyn Terminal> {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let args: Vec<String> = env::args().collect();
-    let program = args[0].clone();
-
-    let mut opts = Options::new();
-    opts.optopt("f", "fs", "File system image file", "xv6/fs.img");
-    opts.optopt("d", "dtb", "Device tree file", "linux/dtb");
-    opts.optflag("n", "no_terminal", "No popup terminal");
-    opts.optflag("h", "help", "Show this help menu");
-    opts.optflag("t", "trace", "Run with trace");
-    opts.optflag(
-        "p",
-        "page_cache",
-        "Enable experimental page cache optimization",
-    );
-
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => {
-            println!("{f}");
-            print_usage(&program, &opts);
-            // @TODO: throw error?
-            return Ok(());
-        }
-    };
-
-    if matches.opt_present("h") {
-        print_usage(&program, &opts);
-        return Ok(());
-    }
-
-    if args.len() < 2 {
-        print_usage(&program, &opts);
-        // @TODO: throw error?
-        return Ok(());
-    }
-
-    let fs_contents = match matches.opt_str("f") {
-        Some(path) => {
-            let mut file = File::open(path)?;
-            let mut contents = vec![];
-            file.read_to_end(&mut contents)?;
-            contents
-        }
-        None => vec![],
-    };
-
-    let mut has_dtb = false;
-    let dtb_contents = match matches.opt_str("d") {
-        Some(path) => {
-            has_dtb = true;
-            let mut file = File::open(path)?;
-            let mut contents = vec![];
-            file.read_to_end(&mut contents)?;
-            contents
-        }
-        None => vec![],
-    };
-
-    let elf_filename = args[1].clone();
-    let mut elf_file = File::open(elf_filename)?;
-    let mut elf_contents = vec![];
-    elf_file.read_to_end(&mut elf_contents)?;
-
-    let terminal_type = if matches.opt_present("n") {
+    let args: Args = argh::from_env();
+    let terminal_type = if args.no_terminal {
         TerminalType::DummyTerminal
     } else {
         TerminalType::PopupTerminal
     };
-
-    let mut symbols = std::collections::BTreeMap::new();
+    let mut symbols = BTreeMap::new();
     let mut emulator = Emulator::new(get_terminal(&terminal_type), 512 * 1024 * 1024);
-    emulator
-        .setup_program(&elf_contents, 0x80000000, &mut symbols)
-        .map_err(|e| anyhow!(e))?;
-    if let Some(addr) = symbols.get("tohost") {
-        emulator.tohost_addr = *addr;
+    let mut img_contents = vec![];
+    let mut load_addr = Some(0x8000_0000);
+    let mut emu_start = None;
+
+    for img_path in args.images {
+        img_contents.clear();
+        let mut parts_iter = img_path.split(',');
+
+        let mut img_file = File::open(parts_iter.next().unwrap())?;
+        img_file.read_to_end(&mut img_contents)?;
+
+        for part in parts_iter {
+            if &part[..2] == "0x" {
+                load_addr = Some(u64::from_str_radix(&part[2..], 16)?);
+            } else {
+                bail!("Unsupported file option {part}");
+            }
+        }
+
+        let entry = emulator
+            .load_image(&img_contents, load_addr, &mut symbols)
+            .map_err(|e| anyhow!(e))?;
+
+        if emu_start.is_none() {
+            emu_start = Some(entry);
+        }
+
+        if let Some(addr) = symbols.get("tohost") {
+            emulator.tohost_addr = *addr;
+        }
+
+        load_addr = None;
     }
 
-    emulator.setup_filesystem(fs_contents);
-    if has_dtb {
-        emulator.setup_dtb(&dtb_contents);
+    if let Some(path) = args.dtb {
+        let mut file = File::open(path)?;
+        let mut contents = vec![];
+        file.read_to_end(&mut contents)?;
+        emulator.setup_dtb(&contents);
     }
-    if matches.opt_present("p") {
-        emulator.enable_page_cache(true);
+
+    for path in args.fs {
+        let mut file = File::open(path)?;
+        let mut contents = vec![];
+        file.read_to_end(&mut contents)?;
+        emulator.setup_filesystem(contents);
     }
-    emulator.run(matches.opt_present("t"));
+
+    emulator.enable_page_cache(args.page_cache);
+
+    emulator.cpu.update_pc(emu_start.unwrap());
+
+    emulator.run(args.tracing);
+
     Ok(())
 }
