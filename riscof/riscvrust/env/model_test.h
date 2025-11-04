@@ -17,15 +17,26 @@
 #define RVMODEL_BOOT
 
 //RV_COMPLIANCE_DATA_BEGIN
+// The signature region is placed in a specific section, '.signature'.
+// The linker script for this target MUST place this section at the
+// device-specific signature address (0x70000000). This ensures
+// that the 'begin_signature' symbol resolves to the correct runtime
+// address for the test, and also allows the RISCOF framework to
+// extract the reference signature from the correct location in the ELF.
 #define RVMODEL_DATA_BEGIN                                              \
-  RVMODEL_DATA_SECTION                                                        \
-  .align 4;\
+  RVMODEL_DATA_SECTION                                                  \
+  .pushsection .signature,"aw",@progbits;                               \
+  .align 4;                                                             \
   .global begin_signature; begin_signature:
 
 //RV_COMPLIANCE_DATA_END
-#define RVMODEL_DATA_END                                                      \
-  .align 4;\
-  .global end_signature; end_signature:
+// The 'end_signature' symbol marks the end of the reference signature
+// data. The size of the signature region is determined by the linker based
+// on the position of this label.
+#define RVMODEL_DATA_END                                                \
+  .align 4;                                                             \
+  .global end_signature; end_signature:                                 \
+  .popsection
 
 //RVTEST_IO_INIT
 #define RVMODEL_IO_INIT
