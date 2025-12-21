@@ -1994,7 +1994,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
         name: "SRLIW",
         operation: |cpu, _address, word| {
             let f = parse_format_r(word);
-            let mask = 0x3f;
+            let mask = 0x1f;
             let shamt = (word >> 20) & mask;
             let s1 = cpu.read_x(f.rs1);
             cpu.write_x(f.rd, i64::from(((s1 as u32) >> shamt) as i32));
