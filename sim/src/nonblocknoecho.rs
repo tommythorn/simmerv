@@ -1,11 +1,13 @@
+use std::collections::VecDeque;
+use std::io;
 use std::io::Read;
 use std::io::Stdin;
-use std::io::{self};
 
 pub struct NonblockNoEcho {
     stdin: i32,
     orig_termios: termios::Termios,
     reader: Stdin,
+    secondaries: VecDeque<u8>,
 }
 
 impl NonblockNoEcho {
@@ -56,15 +58,43 @@ impl NonblockNoEcho {
             stdin,
             orig_termios,
             reader: io::stdin(),
+            secondaries: VecDeque::new(),
         }
     }
 
     pub fn get_key(&mut self) -> Option<u8> {
         let mut buffer = [0; 1]; // read exactly one byte
-        self.reader.read(&mut buffer).map_or(None, |n| {
+        let got = self.reader.read(&mut buffer).map_or(None, |n| {
             assert!(n == 1);
             Some(buffer[0])
-        })
+        })?;
+
+        if got == 3 {
+            eprintln!("[[x - eXit, t - tracing ON, p - panic, else, pass on to guest]]");
+            // XXX Should turn on blocking
+            loop {
+                let Some(snd) = self.reader.read(&mut buffer).map_or(None, |n| {
+                    assert!(n == 1);
+                    Some(buffer[0])
+                }) else {
+                    continue;
+                };
+
+                // XXX sleep
+                match snd as char {
+                    'p' => panic!("Well, you asked for it!"),
+                    't' => eprintln!("Visualize tracing turned on"),
+                    'x' => {
+                        self.secondaries.push_back(snd);
+                        todo!("Graceful exits");
+                    }
+                    _ => return Some(snd),
+                }
+                return None;
+            }
+        } else {
+            Some(buffer[0])
+        }
     }
 }
 
