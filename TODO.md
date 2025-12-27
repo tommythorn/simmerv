@@ -2,6 +2,8 @@
 
 ## Correctness
 
+- Fix boot with the newest kernels (it hangs, unknown why)
+
 - CSR handling is still a bit suspect
   The access checks looks broken and we shouldn't have a CSR array but instead
   individually implement CSR registers we support and trap access to everything else.
@@ -13,11 +15,14 @@
   Might punt on debug and svnapot)
 
 - Pass all of riscof
-- Fix Ubuntu boot (still unclear why it segfaults)
+
+- Fix Ubuntu boot (still unclear why it segfaults -- suspect kernel too old)
 - Fix U-boot boot (still unclear why it crashes)
 - Fix Geekbench/rustc/gdb (still unclear why it segfaults crashes)
 
 ## Performance
+
+- Expand the uop cache to bb or trace cache
 
 - Sleep while waiting for input rather than burn cycles (this
   has proven slightly more tricky).  Especially important for WASM
@@ -37,22 +42,18 @@
 
 - Sign extension in parse_format... is insane
 - cpu, work, address -> (address, work), cpu
-- lowercase instruction names
 - provide a proper disassembler
 - Peripherals should be optimized for i64 access?  If so, how do they
   behave on smaller accesses?  Side effects?
 - handle_interrupt to use clz to optimize the lookup
 
-- Finally, the whole point of this: uop/bb/trace cache
-
-
 ## Code Simplicify
 
-- Distributing the calls to `handle_exception` was a mistake.  Whatever
-  trivial perf benefit there might have been, there's tremendous simplicity
-  in always returning the exception and letting the top-level fetch-decode- execute function (`run_cpu_tick()`) handle it.  For one it eliminates the need
-  for the gross insn_addr/insn pair (or whether it's currently called).
-
+- Distributing the calls to `handle_exception` was a mistake.
+  Whatever trivial perf benefit there might have been, there's
+  tremendous simplicity in always returning the exception and letting
+  the top-level fetch-decode- execute function (`run_cpu_tick()`)
+  handle it.
 
 - ONGOING: keep all values i64; it's the natural type for the
   registers and keeping all 64-bit values i64 means less casting
@@ -65,8 +66,8 @@
 - Checkpoint save & restore
 - Implement the B set (Zba and Zicond done)
 - Implement Svnapot support
+- RVA23
 - Maybe: implement the Bytedance 64K page proposal?
-- Snitch extensions
 
 ## Misc
 

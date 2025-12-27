@@ -17,7 +17,7 @@ use std::io::Read;
 #[derive(FromArgs)]
 #[allow(clippy::doc_markdown)]
 #[allow(clippy::struct_excessive_bools)]
-/// Simulate a RISC-V RV64GC SoC
+/// Simulate a RISC-V RV64GC System on Chip
 struct Args {
     /// file system image files
     #[argh(option, short = 'f')]

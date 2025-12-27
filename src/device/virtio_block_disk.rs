@@ -99,7 +99,15 @@ impl VirtioBlockDisk {
     /// # Arguments
     /// * `contents` filesystem content binary
     #[allow(clippy::cast_lossless)]
-    pub fn init(&mut self, contents: Vec<u8>) { self.contents = contents; }
+    pub fn init(&mut self, contents: Vec<u8>) {
+        if !contents.len().is_multiple_of(SECTOR_SIZE) {
+            log::warn!(
+                "Contents isn't a multiple of {SECTOR_SIZE}; {}B in last block",
+                contents.len() % SECTOR_SIZE
+            );
+        }
+        self.contents = contents;
+    }
 
     /// Runs one cycle. Data transfer between main memory and block device
     /// can happen depending on condition.

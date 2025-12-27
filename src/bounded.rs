@@ -9,7 +9,7 @@ impl<const N: usize> Bounded<N> {
     /// Panics if out-of-bounds
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
-    pub fn new(n: u32) -> Self {
+    pub const fn new(n: u32) -> Self {
         assert!(N <= 255);
         assert!(n < N as u32, "attempt create an illegal bounded value");
         Self(n as u8)

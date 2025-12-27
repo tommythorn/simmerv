@@ -156,7 +156,7 @@ impl WasmRiscv {
     pub fn disassemble(&mut self) {
         let cpu = self.emulator.get_mut_cpu();
         let mut s = String::new();
-        let _wbr = cpu.disassemble(&mut s);
+        cpu.disassemble(&mut s);
         let bytes = s.as_bytes();
         for &b in bytes {
             self.emulator.get_mut_terminal().put_byte(b);

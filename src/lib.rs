@@ -18,6 +18,7 @@ use crate::terminal::Terminal;
 use anyhow::anyhow;
 use anyhow::bail;
 use fnv::FnvHashMap;
+use intmap::IntMap;
 use std::collections::BTreeMap;
 use xmas_elf::sections::SectionData;
 use xmas_elf::symbol_table::Entry;
@@ -41,7 +42,8 @@ pub struct Emulator {
     /// Stores mapping from symbol to virtual address
     pub symbol_map: FnvHashMap<String, u64>,
 
-    /// [`riscv-tests`](https://github.com/riscv/riscv-tests) specific properties.
+    uop_cache: IntMap<i64, cpu::Uop>,
+
     /// The address where data will be sent to terminal
     pub tohost_addr: u64,
 }
@@ -59,6 +61,8 @@ impl Emulator {
             cpu: Cpu::new(terminal, capacity),
 
             symbol_map: FnvHashMap::default(),
+
+            uop_cache: IntMap::new(),
 
             // These can be updated in load_image()
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists
@@ -79,7 +83,7 @@ impl Emulator {
     /// Runs program set by `load_image()`. The emulator will run forever.
     pub fn run_program(&mut self) {
         loop {
-            self.tick(40);
+            self.tick(52);
             if self.handle_htif() {
                 break;
             }
@@ -98,17 +102,33 @@ impl Emulator {
         //use std::io::{self, Write};
 
         let mut s = String::new();
+
         loop {
             s.clear();
-            let wbr = self.cpu.disassemble(&mut s);
+            self.cpu.disassemble(&mut s);
+            // XXX might make sense to return the instruction
             let exceptional = self.tick(1);
             let cycle = self.cpu.cycle;
             print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
-            if wbr.is_x0_dest() || exceptional {
-                println!();
+
+            if let Ok(word32) = self.cpu.memop_disass(self.cpu.pc) {
+                #[allow(clippy::cast_sign_loss)]
+                let (insn, _) = cpu::decompress(word32 as u32);
+                if let Some(decoded) = cpu::decode(&self.cpu.decode_dag, insn) {
+                    let uop = (decoded.decode)(self.cpu.pc, insn, decoded.execute);
+                    let wbr = uop.rd;
+                    if wbr.is_x0_dest() || exceptional {
+                        println!();
+                    } else {
+                        println!("{:16x}", self.cpu.read_register(wbr));
+                    }
+                } else {
+                    println!();
+                }
             } else {
-                println!("{:16x}", self.cpu.read_register(wbr));
+                println!();
             }
+
             //let _ = io::stdout().flush();
 
             if self.handle_htif() {
@@ -178,7 +198,7 @@ impl Emulator {
     pub fn tick(&mut self, n: usize) -> bool {
         // XXX We should be able to set this arbitrarily high, but we seem
         // to hit a race condition and a Linux hang beyond this value
-        self.cpu.run_soc(n)
+        self.cpu.run_soc(n, &mut self.uop_cache)
     }
 
     /// Sets up program run by the program. This method analyzes the passed

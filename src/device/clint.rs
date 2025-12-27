@@ -39,13 +39,10 @@ impl Clint {
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::option_if_let_else)]
     pub fn service(&mut self, cycle: u64, mip: &mut u64) {
-        self.mtime_system = match self.t0.elapsed() {
-            Ok(t) => t.as_micros() as u64,
-            _ => {
-                // XXX An arbitrary number that seems to work ok
-                cycle / 16
-            }
-        };
+        self.mtime_system = self
+            .t0
+            .elapsed()
+            .map_or(cycle / 16, |t| t.as_micros() as u64);
 
         if (self.msip & 1) != 0 {
             *mip |= MIP_MSIP;

@@ -4,9 +4,9 @@
 
 Simmerv is a [RISC-V](https://riscv.org/) SoC emulator written in Rust
 and compilable to WebAssembly.  It started as a fork of [Takahiro's
-riscv-rust emulator](https://github.com/takahirox/riscv-rust), but by
-now 98% of the code has been rewritten, making it far more complete
-and faster.  Ultimately, we expect it to become substantially faster,
+riscv-rust emulator](https://github.com/takahirox/riscv-rust), but has
+by now been extensively rewritten, making it far more complete and
+much faster.  Ultimately, we expect it to become substantially faster,
 but this work is delayed until we are able to run standard benchmarks
 and off-the-shelf Linux distributions.
 
@@ -22,7 +22,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
 ## Features
 
-- Emulates RISC-V RV64GC_Zba_Zicond processor and peripheral devices
+- Emulates RISC-V `RV64GC_Zba_Zicond` processor and peripheral devices
   (PLIC, CLINT, virtio block device and a UART)
 - Targets native and WASM
 
@@ -54,9 +54,6 @@ many FP instructions) are not 100% to the spec.
 - U-boot loads but hangs before hand-off; might be an issue with ELF loading
 
 ### High Priority Work Post Issues
-
-- >> *Amortized decoding and instruction fusion via a instruction
-  translation cache* <<
 
 - Snapshot and resume
 
