@@ -3918,7 +3918,7 @@ mod test_cpu {
         let cpu = create_cpu();
         //    10894:       20e74633                sh2add  a2,a4,a4
         match decode(&cpu.decode_dag, 0x20e74633) {
-            Ok(inst) => assert_eq!(inst.name, "SH2ADD"),
+            Some(inst) => assert_eq!(inst.name, "SH2ADD"),
             _err => panic!("Failed to decode"),
         }
     }
@@ -3926,6 +3926,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn tick() {
+        let mut uop_cache = IntMap::new();
         let mut cpu = create_cpu();
         cpu.update_pc(DRAM_BASE as i64);
 
@@ -3940,12 +3941,12 @@ mod test_cpu {
             Err(_e) => panic!("Failed to store"),
         }
 
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
 
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         assert_eq!(1, cpu.read_register(x(1)));
 
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
 
         assert_eq!(DRAM_BASE as i64 + 6, cpu.read_pc());
         assert_eq!(8, cpu.read_register(x(8)));
@@ -3954,6 +3955,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn step_cpu() {
+        let mut uop_cache = IntMap::new();
         let mut cpu = create_cpu();
         cpu.update_pc(DRAM_BASE as i64);
         // write non-compressed "addi a0, a0, 12" instruction
@@ -3963,8 +3965,8 @@ mod test_cpu {
         }
         assert_eq!(DRAM_BASE as i64, cpu.read_pc());
         assert_eq!(0, cpu.read_register(x(10)));
-        if let Err(exc) = cpu.step_cpu() {
-            cpu.handle_exception(&exc);
+        if let Err(exc) = cpu.step_cpu(&mut uop_cache) {
+            cpu.handle_exception(&exc, DRAM_BASE as i64);
         }
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         // "addi a0, a0, a12" instruction writes 12 to a0 register.
@@ -3977,12 +3979,12 @@ mod test_cpu {
         let cpu = create_cpu();
         // 0x13 is addi instruction
         match decode(&cpu.decode_dag, 0x13) {
-            Ok(inst) => assert_eq!(inst.name, "ADDI"),
-            Err(_e) => panic!("Failed to decode"),
+            Some(inst) => assert_eq!(inst.name, "ADDI"),
+            None => panic!("Failed to decode"),
         }
         // .decode() returns error for invalid word data.
         assert!(
-            decode(&cpu.decode_dag, 0x0).is_err(),
+            decode(&cpu.decode_dag, 0x0).is_none(),
             "Unexpectedly succeeded in decoding"
         );
     }
@@ -3993,21 +3995,22 @@ mod test_cpu {
         let cpu = create_cpu();
         // .decompress() doesn't directly return an instruction but
         // it returns decompressed word. Then you need to call .decode().
-        match decode(&cpu.decode_dag, decompress(0, 0x20).0) {
-            Ok(inst) => assert_eq!(inst.name, "ADDI"),
-            Err(_e) => panic!("Failed to decode"),
+        match decode(&cpu.decode_dag, decompress(0x20).0) {
+            Some(inst) => assert_eq!(inst.name, "ADDI"),
+            None => panic!("Failed to decode"),
         }
     }
 
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn wfi() {
+        let mut uop_cache = IntMap::new();
         let wfi_instruction = 0x10500073;
         let mut cpu = create_cpu();
         // Just in case
         match decode(&cpu.decode_dag, wfi_instruction) {
-            Ok(inst) => assert_eq!(inst.name, "WFI"),
-            Err(_e) => panic!("Failed to decode"),
+            Some(inst) => assert_eq!(inst.name, "WFI"),
+            None => panic!("Failed to decode"),
         }
         cpu.update_pc(DRAM_BASE as i64);
         // write WFI instruction
@@ -4015,11 +4018,11 @@ mod test_cpu {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         for _i in 0..10 {
             // Until interrupt happens, .tick() does nothing
-            cpu.run_soc(1);
+            cpu.run_soc(1, &mut uop_cache);
             assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
         }
         // Machine timer interrupt
@@ -4027,7 +4030,7 @@ mod test_cpu {
         cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(Csr::Mstatus, 0x8);
         cpu.write_csr_raw(Csr::Mtvec, 0x0);
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
         // Interrupt happened and moved to handler
         assert_eq!(0, cpu.read_pc());
     }
@@ -4035,6 +4038,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn interrupt() {
+        let mut uop_cache = IntMap::new();
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write non-compressed "addi x0, x0, 1" instruction
@@ -4049,7 +4053,7 @@ mod test_cpu {
         cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(Csr::Mtvec, handler_vector);
 
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
 
         // Interrupt isn't caught because mie is disabled
         assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
@@ -4058,7 +4062,7 @@ mod test_cpu {
         // Enable mie in mstatus
         cpu.write_csr_raw(Csr::Mstatus, 0x8);
 
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
 
         // Interrupt happened and moved to handler
         assert_eq!(handler_vector as i64, cpu.read_pc());
@@ -4076,6 +4080,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn exception() {
+        let mut uop_cache = IntMap::new();
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write ECALL instruction
@@ -4086,7 +4091,7 @@ mod test_cpu {
         cpu.write_csr_raw(Csr::Mtvec, handler_vector);
         cpu.update_pc(DRAM_BASE as i64);
 
-        cpu.run_soc(1);
+        cpu.run_soc(1, &mut uop_cache);
 
         // Interrupt happened and moved to handler
         assert_eq!(handler_vector as i64, cpu.read_pc());
@@ -4103,6 +4108,8 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn hardocded_zero() {
+        let mut uop_cache = IntMap::new();
+
         let mut cpu = create_cpu();
         cpu.update_pc(DRAM_BASE as i64);
 
@@ -4119,13 +4126,13 @@ mod test_cpu {
 
         // Test x0
         assert_eq!(0, cpu.read_register(x(0)));
-        cpu.run_soc(1); // Execute  "addi x0, x0, 1"
+        cpu.run_soc(1, &mut uop_cache); // Execute  "addi x0, x0, 1"
         // x0 is still zero because it's hardcoded zero
         assert_eq!(0, cpu.read_register(x(0)));
 
         // Test x1
         assert_eq!(0, cpu.read_register(x(1)));
-        cpu.run_soc(1); // Execute  "addi x1, x1, 1"
+        cpu.run_soc(1, &mut uop_cache); // Execute  "addi x1, x1, 1"
         // x1 is not hardcoded zero
         assert_eq!(1, cpu.read_register(x(1)));
     }
