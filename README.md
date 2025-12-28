@@ -3,7 +3,7 @@
 # Simmerv
 
 Simmerv is a [RISC-V](https://riscv.org/) SoC emulator written in Rust
-and compilable to WebAssembly.  It started as a fork of [Takahiro's
+and compilable to WebAssembly.  It began as a fork of [Takahiro's
 riscv-rust emulator](https://github.com/takahirox/riscv-rust), but has
 by now been extensively rewritten, making it far more complete and
 much faster.  Ultimately, we expect it to become substantially faster,
@@ -29,7 +29,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 ## Instructions/Features support status
 
 - [x] RV64IMAC
-- [x] RV64FD (*PARTIALLY* flags/rounding modes very lacking)
+- [x] RV64FD (*PARTIALLY*: flags/rounding modes not complete for all insns)
 - [x] RV64Zifencei
 - [x] RV64Zicsr
 - [ ] Svnapot

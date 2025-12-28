@@ -21,6 +21,10 @@ use fp::cvt_i32_sf32;
 use fp::cvt_i64_sf32;
 use fp::cvt_u32_sf32;
 use fp::cvt_u64_sf32;
+use fp::op_from_f32;
+use fp::op_from_f64;
+use fp::op_to_f32;
+use fp::op_to_f64;
 use intmap::IntMap;
 use log;
 use num_traits::FromPrimitive;
@@ -36,7 +40,13 @@ use terminal::Terminal;
 
 pub type Reg = Bounded<65>;
 
-// Type aliases for clarity
+#[derive(Debug, PartialEq, Eq)]
+pub struct Exception {
+    pub trap: Trap,
+    pub tval: i64,
+}
+
+pub type ExecResult = Result<(i64, u8), Exception>;
 pub type ExecFn = fn(cpu: &mut Cpu, uop: &Uop, ops: Operands) -> ExecResult;
 pub type DecodeFn = fn(addr: i64, word: u32, exec: ExecFn) -> Uop;
 
@@ -116,6 +126,7 @@ pub struct Operands {
 //   load, store, jump, branch, compjump, atomic) along with a "system" boolean.
 //   Each class could have it's own operation
 //
+// XXX rename ArchState?
 pub struct Cpu {
     // The essential CPU state
     rf: [i64; 65],
@@ -132,32 +143,27 @@ pub struct Cpu {
     reservation: Option<u64>,
 
     // Wait-For-Interrupt; relax and await further instruction
+    // XXX needn't be part of CPU state; is part of fetch
     wfi: bool,
 
     // Giving each instruction a unique sequence number in program order is
     // especially helpful when dealing with out-of-order execution.
     // We can derive instret by maintaining an offset from seqno (as minstret
     // can be written by programs), although we cannot then treat ECALL and
-    // EBREAK as committing instructions.œ
+    // EBREAK as committing instructions.
+    // XXX needn't be part of CPU state; is part of fetch
     pub seqno: usize,
 
     // Holds all memory and devices (XXX: this public mmu suggests we need to rethink the API)
     pub mmu: Mmu,
 
-    // HACK
+    // HACK to allow instructions to communicate this to the fetch engine
     pub flush_icache: bool,
 
     // Decoding table
+    // XXX needn't be part of CPU state; is part of decode
     pub decode_dag: Vec<u16>,
 }
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Exception {
-    pub trap: Trap,
-    pub tval: i64,
-}
-
-type ExecResult = Result<Option<i64>, Exception>;
 
 #[allow(clippy::type_complexity)]
 /// Instruction specification
@@ -410,11 +416,9 @@ impl Cpu {
                 s2: self.read_x(uop.rs2),
                 s3: self.read_x(uop.rs3),
             };
-            if let Some(res) = (uop.execute)(self, uop, ops)? {
-                self.write_x(uop.rd, res);
-            } else {
-                assert_eq!(uop.rd.get(), 64);
-            }
+            let (res, fflags) = (uop.execute)(self, uop, ops)?;
+            self.write_x(uop.rd, res);
+            self.add_to_fflags(fflags);
         } else {
             // XXX For full correctness we mustn't fail if we _can_ fetch 16-bit
             // _and_ it turns out to be a legal instruction.
@@ -458,11 +462,9 @@ impl Cpu {
                 s2: self.read_x(uop.rs2),
                 s3: self.read_x(uop.rs3),
             };
-            if let Some(res) = (uop.execute)(self, &uop, ops)? {
-                self.write_x(uop.rd, res);
-            } else {
-                assert_eq!(uop.rd.get(), 64);
-            }
+            let (res, fflags) = (uop.execute)(self, &uop, ops)?;
+            self.write_x(uop.rd, res);
+            self.add_to_fflags(fflags);
         }
 
         Ok(())
@@ -901,7 +903,7 @@ impl Cpu {
             let _ = write!(s, "{addr:16x} {word32:08x} {asm:7} ");
         } else {
             word32 &= 0xffff;
-            let _ = write!(s, "{addr:16x}     {word32:04x} {asm:7} ");
+            let _ = write!(s, "{addr:16x} {word32:04x}     {asm:7} ");
         }
         (decoded.disassemble)(s, self, addr, insn, eval);
     }
@@ -948,39 +950,43 @@ impl Cpu {
 
     fn write_fflags(&mut self, fflags: u8) {
         assert_ne!(self.fs, 0);
+        assert_eq!(fflags & !31, 0);
         self.fs = 3;
-        self.fflags = fflags & 31;
+        self.fflags = fflags;
     }
 
     fn add_to_fflags(&mut self, fflags: u8) {
-        assert_ne!(self.fs, 0);
-        self.fs = 3;
-        self.fflags |= fflags & 31;
+        if fflags != 0 {
+            assert_ne!(self.fs, 0);
+            assert_eq!(fflags & !31, 0);
+            self.fs = 3;
+            self.fflags |= fflags;
+        }
     }
 
     #[allow(clippy::precedence)]
     fn read_fcsr(&self) -> i64 {
         assert_ne!(self.fs, 0);
+        assert_eq!(self.fflags & !31, 0);
         i64::from(self.fflags) | (self.frm as i64) << 5
     }
 
     #[allow(clippy::cast_sign_loss)]
     fn write_fcsr(&mut self, v: i64) {
         assert_ne!(self.fs, 0);
-        let frm = (v >> 5) & 7;
-        let Some(frm) = FromPrimitive::from_i64(frm) else {
-            todo!("What is the appropriate behavior on illegal ops?");
-        };
         self.write_fflags((v & 31) as u8);
-        self.write_frm(frm);
+        // We must refuse to write illegal values FRM
+        if let Some(frm) = FromPrimitive::from_i64((v >> 5) & 7) {
+            self.write_frm(frm);
+        }
     }
 
-    fn get_rm(&self, insn_rm_field: usize) -> RoundingMode {
+    fn get_rm(&self, insn_rm_field: u8) -> RoundingMode {
         if insn_rm_field == 7 {
             self.frm
         } else {
-            let Some(rm) = FromPrimitive::from_usize(insn_rm_field) else {
-                unreachable!();
+            let Some(rm) = FromPrimitive::from_u8(insn_rm_field) else {
+                unreachable!("decoding should raised illegal exception on rm {insn_rm_field}");
             };
             rm
         }
@@ -1112,13 +1118,6 @@ const fn get_trap_cause(exc: &Exception) -> u64 {
         exc.trap as u64 - Trap::UserSoftwareInterrupt as u64 + interrupt_bit
     }
 }
-
-fn op_from_f32(f: f32) -> i64 { fp::NAN_BOX_F32 | i64::from(f.to_bits()) }
-const fn op_from_f64(f: f64) -> i64 { f.to_bits() as i64 }
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn op_to_f32(v: i64) -> f32 { f32::from_bits(Sf32::unbox(v) as u32) }
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-const fn op_to_f64(v: i64) -> f64 { f64::from_bits(v as u64) }
 
 #[inline]
 #[must_use]
@@ -1787,7 +1786,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00000037,
         decode: decode_u,
         disassemble: disassemble_u,
-        execute: |_cpu, uop, _ops| Ok(Some(uop.imm)),
+        execute: |_cpu, uop, _ops| Ok((uop.imm, 0)),
     },
     RVInsnSpec {
         name: "AUIPC",
@@ -1795,7 +1794,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00000017,
         decode: decode_auipc,
         disassemble: disassemble_u,
-        execute: |_cpu, uop, _ops| Ok(Some(uop.imm)),
+        execute: |_cpu, uop, _ops| Ok((uop.imm, 0)),
     },
     RVInsnSpec {
         name: "JAL",
@@ -1806,7 +1805,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, _ops| {
             let tmp = cpu.pc;
             cpu.pc = uop.imm;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -1818,7 +1817,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             let tmp = cpu.pc;
             cpu.pc = ops.s1.wrapping_add(uop.imm) & !1;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -1831,7 +1830,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if ops.s1 == ops.s2 {
                 cpu.pc = uop.imm;
             }
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1844,7 +1843,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if ops.s1 != ops.s2 {
                 cpu.pc = uop.imm;
             }
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1857,7 +1856,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if ops.s1 < ops.s2 {
                 cpu.pc = uop.imm;
             }
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1870,7 +1869,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if ops.s1 >= ops.s2 {
                 cpu.pc = uop.imm;
             }
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1883,7 +1882,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if (ops.s1 as u64) < (ops.s2 as u64) {
                 cpu.pc = uop.imm;
             }
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1896,7 +1895,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if (ops.s1 as u64) >= (ops.s2 as u64) {
                 cpu.pc = uop.imm;
             }
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1907,7 +1906,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 1)? as i8 as i64;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -1918,7 +1917,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 2)? as i16 as i64;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -1929,7 +1928,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 4)?;
-            Ok(Some(v as i32 as i64))
+            Ok((v as i32 as i64, 0))
         },
     },
     RVInsnSpec {
@@ -1940,7 +1939,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 1)?;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -1951,7 +1950,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 2)?;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -1962,7 +1961,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_s,
         execute: |cpu, uop, ops| {
             let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 1)?;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1973,7 +1972,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_s,
         execute: |cpu, uop, ops| {
             let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 2)?;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1984,7 +1983,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_s,
         execute: |cpu, uop, ops| {
             let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 4)?;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -1993,7 +1992,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00000013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(ops.s1.wrapping_add(uop.imm))),
+        execute: |_cpu, uop, ops| Ok((ops.s1.wrapping_add(uop.imm), 0)),
     },
     RVInsnSpec {
         name: "SLTI",
@@ -2001,7 +2000,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00002013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(i64::from(ops.s1 < uop.imm))),
+        execute: |_cpu, uop, ops| Ok((i64::from(ops.s1 < uop.imm), 0)),
     },
     RVInsnSpec {
         name: "SLTIU",
@@ -2009,7 +2008,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00003013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(i64::from((ops.s1 as u64) < (uop.imm as u64)))),
+        execute: |_cpu, uop, ops| Ok((i64::from((ops.s1 as u64) < (uop.imm as u64)), 0)),
     },
     RVInsnSpec {
         name: "XORI",
@@ -2017,7 +2016,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00004013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(ops.s1 ^ uop.imm)),
+        execute: |_cpu, uop, ops| Ok((ops.s1 ^ uop.imm, 0)),
     },
     RVInsnSpec {
         name: "ORI",
@@ -2025,7 +2024,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00006013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(ops.s1 | uop.imm)),
+        execute: |_cpu, uop, ops| Ok((ops.s1 | uop.imm, 0)),
     },
     RVInsnSpec {
         name: "ANDI",
@@ -2033,7 +2032,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00007013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(ops.s1 & uop.imm)),
+        execute: |_cpu, uop, ops| Ok((ops.s1 & uop.imm, 0)),
     },
     // RV32I SLLI subsumed by RV64I
     // RV32I SRLI subsumed by RV64I
@@ -2044,7 +2043,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00000033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1.wrapping_add(ops.s2))),
+        execute: |_cpu, _uop, ops| Ok((ops.s1.wrapping_add(ops.s2), 0)),
     },
     RVInsnSpec {
         name: "SUB",
@@ -2052,7 +2051,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x40000033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1.wrapping_sub(ops.s2))),
+        execute: |_cpu, _uop, ops| Ok((ops.s1.wrapping_sub(ops.s2), 0)),
     },
     RVInsnSpec {
         name: "SLL",
@@ -2060,7 +2059,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00001033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1.wrapping_shl(ops.s2 as u32))),
+        execute: |_cpu, _uop, ops| Ok((ops.s1.wrapping_shl(ops.s2 as u32), 0)),
     },
     RVInsnSpec {
         name: "SLT",
@@ -2068,7 +2067,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00002033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(i64::from(ops.s1 < ops.s2))),
+        execute: |_cpu, _uop, ops| Ok((i64::from(ops.s1 < ops.s2), 0)),
     },
     RVInsnSpec {
         name: "SLTU",
@@ -2076,7 +2075,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00003033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(i64::from((ops.s1 as u64) < (ops.s2 as u64)))),
+        execute: |_cpu, _uop, ops| Ok((i64::from((ops.s1 as u64) < (ops.s2 as u64)), 0)),
     },
     RVInsnSpec {
         name: "XOR",
@@ -2084,7 +2083,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00004033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1 ^ ops.s2)),
+        execute: |_cpu, _uop, ops| Ok((ops.s1 ^ ops.s2, 0)),
     },
     RVInsnSpec {
         name: "SRL",
@@ -2092,7 +2091,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00005033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(((ops.s1 as u64).wrapping_shr(ops.s2 as u32)) as i64)),
+        execute: |_cpu, _uop, ops| Ok((((ops.s1 as u64).wrapping_shr(ops.s2 as u32)) as i64, 0)),
     },
     RVInsnSpec {
         name: "SRA",
@@ -2100,7 +2099,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x40005033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1.wrapping_shr(ops.s2 as u32))),
+        execute: |_cpu, _uop, ops| Ok((ops.s1.wrapping_shr(ops.s2 as u32), 0)),
     },
     RVInsnSpec {
         name: "OR",
@@ -2108,7 +2107,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00006033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1 | ops.s2)),
+        execute: |_cpu, _uop, ops| Ok((ops.s1 | ops.s2, 0)),
     },
     RVInsnSpec {
         name: "AND",
@@ -2116,7 +2115,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00007033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1 & ops.s2)),
+        execute: |_cpu, _uop, ops| Ok((ops.s1 & ops.s2, 0)),
     },
     RVInsnSpec {
         name: "FENCE",
@@ -2132,7 +2131,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
                 log::trace!("pause isn't yet implemented");
             }
             // Fence memory ops (we are currently TSO already)
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -2143,7 +2142,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_empty,
         execute: |_cpu, _uop, _ops| {
             // Fence memory ops (we are currently TSO already)
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -2185,7 +2184,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 4)?;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -2196,7 +2195,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 8)?;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -2207,7 +2206,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_s,
         execute: |cpu, uop, ops| {
             let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 8)?;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -2216,7 +2215,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00001013,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok(Some(ops.s1 << uop.imm)),
+        execute: |_cpu, uop, ops| Ok((ops.s1 << uop.imm, 0)),
     },
     RVInsnSpec {
         name: "SRLI",
@@ -2224,7 +2223,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00005013,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok(Some(((ops.s1 as u64) >> uop.imm) as i64)),
+        execute: |_cpu, uop, ops| Ok((((ops.s1 as u64) >> uop.imm) as i64, 0)),
     },
     RVInsnSpec {
         name: "SRAI",
@@ -2232,7 +2231,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x40005013,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok(Some(ops.s1 >> uop.imm)),
+        execute: |_cpu, uop, ops| Ok((ops.s1 >> uop.imm, 0)),
     },
     RVInsnSpec {
         name: "ADDIW",
@@ -2240,7 +2239,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000001b,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok(Some(i64::from(ops.s1.wrapping_add(uop.imm) as i32))),
+        execute: |_cpu, uop, ops| Ok((i64::from(ops.s1.wrapping_add(uop.imm) as i32), 0)),
     },
     RVInsnSpec {
         name: "SLLIW",
@@ -2248,7 +2247,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000101b,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok(Some(i64::from((ops.s1 as i32) << (uop.imm & 31)))),
+        execute: |_cpu, uop, ops| Ok((i64::from((ops.s1 as i32) << (uop.imm & 31)), 0)),
     },
     RVInsnSpec {
         name: "SRLIW",
@@ -2256,7 +2255,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000501b,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok(Some(i64::from(((ops.s1 as u32) >> (uop.imm & 31)) as i32))),
+        execute: |_cpu, uop, ops| Ok((i64::from(((ops.s1 as u32) >> (uop.imm & 31)) as i32), 0)),
     },
     RVInsnSpec {
         name: "SRAIW",
@@ -2264,7 +2263,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x4000501b,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok(Some(i64::from((ops.s1 as i32) >> (uop.imm & 31)))),
+        execute: |_cpu, uop, ops| Ok((i64::from((ops.s1 as i32) >> (uop.imm & 31)), 0)),
     },
     RVInsnSpec {
         name: "ADDW",
@@ -2272,7 +2271,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(i64::from(ops.s1.wrapping_add(ops.s2) as i32))),
+        execute: |_cpu, _uop, ops| Ok((i64::from(ops.s1.wrapping_add(ops.s2) as i32), 0)),
     },
     RVInsnSpec {
         name: "SUBW",
@@ -2280,7 +2279,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x4000003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(i64::from(ops.s1.wrapping_sub(ops.s2) as i32))),
+        execute: |_cpu, _uop, ops| Ok((i64::from(ops.s1.wrapping_sub(ops.s2) as i32), 0)),
     },
     RVInsnSpec {
         name: "SLLW",
@@ -2289,9 +2288,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(i64::from(
-                (ops.s1 as u32).wrapping_shl(ops.s2 as u32) as i32
-            )))
+            Ok((
+                i64::from((ops.s1 as u32).wrapping_shl(ops.s2 as u32) as i32),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2301,9 +2301,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(i64::from(
-                (ops.s1 as u32).wrapping_shr(ops.s2 as u32) as i32
-            )))
+            Ok((
+                i64::from((ops.s1 as u32).wrapping_shr(ops.s2 as u32) as i32),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2312,7 +2313,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x4000503b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(i64::from((ops.s1 as i32).wrapping_shr(ops.s2 as u32)))),
+        execute: |_cpu, _uop, ops| Ok((i64::from((ops.s1 as i32).wrapping_shr(ops.s2 as u32)), 0)),
     },
     // RV32/RV64 Zifencei
     RVInsnSpec {
@@ -2326,7 +2327,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.reservation = None;
             // HACK
             cpu.flush_icache = true;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     // RV32/RV64 Zicsr
@@ -2344,7 +2345,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             };
             cpu.write_csr(uop.imm as u16, ops.s1)?;
 
-            Ok(Some(res))
+            Ok((res, 0))
         },
     },
     RVInsnSpec {
@@ -2358,7 +2359,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if uop.rs1.get() != 0 {
                 cpu.write_csr(uop.imm as u16, data | ops.s1)?;
             }
-            Ok(Some(data))
+            Ok((data, 0))
         },
     },
     RVInsnSpec {
@@ -2372,7 +2373,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if uop.rs1.get() != 0 {
                 cpu.write_csr(uop.imm as u16, data & !ops.s1)?;
             }
-            Ok(Some(data))
+            Ok((data, 0))
         },
     },
     RVInsnSpec {
@@ -2389,7 +2390,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             };
             cpu.write_csr(uop.imm as u16, uop.rs1.get() as i64)?;
 
-            Ok(Some(res))
+            Ok((res, 0))
         },
     },
     RVInsnSpec {
@@ -2403,7 +2404,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if uop.rs1.get() != 0 {
                 cpu.write_csr(uop.imm as u16, data | uop.rs1.get() as i64)?;
             }
-            Ok(Some(data))
+            Ok((data, 0))
         },
     },
     RVInsnSpec {
@@ -2417,7 +2418,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             if uop.rs1.get() != 0 {
                 cpu.write_csr(uop.imm as u16, data & !(uop.rs1.get() as i64))?;
             }
-            Ok(Some(data))
+            Ok((data, 0))
         },
     },
     // RV32M
@@ -2427,7 +2428,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x02000033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s1.wrapping_mul(ops.s2))),
+        execute: |_cpu, _uop, ops| Ok((ops.s1.wrapping_mul(ops.s2), 0)),
     },
     RVInsnSpec {
         name: "MULH",
@@ -2436,9 +2437,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(
-                ((i128::from(ops.s1) * i128::from(ops.s2)) >> 64) as i64,
-            ))
+            Ok((((i128::from(ops.s1) * i128::from(ops.s2)) >> 64) as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2448,8 +2447,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(
+            Ok((
                 ((ops.s1 as u128).wrapping_mul(u128::from(ops.s2 as u64)) >> 64) as i64,
+                0,
             ))
         },
     },
@@ -2460,8 +2460,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(
+            Ok((
                 (u128::from(ops.s1 as u64).wrapping_mul(u128::from(ops.s2 as u64)) >> 64) as i64,
+                0,
             ))
         },
     },
@@ -2472,13 +2473,16 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(if ops.s2 == 0 {
-                -1
-            } else if ops.s1 == i64::MIN && ops.s2 == -1 {
-                ops.s1
-            } else {
-                ops.s1.wrapping_div(ops.s2)
-            }))
+            Ok((
+                if ops.s2 == 0 {
+                    -1
+                } else if ops.s1 == i64::MIN && ops.s2 == -1 {
+                    ops.s1
+                } else {
+                    ops.s1.wrapping_div(ops.s2)
+                },
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2488,11 +2492,14 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(if ops.s2 as u64 == 0 {
-                -1
-            } else {
-                (ops.s1 as u64).wrapping_div(ops.s2 as u64) as i64
-            }))
+            Ok((
+                if ops.s2 as u64 == 0 {
+                    -1
+                } else {
+                    (ops.s1 as u64).wrapping_div(ops.s2 as u64) as i64
+                },
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2502,13 +2509,16 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(if ops.s2 == 0 {
-                ops.s1
-            } else if ops.s1 == i64::MIN && ops.s2 == -1 {
-                0
-            } else {
-                ops.s1.wrapping_rem(ops.s2)
-            }))
+            Ok((
+                if ops.s2 == 0 {
+                    ops.s1
+                } else if ops.s1 == i64::MIN && ops.s2 == -1 {
+                    0
+                } else {
+                    ops.s1.wrapping_rem(ops.s2)
+                },
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2518,10 +2528,13 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(match ops.s2 as u64 {
-                0 => ops.s1 as u64 as i64,
-                _ => (ops.s1 as u64).wrapping_rem(ops.s2 as u64) as i64,
-            }))
+            Ok((
+                match ops.s2 as u64 {
+                    0 => ops.s1 as u64 as i64,
+                    _ => (ops.s1 as u64).wrapping_rem(ops.s2 as u64) as i64,
+                },
+                0,
+            ))
         },
     },
     // RV64M
@@ -2531,7 +2544,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0200003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(i64::from((ops.s1 as i32).wrapping_mul(ops.s2 as i32)))),
+        execute: |_cpu, _uop, ops| Ok((i64::from((ops.s1 as i32).wrapping_mul(ops.s2 as i32)), 0)),
     },
     RVInsnSpec {
         name: "DIVW",
@@ -2540,13 +2553,16 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(if ops.s2 as i32 == 0 {
-                -1
-            } else if ops.s1 as i32 == i32::MIN && ops.s2 as i32 == -1 {
-                i64::from(ops.s1 as i32)
-            } else {
-                i64::from((ops.s1 as i32).wrapping_div(ops.s2 as i32))
-            }))
+            Ok((
+                if ops.s2 as i32 == 0 {
+                    -1
+                } else if ops.s1 as i32 == i32::MIN && ops.s2 as i32 == -1 {
+                    i64::from(ops.s1 as i32)
+                } else {
+                    i64::from((ops.s1 as i32).wrapping_div(ops.s2 as i32))
+                },
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2556,11 +2572,14 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(if ops.s2 as u32 == 0 {
-                -1
-            } else {
-                i64::from((ops.s1 as u32).wrapping_div(ops.s2 as u32) as i32)
-            }))
+            Ok((
+                if ops.s2 as u32 == 0 {
+                    -1
+                } else {
+                    i64::from((ops.s1 as u32).wrapping_div(ops.s2 as u32) as i32)
+                },
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2570,13 +2589,16 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(if ops.s2 as i32 == 0 {
-                i64::from(ops.s1 as i32)
-            } else if ops.s1 as i32 == i32::MIN && ops.s2 as i32 == -1 {
-                0
-            } else {
-                i64::from((ops.s1 as i32).wrapping_rem(ops.s2 as i32))
-            }))
+            Ok((
+                if ops.s2 as i32 == 0 {
+                    i64::from(ops.s1 as i32)
+                } else if ops.s1 as i32 == i32::MIN && ops.s2 as i32 == -1 {
+                    0
+                } else {
+                    i64::from((ops.s1 as i32).wrapping_rem(ops.s2 as i32))
+                },
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2586,10 +2608,13 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok(Some(match ops.s2 as u32 {
-                0 => i64::from(ops.s1 as u32 as i32),
-                _ => i64::from((ops.s1 as u32).wrapping_rem(ops.s2 as u32) as i32),
-            }))
+            Ok((
+                match ops.s2 as u32 {
+                    0 => i64::from(ops.s1 as u32 as i32),
+                    _ => i64::from((ops.s1 as u32).wrapping_rem(ops.s2 as u32) as i32),
+                },
+                0,
+            ))
         },
     },
     // RV32A
@@ -2605,7 +2630,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
                 .mmu
                 .translate_address(ops.s1 as u64, MemoryAccessType::Read, false)?;
             cpu.reservation = Some(pa);
-            Ok(Some(i64::from(data)))
+            Ok((i64::from(data), 0))
         },
     },
     RVInsnSpec {
@@ -2625,7 +2650,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
                 1
             };
             cpu.reservation = None;
-            Ok(Some(res))
+            Ok((res, 0))
         },
     },
     RVInsnSpec {
@@ -2637,7 +2662,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             let tmp = i64::from(cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32);
             cpu.mmu.store_virt_u32(ops.s1 as u64, ops.s2 as u32)?;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2650,7 +2675,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
             cpu.mmu
                 .store_virt_u32(ops.s1 as u64, tmp.wrapping_add(ops.s2 as u32))?;
-            Ok(Some(i64::from(tmp as i32)))
+            Ok((i64::from(tmp as i32), 0))
         },
     },
     RVInsnSpec {
@@ -2663,7 +2688,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
             cpu.mmu
                 .store_virt_u32(ops.s1 as u64, (ops.s2 as u32) ^ tmp)?;
-            Ok(Some(i64::from(tmp as i32)))
+            Ok((i64::from(tmp as i32), 0))
         },
     },
     RVInsnSpec {
@@ -2676,7 +2701,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = i64::from(cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32);
             cpu.mmu
                 .store_virt_u32(ops.s1 as u64, (ops.s2 & tmp) as u32)?;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2689,7 +2714,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = i64::from(cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32);
             cpu.mmu
                 .store_virt_u32(ops.s1 as u64, (ops.s2 | tmp) as u32)?;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2702,7 +2727,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32;
             let val = ops.s2 as i32;
             cpu.mmu.store_virt_u32(ops.s1 as u64, val.min(tmp) as u32)?;
-            Ok(Some(i64::from(tmp)))
+            Ok((i64::from(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2715,7 +2740,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32;
             let val = ops.s2 as i32;
             cpu.mmu.store_virt_u32(ops.s1 as u64, val.max(tmp) as u32)?;
-            Ok(Some(i64::from(tmp)))
+            Ok((i64::from(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2728,7 +2753,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
             let val = ops.s2 as u32;
             cpu.mmu.store_virt_u32(ops.s1 as u64, val.min(tmp))?;
-            Ok(Some(i64::from(tmp as i32)))
+            Ok((i64::from(tmp as i32), 0))
         },
     },
     RVInsnSpec {
@@ -2741,7 +2766,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
             let val = ops.s2 as u32;
             cpu.mmu.store_virt_u32(ops.s1 as u64, val.max(tmp))?;
-            Ok(Some(i64::from(tmp as i32)))
+            Ok((i64::from(tmp as i32), 0))
         },
     },
     // RV64A
@@ -2757,7 +2782,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
                 .mmu
                 .translate_address(ops.s1 as u64, MemoryAccessType::Read, false)?;
             cpu.reservation = Some(pa);
-            Ok(Some(data as i64))
+            Ok((data as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2777,7 +2802,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
                 1
             };
             cpu.reservation = None;
-            Ok(Some(res))
+            Ok((res, 0))
         },
     },
     RVInsnSpec {
@@ -2790,7 +2815,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)? as i64;
             cpu.mmu.store_virt_u64(ops.s1 as u64, ops.s2 as u64)?;
             cpu.reservation = None;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2804,7 +2829,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.mmu
                 .store_virt_u64(ops.s1 as u64, tmp.wrapping_add(ops.s2 as u64))?;
             cpu.reservation = None;
-            Ok(Some(tmp as i64))
+            Ok((tmp as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2818,7 +2843,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.mmu
                 .store_virt_u64(ops.s1 as u64, tmp ^ (ops.s2 as u64))?;
             cpu.reservation = None;
-            Ok(Some(tmp as i64))
+            Ok((tmp as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2832,7 +2857,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.mmu
                 .store_virt_u64(ops.s1 as u64, tmp & (ops.s2 as u64))?;
             cpu.reservation = None;
-            Ok(Some(tmp as i64))
+            Ok((tmp as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2846,7 +2871,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.mmu
                 .store_virt_u64(ops.s1 as u64, tmp | (ops.s2 as u64))?;
             cpu.reservation = None;
-            Ok(Some(tmp as i64))
+            Ok((tmp as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2860,7 +2885,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let val = ops.s2;
             cpu.mmu.store_virt_u64(ops.s1 as u64, val.min(tmp) as u64)?;
             cpu.reservation = None;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2874,7 +2899,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let val = ops.s2;
             cpu.mmu.store_virt_u64(ops.s1 as u64, val.max(tmp) as u64)?;
             cpu.reservation = None;
-            Ok(Some(tmp))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2888,7 +2913,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let val = ops.s2 as u64;
             cpu.mmu.store_virt_u64(ops.s1 as u64, val.min(tmp))?;
             cpu.reservation = None;
-            Ok(Some(tmp as i64))
+            Ok((tmp as i64, 0))
         },
     },
     RVInsnSpec {
@@ -2902,7 +2927,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let val = ops.s2 as u64;
             cpu.mmu.store_virt_u64(ops.s1 as u64, val.max(tmp))?;
             cpu.reservation = None;
-            Ok(Some(tmp as i64))
+            Ok((tmp as i64, 0))
         },
     },
     // RV32F
@@ -2915,7 +2940,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             cpu.check_float_access(0)?;
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 4)?;
-            Ok(Some(v | fp::NAN_BOX_F32))
+            Ok((v | fp::NAN_BOX_F32, 0))
         },
     },
     RVInsnSpec {
@@ -2929,7 +2954,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.reservation = None;
             cpu.mmu
                 .store_virt_u32_(ops.s1.wrapping_add(uop.imm), ops.s2)?;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -2941,9 +2966,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
             // XXX Update fflags
-            Ok(Some(op_from_f32(
-                op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), op_to_f32(ops.s3)),
-            )))
+            Ok((
+                op_from_f32(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), op_to_f32(ops.s3))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2954,9 +2980,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(
-                op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), -op_to_f32(ops.s3)),
-            )))
+            Ok((
+                op_from_f32(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), -op_to_f32(ops.s3))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2967,9 +2994,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(
-                -(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), -op_to_f32(ops.s3))),
-            )))
+            Ok((
+                op_from_f32(-(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), -op_to_f32(ops.s3)))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2980,9 +3008,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(
-                -(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), op_to_f32(ops.s3))),
-            )))
+            Ok((
+                op_from_f32(-(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), op_to_f32(ops.s3)))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2993,7 +3022,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(op_to_f32(ops.s1) + op_to_f32(ops.s2))))
+            Ok(Sf32::fadd(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3004,7 +3033,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(op_to_f32(ops.s1) - op_to_f32(ops.s2))))
+            Ok(Sf32::fsub(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3016,7 +3045,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             // @TODO: Update fcsr
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(op_to_f32(ops.s1) * op_to_f32(ops.s2))))
+            Ok((op_from_f32(op_to_f32(ops.s1) * op_to_f32(ops.s2)), 0))
         },
     },
     RVInsnSpec {
@@ -3027,15 +3056,18 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(if op_to_f32(ops.s2) == 0.0 {
-                cpu.set_fcsr_dz();
-                f32::INFINITY
-            } else if op_to_f32(ops.s2) == -0.0 {
-                cpu.set_fcsr_dz();
-                f32::NEG_INFINITY
-            } else {
-                op_to_f32(ops.s1) / op_to_f32(ops.s2)
-            })))
+            Ok((
+                op_from_f32(if op_to_f32(ops.s2) == 0.0 {
+                    cpu.set_fcsr_dz();
+                    f32::INFINITY
+                } else if op_to_f32(ops.s2) == -0.0 {
+                    cpu.set_fcsr_dz();
+                    f32::NEG_INFINITY
+                } else {
+                    op_to_f32(ops.s1) / op_to_f32(ops.s2)
+                }),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -3046,7 +3078,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(op_to_f32(ops.s1).sqrt())))
+            Ok((op_from_f32(op_to_f32(ops.s1).sqrt()), 0))
         },
     },
     RVInsnSpec {
@@ -3060,7 +3092,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
-            Ok(Some(fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff)))
+            Ok((fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff), 0))
         },
     },
     RVInsnSpec {
@@ -3074,7 +3106,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
             let sign_bit = !rs2_bits & (0x80000000u64 as i64);
-            Ok(Some(fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff)))
+            Ok((fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff), 0))
         },
     },
     RVInsnSpec {
@@ -3088,7 +3120,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
             let sign_bit = rs2_bits & (0x80000000u64 as i64);
-            Ok(Some(fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits)))
+            Ok((fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits), 0))
         },
     },
     RVInsnSpec {
@@ -3100,7 +3132,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
             let (f1, f2) = (op_to_f32(ops.s1), op_to_f32(ops.s2));
-            Ok(Some(op_from_f32(if f1 < f2 { f1 } else { f2 })))
+            Ok((op_from_f32(if f1 < f2 { f1 } else { f2 }), 0))
         },
     },
     RVInsnSpec {
@@ -3112,7 +3144,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
             let (f1, f2) = (op_to_f32(ops.s1), op_to_f32(ops.s2));
-            Ok(Some(op_from_f32(if f1 > f2 { f1 } else { f2 })))
+            Ok((op_from_f32(if f1 > f2 { f1 } else { f2 }), 0))
         },
     },
     RVInsnSpec {
@@ -3123,7 +3155,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(i64::from(op_to_f32(ops.s1) as i32)))
+            Ok((i64::from(op_to_f32(ops.s1) as i32), 0))
         },
     },
     RVInsnSpec {
@@ -3134,7 +3166,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(i64::from(op_to_f32(ops.s1) as u32)))
+            Ok((i64::from(op_to_f32(ops.s1) as u32), 0))
         },
     },
     RVInsnSpec {
@@ -3145,7 +3177,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            Ok(Some(i64::from(ops.s1 as i32)))
+            Ok((i64::from(ops.s1 as i32), 0))
         },
     },
     RVInsnSpec {
@@ -3156,9 +3188,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            let (r, fflags) = Sf32::feq(ops.s1, ops.s2);
-            cpu.add_to_fflags(fflags);
-            Ok(Some(i64::from(r)))
+            Ok(Sf32::feq(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3169,9 +3199,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            let (r, fflags) = Sf32::flt(ops.s1, ops.s2);
-            cpu.add_to_fflags(fflags);
-            Ok(Some(i64::from(r)))
+            Ok(Sf32::flt(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3182,9 +3210,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            let (r, fflags) = Sf32::fle(ops.s1, ops.s2);
-            cpu.add_to_fflags(fflags);
-            Ok(Some(i64::from(r)))
+            Ok(Sf32::fle(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3195,7 +3221,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            Ok(Some(1 << Sf32::fclass(ops.s1) as usize))
+            Ok((1 << Sf32::fclass(ops.s1) as usize, 0))
         },
     },
     RVInsnSpec {
@@ -3206,9 +3232,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            let (r, fflags) = cvt_i32_sf32(ops.s1, cpu.get_rm(uop.rm as usize));
-            cpu.add_to_fflags(fflags);
-            Ok(Some(r))
+            Ok(cvt_i32_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3219,9 +3243,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            let (r, fflags) = cvt_u32_sf32(ops.s1, cpu.get_rm(uop.rm as usize));
-            cpu.add_to_fflags(fflags);
-            Ok(Some(r))
+            Ok(cvt_u32_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3232,7 +3254,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r_f,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(fp::NAN_BOX_F32 | ops.s1))
+            Ok((fp::NAN_BOX_F32 | ops.s1, 0))
         },
     },
     // RV64F
@@ -3244,7 +3266,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_to_f32(ops.s1) as i64))
+            Ok((op_to_f32(ops.s1) as i64, 0))
         },
     },
     RVInsnSpec {
@@ -3255,7 +3277,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_to_f32(ops.s1) as u64 as i64))
+            Ok((op_to_f32(ops.s1) as u64 as i64, 0))
         },
     },
     RVInsnSpec {
@@ -3266,9 +3288,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            let (r, fflags) = cvt_i64_sf32(ops.s1, cpu.get_rm(uop.rm as usize));
-            cpu.add_to_fflags(fflags);
-            Ok(Some(r))
+            Ok(cvt_i64_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3279,10 +3299,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            let (r, fflags) = cvt_u64_sf32(ops.s1, cpu.get_rm(uop.rm as usize));
-            cpu.add_to_fflags(fflags);
-
-            Ok(Some(r))
+            Ok(cvt_u64_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
     // RV32D
@@ -3295,7 +3312,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             cpu.check_float_access(0)?;
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 8)?;
-            Ok(Some(v))
+            Ok((v, 0))
         },
     },
     RVInsnSpec {
@@ -3307,7 +3324,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             cpu.check_float_access(0)?;
             cpu.mmu.store64(ops.s1.wrapping_add(uop.imm), ops.s2)?;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -3318,9 +3335,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(
-                op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), op_to_f64(ops.s3)),
-            )))
+            Ok((
+                op_from_f64(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), op_to_f64(ops.s3))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -3331,9 +3349,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(
-                op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), -op_to_f64(ops.s3)),
-            )))
+            Ok((
+                op_from_f64(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), -op_to_f64(ops.s3))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -3344,9 +3363,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(
-                -(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), -op_to_f64(ops.s3))),
-            )))
+            Ok((
+                op_from_f64(-(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), -op_to_f64(ops.s3)))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -3357,9 +3377,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(
-                -(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), op_to_f64(ops.s3))),
-            )))
+            Ok((
+                op_from_f64(-(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), op_to_f64(ops.s3)))),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -3370,7 +3391,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(op_to_f64(ops.s1) + op_to_f64(ops.s2))))
+            Ok(Sf64::fadd(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3381,7 +3402,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(op_to_f64(ops.s1) - op_to_f64(ops.s2))))
+            Ok(Sf64::fsub(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
     RVInsnSpec {
@@ -3393,7 +3414,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             // @TODO: Update fcsr
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(op_to_f64(ops.s1) * op_to_f64(ops.s2))))
+            Ok((op_from_f64(op_to_f64(ops.s1) * op_to_f64(ops.s2)), 0))
         },
     },
     RVInsnSpec {
@@ -3405,15 +3426,18 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
             // Is this implementation correct?
-            Ok(Some(op_from_f64(if op_to_f64(ops.s2) == 0.0 {
-                cpu.set_fcsr_dz();
-                f64::INFINITY
-            } else if op_to_f64(ops.s2) == -0.0 {
-                cpu.set_fcsr_dz();
-                f64::NEG_INFINITY
-            } else {
-                op_to_f64(ops.s1) / op_to_f64(ops.s2)
-            })))
+            Ok((
+                op_from_f64(if op_to_f64(ops.s2) == 0.0 {
+                    cpu.set_fcsr_dz();
+                    f64::INFINITY
+                } else if op_to_f64(ops.s2) == -0.0 {
+                    cpu.set_fcsr_dz();
+                    f64::NEG_INFINITY
+                } else {
+                    op_to_f64(ops.s1) / op_to_f64(ops.s2)
+                }),
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -3424,7 +3448,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(op_to_f64(ops.s1).sqrt())))
+            Ok((op_from_f64(op_to_f64(ops.s1).sqrt()), 0))
         },
     },
     RVInsnSpec {
@@ -3438,7 +3462,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
             let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
-            Ok(Some(sign_bit | (rs1_bits & 0x7fffffffffffffff)))
+            Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
         },
     },
     RVInsnSpec {
@@ -3452,7 +3476,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
             let sign_bit = !rs2_bits & (0x8000000000000000u64 as i64);
-            Ok(Some(sign_bit | (rs1_bits & 0x7fffffffffffffff)))
+            Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
         },
     },
     RVInsnSpec {
@@ -3466,7 +3490,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
             let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
-            Ok(Some(sign_bit ^ rs1_bits))
+            Ok((sign_bit ^ rs1_bits, 0))
         },
     },
     RVInsnSpec {
@@ -3478,7 +3502,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
             let (f1, f2) = (op_to_f64(ops.s1), op_to_f64(ops.s2));
-            Ok(Some(op_from_f64(if f1 < f2 { f1 } else { f2 })))
+            Ok((op_from_f64(if f1 < f2 { f1 } else { f2 }), 0))
         },
     },
     RVInsnSpec {
@@ -3490,7 +3514,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
             let (f1, f2) = (op_to_f64(ops.s1), op_to_f64(ops.s2));
-            Ok(Some(op_from_f64(if f1 > f2 { f1 } else { f2 })))
+            Ok((op_from_f64(if f1 > f2 { f1 } else { f2 }), 0))
         },
     },
     RVInsnSpec {
@@ -3501,7 +3525,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f32(op_to_f64(ops.s1) as f32)))
+            Ok((op_from_f32(op_to_f64(ops.s1) as f32), 0))
         },
     },
     RVInsnSpec {
@@ -3512,9 +3536,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            let (v, fflags) = fp::fcvt_d_s(ops.s1);
-            cpu.add_to_fflags(fflags);
-            Ok(Some(v))
+            Ok(fp::fcvt_d_s(ops.s1))
         },
     },
     RVInsnSpec {
@@ -3525,10 +3547,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_empty,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            let (r, fflags) = Sf64::feq(ops.s1, ops.s2);
-            cpu.add_to_fflags(fflags);
-
-            Ok(Some(i64::from(r)))
+            Ok(Sf64::feq(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3539,9 +3558,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            let (r, fflags) = Sf64::flt(ops.s1, ops.s2);
-            cpu.add_to_fflags(fflags);
-            Ok(Some(i64::from(r)))
+            Ok(Sf64::flt(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3552,9 +3569,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            let (r, fflags) = Sf64::fle(ops.s1, ops.s2);
-            cpu.add_to_fflags(fflags);
-            Ok(Some(i64::from(r)))
+            Ok(Sf64::fle(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3565,7 +3580,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            Ok(Some(1 << Sf64::fclass(ops.s1) as usize))
+            Ok((1 << Sf64::fclass(ops.s1) as usize, 0))
         },
     },
     RVInsnSpec {
@@ -3576,7 +3591,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(i64::from(op_to_f64(ops.s1) as i32)))
+            Ok((i64::from(op_to_f64(ops.s1) as i32), 0))
         },
     },
     RVInsnSpec {
@@ -3587,7 +3602,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(i64::from(op_to_f64(ops.s1) as u32)))
+            Ok((i64::from(op_to_f64(ops.s1) as u32), 0))
         },
     },
     RVInsnSpec {
@@ -3598,7 +3613,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(f64::from(ops.s1 as i32))))
+            Ok((op_from_f64(f64::from(ops.s1 as i32)), 0))
         },
     },
     RVInsnSpec {
@@ -3609,7 +3624,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(f64::from(ops.s1 as u32))))
+            Ok((op_from_f64(f64::from(ops.s1 as u32)), 0))
         },
     },
     // RV64D
@@ -3621,7 +3636,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_to_f64(ops.s1) as i64))
+            Ok((op_to_f64(ops.s1) as i64, 0))
         },
     },
     RVInsnSpec {
@@ -3632,7 +3647,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_to_f64(ops.s1) as u64 as i64))
+            Ok((op_to_f64(ops.s1) as u64 as i64, 0))
         },
     },
     RVInsnSpec {
@@ -3643,7 +3658,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            Ok(Some(ops.s1))
+            Ok((ops.s1, 0))
         },
     },
     RVInsnSpec {
@@ -3654,7 +3669,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(ops.s1 as f64)))
+            Ok((op_from_f64(ops.s1 as f64), 0))
         },
     },
     RVInsnSpec {
@@ -3665,7 +3680,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok(Some(op_from_f64(ops.s1 as u64 as f64)))
+            Ok((op_from_f64(ops.s1 as u64 as f64), 0))
         },
     },
     RVInsnSpec {
@@ -3676,7 +3691,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            Ok(Some(ops.s1))
+            Ok((ops.s1, 0))
         },
     },
     // Remaining (all system-level) that weren't listed in the instr-table
@@ -3709,7 +3724,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -3741,7 +3756,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -3766,7 +3781,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             // HACK
             cpu.flush_icache = true;
 
-            Ok(None)
+            Ok((0, 0))
         },
     },
     RVInsnSpec {
@@ -3791,7 +3806,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
                 });
             }
             cpu.wfi = true;
-            Ok(None)
+            Ok((0, 0))
         },
     },
     // Zba -- AKA, my only favorite extension
@@ -3801,7 +3816,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0800003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add(ops.s1 & 0xffffffff))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add(ops.s1 & 0xffffffff), 0)),
     },
     RVInsnSpec {
         name: "SH1ADD",
@@ -3809,7 +3824,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x20002033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add(ops.s1 << 1))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add(ops.s1 << 1), 0)),
     },
     RVInsnSpec {
         name: "SH1ADD.UW",
@@ -3817,7 +3832,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x2000203b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 1))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 1), 0)),
     },
     RVInsnSpec {
         name: "SH2ADD",
@@ -3825,7 +3840,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x20004033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add(ops.s1 << 2))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add(ops.s1 << 2), 0)),
     },
     RVInsnSpec {
         name: "SH2ADD.UW",
@@ -3833,7 +3848,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x2000403b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 2))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 2), 0)),
     },
     RVInsnSpec {
         name: "SH3ADD",
@@ -3841,7 +3856,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x20006033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add(ops.s1 << 3))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add(ops.s1 << 3), 0)),
     },
     RVInsnSpec {
         name: "SH3ADD.UW",
@@ -3849,7 +3864,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x2000603b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 3))),
+        execute: |_cpu, _uop, ops| Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 3), 0)),
     },
     RVInsnSpec {
         name: "SLLI.UW",
@@ -3857,7 +3872,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0800101b,
         decode: decode_r_shift,
         disassemble: disassemble_r,
-        execute: |_cpu, uop, ops| Ok(Some((ops.s1 & 0xffffffff) << uop.imm)),
+        execute: |_cpu, uop, ops| Ok(((ops.s1 & 0xffffffff) << uop.imm, 0)),
     },
     // Zicond extension
     RVInsnSpec {
@@ -3866,7 +3881,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0e005033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(if ops.s2 == 0 { 0 } else { ops.s1 })),
+        execute: |_cpu, _uop, ops| Ok((if ops.s2 == 0 { 0 } else { ops.s1 }, 0)),
     },
     RVInsnSpec {
         name: "CZERO.NEZ",
@@ -3874,7 +3889,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0e007033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok(Some(if ops.s2 != 0 { 0 } else { ops.s1 })),
+        execute: |_cpu, _uop, ops| Ok((if ops.s2 != 0 { 0 } else { ops.s1 }, 0)),
     },
     // Last one is a sentiel and must always be this illegal instruction
     RVInsnSpec {
