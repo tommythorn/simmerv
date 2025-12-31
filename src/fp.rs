@@ -1,25 +1,23 @@
+#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::precedence)]
 //! RISC-V floating point
 //!
 //! This is largely based on RISCVEMU/TinyEMU/Dromajo,
 //! Copyright (c) 2016 Fabrice Bellard
 //! Copyright (C) 2017,2018,2019, Esperanto Technologies Inc.
 
-#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::precedence)]
+use crate::native_fp;
+
 use num_derive::FromPrimitive;
 
-// XXX These are expected to be temporary, until fp.rs is complete
-#[must_use]
-pub const fn op_from_f32(f: f32) -> u64 { NAN_BOX_F32 | f.to_bits() as u64 }
-#[must_use]
-pub const fn op_from_f64(f: f64) -> u64 { f.to_bits() }
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-#[must_use]
-pub fn op_to_f32(v: u64) -> f32 { f32::from_bits(Sf32::unbox(v) as u32) }
-#[must_use]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub const fn op_to_f64(v: u64) -> f64 { f64::from_bits(v) }
-
 pub const NAN_BOX_F32: u64 = 0xFFFF_FFFF_0000_0000u64;
+
+pub mod fflag {
+    pub const INEXACT: u8 = 1;
+    pub const UNDERFLOW: u8 = 2;
+    pub const OVERFLOW: u8 = 4;
+    pub const DIVIDEZERO: u8 = 8;
+    pub const INVALIDOP: u8 = 16;
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, FromPrimitive)]
 pub enum RoundingMode {
@@ -31,14 +29,6 @@ pub enum RoundingMode {
     Reserved5,
     Reserved6,
     Dynamic, // Use rounding mode from fcsr
-}
-
-pub mod fflag {
-    pub const INEXACT: u8 = 1;
-    pub const UNDERFLOW: u8 = 2;
-    pub const OVERFLOW: u8 = 4;
-    //pub const DIVIDEZERO:u8 = 8;
-    pub const INVALIDOP: u8 = 16;
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, FromPrimitive)]
@@ -55,7 +45,11 @@ pub enum Fclass {
     Qnan,
 }
 
+pub struct Sf32;
+pub struct Sf64;
+
 pub trait Sf {
+    type F;
     const N: usize;
     const MANT_SIZE: usize;
     const EXP_SIZE: usize;
@@ -74,6 +68,9 @@ pub trait Sf {
     const QNAN_MASK: u64 = 1 << (Self::MANT_SIZE - 1);
 
     const QNAN: u64;
+
+    fn from_float(a: Self::F) -> u64;
+    fn to_float(a: u64) -> Self::F;
 
     #[must_use]
     fn unbox(a: u64) -> u64;
@@ -129,6 +126,9 @@ pub trait Sf {
             Fclass::Pnormal
         }
     }
+
+    #[must_use]
+    fn is_zero(a: u64) -> bool { Self::exp(a) == 0 && Self::mant(a) == 0 }
 
     #[must_use]
     fn is_nan(a: u64) -> bool { Self::exp(a) == Self::EXP_MASK && Self::mant(a) != 0 }
@@ -363,16 +363,114 @@ pub trait Sf {
 
         (Self::pack(a_sign, a_exp as u64, a_mant), fflags)
     }
-}
 
-pub struct Sf32;
-pub struct Sf64;
+    #[must_use]
+    fn normalize_subnormal(mant: u64) -> (i64, u64) {
+        assert_eq!(mant & !Self::MANT_MASK, 0);
+        let shift = Self::MANT_SIZE - (63 - mant.leading_zeros() as usize);
+        log::info!(
+            "Normalize {} 0x{mant:x} -> shift {shift} -> new mantissa {:x}",
+            Self::N,
+            mant << shift
+        );
+        (1 - shift as i64, (mant << shift) & Self::MANT_MASK)
+    }
+
+    fn map1(a: u64, f: impl Fn(Self::F) -> Self::F) -> (u64, u8) {
+        let a = Self::to_float(a);
+        let r = f(a);
+        let fflags = native_fp::fflags_raised();
+        (Self::from_float(r), fflags)
+    }
+
+    fn map2(a: u64, b: u64, f: impl Fn(Self::F, Self::F) -> Self::F) -> (u64, u8) {
+        let (a, b) = (Self::to_float(a), Self::to_float(b));
+        let r = f(a, b);
+        let fflags = native_fp::fflags_raised();
+        (Self::from_float(r), fflags)
+    }
+
+    fn map3(a: u64, b: u64, c: u64, f: impl Fn(Self::F, Self::F, Self::F) -> Self::F) -> (u64, u8) {
+        let (a, b, c) = (Self::to_float(a), Self::to_float(b), Self::to_float(c));
+        let r = f(a, b, c);
+        let fflags = native_fp::fflags_raised();
+        (Self::from_float(r), fflags)
+    }
+
+    #[must_use]
+    fn min(a: u64, b: u64) -> (u64, u8)
+    where
+        <Self as Sf>::F: PartialOrd,
+    {
+        let fflags = if Self::is_signan(a) || Self::is_signan(b) {
+            fflag::INVALIDOP
+        } else {
+            0
+        };
+        let r = if Self::is_zero(a) && Self::is_zero(b) {
+            if a == b {
+                a
+            } else {
+                // -0.0
+                Self::SIGN_MASK
+            }
+        } else if Self::is_nan(a) {
+            if Self::is_nan(b) { Self::QNAN } else { b }
+        } else if Self::is_nan(b) {
+            a
+        } else {
+            let a: Self::F = Self::to_float(a);
+            let b: Self::F = Self::to_float(b);
+            Self::from_float(if a < b { a } else { b })
+        };
+
+        (r, fflags)
+    }
+
+    #[must_use]
+    fn max(a: u64, b: u64) -> (u64, u8)
+    where
+        <Self as Sf>::F: PartialOrd,
+    {
+        let fflags = if Self::is_signan(a) || Self::is_signan(b) {
+            fflag::INVALIDOP
+        } else {
+            0
+        };
+        let r = if Self::is_zero(a) && Self::is_zero(b) {
+            if a == b {
+                a
+            } else {
+                // +0.0
+                0
+            }
+        } else if Self::is_nan(a) {
+            if Self::is_nan(b) { Self::QNAN } else { b }
+        } else if Self::is_nan(b) {
+            a
+        } else {
+            let a: Self::F = Self::to_float(a);
+            let b: Self::F = Self::to_float(b);
+            Self::from_float(if a < b { b } else { a })
+        };
+
+        (r, fflags)
+    }
+}
 
 impl Sf for Sf32 {
     const N: usize = 32;
     const MANT_SIZE: usize = 23;
     const EXP_SIZE: usize = 8;
     const QNAN: u64 = 0x7fc0_0000;
+
+    type F = f32;
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn from_float(f: Self::F) -> u64 { NAN_BOX_F32 | u64::from(f.to_bits()) }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn to_float(v: u64) -> Self::F { f32::from_bits(Self::unbox(v) as u32) }
 
     fn unbox(r: u64) -> u64 {
         if (r & NAN_BOX_F32) == NAN_BOX_F32 {
@@ -386,13 +484,21 @@ impl Sf for Sf32 {
 }
 
 impl Sf for Sf64 {
+    type F = f64;
+
     const N: usize = 64;
     const MANT_SIZE: usize = 52;
     const EXP_SIZE: usize = 11;
-    const QNAN: u64 = 0x7ff8_0000_0000_0000; // XXX Check this
+    const QNAN: u64 = 0x7ff8_0000_0000_0000;
 
     fn unbox(r: u64) -> u64 { r }
     fn nanbox(r: u64) -> u64 { r }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn from_float(f: f64) -> u64 { f.to_bits() }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn to_float(v: u64) -> f64 { f64::from_bits(v) }
 }
 
 #[must_use]
@@ -416,14 +522,14 @@ pub fn fcvt_d_s(a: u64) -> (u64, u8) {
         if a_mant == 0 {
             (Sf64::pack(a_sign, 0, 0), 0)
         } else {
-            let (a_exp, a_mant) = normalize_subnormal_sf32(a_mant);
+            let (a_exp, a_mant) = Sf32::normalize_subnormal(a_mant);
             /* convert the exponent value */
-            let a_exp = a_exp - 0x7f + (Sf64::EXP_MASK / 2);
+            let a_exp = a_exp - 0x7f + (Sf64::EXP_MASK / 2) as i64;
             /* shift the mantissa */
             let a_mant = a_mant << (Sf64::MANT_SIZE - Sf32::MANT_SIZE);
             /* We assume the target float is large enough to that no
             normalization is necessary */
-            (Sf64::pack(a_sign, a_exp, a_mant), 0)
+            (Sf64::pack(a_sign, a_exp as u64, a_mant), 0)
         }
     } else {
         /* convert the exponent value */
@@ -434,27 +540,6 @@ pub fn fcvt_d_s(a: u64) -> (u64, u8) {
         normalization is necessary */
         (Sf64::pack(a_sign, a_exp, a_mant), 0)
     }
-}
-
-#[allow(dead_code)]
-fn normalize_subnormal_sf32(mant: u64) -> (u64, u64) {
-    assert_eq!(mant & !Sf32::MANT_MASK, 0);
-    let shift = Sf32::MANT_SIZE - (63 - mant.leading_zeros() as usize);
-    log::info!(
-        "Normalize 32 0x{mant:x} -> shift {shift} -> new mantissa {:x}",
-        mant << shift
-    );
-    (1 - shift as u64, (mant << shift) & Sf32::MANT_MASK)
-}
-
-#[allow(dead_code)]
-fn normalize_subnormal_sf64(mant: u64) -> (u64, u64) {
-    let shift = Sf64::MANT_SIZE - (63 - mant.leading_zeros() as usize);
-    log::info!(
-        "Normalize 64 0x{mant:x} -> shift {shift} -> new mantissa {:x}",
-        mant << shift
-    );
-    (1 - shift as u64, (mant << shift) & Sf64::MANT_MASK)
 }
 
 // i64 -> f32
@@ -517,187 +602,5 @@ pub fn cvt_i32_sf32(a: u64, _rm: RoundingMode) -> (u64, u8) {
     (NAN_BOX_F32 | u64::from(f.to_bits()), 0)
 }
 
-// The Berkeley Float Test found some issues
 #[cfg(test)]
-mod test {
-    use super::*;
-
-    fn test(
-        f: impl Fn(u64, u64, RoundingMode) -> (u64, u8),
-        f1: u64,
-        f2: u64,
-        rm: RoundingMode,
-        wantr: u64,
-        wantfflag: u8,
-    ) {
-        let (r, fflag) = f(f1, f2, rm);
-        assert_eq!(
-            (wantr, /* wantfflag */ 0), // XXX We'll get to the flags
-            (r, /* fflag */ 0),
-            "{f1:08x}, {f2:08x}, {} -> ({r:08x}, {fflag}) / ({wantr:08x}, {wantfflag})",
-            rm as usize
-        );
-    }
-
-    fn test_bool(f: impl Fn(u64, u64) -> (u64, u8), f1: u64, f2: u64, wantr: bool, wantfflag: u8) {
-        let (r, fflag) = f(f1, f2);
-        assert_eq!(
-            (wantr as u64, wantfflag),
-            (r, fflag),
-            "{f1:08x}, {f2:08x} -> ({r}, {fflag:0x}) / ({wantr}, {wantfflag:0x})",
-        );
-    }
-
-    // Convert John's representation to RISC-V NaN-boxed floats
-    const fn fp32(sign: u64, exp: u64, mant: u64) -> u64 {
-        NAN_BOX_F32 | (sign << 31) | (exp << 23) | mant
-    }
-
-    const fn fp64(sign: u64, exp: u64, mant: u64) -> u64 { (sign << 63) | (exp << 52) | mant }
-
-    /*    fn fp64(sign: u64, exp: u64, mant: u64) -> u64 {
-        sign << 63 | exp << 52 | mant
-    }*/
-
-    #[test]
-    fn test_feq64() {
-        // Errors found in f64_eq:
-        // -47E.10000000000FF  +7FF.4F3D114AF58E4  => 0 .....  expected 0 v....
-        test_bool(
-            Sf64::feq,
-            fp64(1, 0x47E, 0x10000000000FF),
-            fp64(0, 0x7FF, 0x4F3D114AF58E4),
-            false,
-            0x10,
-        );
-        test_bool(
-            Sf64::feq,
-            fp64(0, 0x000, 0x0000000000000),
-            fp64(0, 0x000, 0x0000100000000),
-            false,
-            0x00,
-        );
-    }
-
-    #[test]
-    fn test_f64_lt() {
-        // +46D.03FFFFFFFFFFB  +3CA.000000800000F  => 1 .....  expected 0 ....
-        test_bool(
-            Sf64::flt,
-            fp64(0, 0x46D, 0x03FFFFFFFFFFB),
-            fp64(0, 0x3CA, 0x000000800000F),
-            false,
-            0x00,
-        );
-    }
-
-    #[test]
-    fn test_fle32() {
-        // Errors found in f32_le:
-        // +7F.7E0000  -FF.7FFF7F  => 0 .....  expected 0 v....
-        // -82.6E832F  +FF.7001FF  => 0 .....  expected 0 v....
-        test_bool(
-            Sf32::fle,
-            fp32(0, 0x7F, 0x7E0000),
-            fp32(1, 0xFF, 0x7FFF7F),
-            false,
-            0x10,
-        );
-        test_bool(
-            Sf32::fle,
-            fp32(1, 0x86, 0x6E832F),
-            fp32(0, 0xFF, 0x7001FF),
-            false,
-            0x10,
-        );
-    }
-
-    #[test]
-    fn test_f32_lt() {
-        // Errors found in f32_lt:
-        // -FF.000400  +FF.7BFFFF  => 0 .....  expected 0 v....
-        test_bool(
-            Sf32::flt,
-            fp32(1, 0xFF, 0x000400),
-            fp32(0, 0xFF, 0x7BFFFF),
-            false,
-            0x10,
-        );
-
-        // -00.000001  +7D.7FFFFF  => 0 v....  expected 1 .....
-        // +7E.7FC000  +FF.008000 => 0 v....
-        // +97.7BFFFF  -FD.000008 => 0 .....
-        // +FF.080000  -7F.7FFF7F => 0 v....
-        // +67.7FFE7F  +FD.003FC0 => 1 .....
-        // -FF.7FFFFC  +FE.7FE000 => 0 v....
-        test_bool(
-            Sf32::flt,
-            fp32(1, 0x00, 0x000001),
-            fp32(0, 0x7D, 0x7FFFFF),
-            true,
-            0,
-        );
-        test_bool(
-            Sf32::flt,
-            fp32(0, 0x7E, 0x7FC000),
-            fp32(0, 0xFF, 0x008000),
-            false,
-            0x10,
-        );
-        test_bool(
-            Sf32::flt,
-            fp32(0, 0x97, 0x7BFFFF),
-            fp32(1, 0xFD, 0x000008),
-            false,
-            0,
-        );
-        test_bool(
-            Sf32::flt,
-            fp32(0, 0xFF, 0x080000),
-            fp32(1, 0x7F, 0x7FFF7F),
-            false,
-            0x10,
-        );
-        test_bool(
-            Sf32::flt,
-            fp32(0, 0x67, 0x7FFE7F),
-            fp32(0, 0xFD, 0x003FC0),
-            true,
-            0,
-        );
-        test_bool(
-            Sf32::flt,
-            fp32(1, 0xFF, 0x7FFFFC),
-            fp32(0, 0xFE, 0x7FE000),
-            false,
-            0x10,
-        );
-    }
-
-    #[test]
-    fn test_f32_add() {
-        let pairs = [(0.0, 0.0), (1.0, 1.0), (1.0, 2.0)];
-        for (a, b) in pairs {
-            test(
-                Sf32::fadd,
-                op_from_f32(a),
-                op_from_f32(b),
-                RoundingMode::RoundNearestEven,
-                op_from_f32(a + b),
-                0,
-            );
-        }
-    }
-
-    #[test]
-    fn test_fadd() {
-        test(
-            Sf64::fadd,
-            0x2b50000200000020,
-            0xbca0000000000000u64,
-            RoundingMode::RoundNearestEven,
-            0xbca0000000000000u64,
-            1,
-        );
-    }
-}
+mod tests;

@@ -9,6 +9,7 @@ pub mod device;
 pub mod fp;
 pub mod memory;
 pub mod mmu;
+pub mod native_fp;
 pub mod riscv;
 pub mod rvc;
 pub mod terminal;
@@ -105,6 +106,7 @@ impl Emulator {
             let cycle = self.cpu.cycle;
             let insn_addr = self.cpu.pc;
             let insn_word = self.cpu.memop_disass(insn_addr);
+            let fflags = self.cpu.fflags;
 
             // XXX The disassemble API sucks
             s.clear();
@@ -117,11 +119,32 @@ impl Emulator {
                 let (insn, _) = cpu::decompress(word32 as u32);
                 if let Some(decoded) = cpu::decode(&self.cpu.decode_dag, insn) {
                     let uop = (decoded.decode)(insn_addr, insn, decoded.execute);
-                    if uop.rd.is_x0_dest() || exceptional {
-                        println!();
-                    } else {
-                        println!("{:16x}", self.cpu.read_register(uop.rd));
+                    if !uop.rd.is_x0_dest() && !exceptional {
+                        print!("{:16x}", self.cpu.read_register(uop.rd));
+                        if self.cpu.fflags != fflags {
+                            // XXX Belongs in fp.rs
+                            // RISC-V name   bit   Hauser's SoftFP naming
+                            //        NV     4     v   invalid
+                            //        DZ     3     i   infinite ("divide by zero")
+                            //        OF     2     o   overflow
+                            //        UF     1     u   uderflow
+                            //        NX     0     x   inexact
+                            const FLAG_NAMES: [char; 5] = ['x', 'u', 'o', 'i', 'v'];
+                            print!(" ");
+                            for i in 0..5 {
+                                let i = 4 - i;
+                                print!(
+                                    "{}",
+                                    if (self.cpu.fflags >> i) & 1 == 0 {
+                                        '.'
+                                    } else {
+                                        FLAG_NAMES[i]
+                                    }
+                                );
+                            }
+                        }
                     }
+                    println!();
                 } else {
                     unreachable!("--can't decode {word32:08x}--");
                 }

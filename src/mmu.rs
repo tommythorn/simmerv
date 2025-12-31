@@ -348,13 +348,6 @@ impl Mmu {
         self.store_virt_bytes(va, value, 8)
     }
 
-    /// # Errors
-    /// Exceptions are returned as errors
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store_virt_u32_(&mut self, va: u64, value: u64) -> Result<(), Exception> {
-        self.store_virt_bytes(va, value, 4)
-    }
-
     /// Loads a byte from main memory or peripheral devices depending on
     /// physical address.
     ///

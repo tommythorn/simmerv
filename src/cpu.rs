@@ -10,7 +10,9 @@ use crate::bounded::Bounded;
 use crate::csr;
 use crate::dag_decoder;
 use crate::fp;
+use crate::fp::fflag::DIVIDEZERO;
 use crate::mmu::Mmu;
+use crate::native_fp;
 use crate::riscv;
 use crate::rvc;
 use crate::terminal;
@@ -24,10 +26,6 @@ use fp::cvt_i32_sf32;
 use fp::cvt_i64_sf32;
 use fp::cvt_u32_sf32;
 use fp::cvt_u64_sf32;
-use fp::op_from_f32;
-use fp::op_from_f64;
-use fp::op_to_f32;
-use fp::op_to_f64;
 use intmap::IntMap;
 use log;
 use num_traits::FromPrimitive;
@@ -136,9 +134,9 @@ pub struct Cpu {
     pub pc: u64,
 
     // This is fcsr disaggregated
-    frm: RoundingMode,
-    fflags: u8,
-    fs: u8,
+    pub frm: RoundingMode,
+    pub fflags: u8,
+    pub fs: u8,
 
     // Supervisor and CSR
     pub cycle: u64,
@@ -355,9 +353,11 @@ impl Cpu {
 
     /// Checks that float instructions are enabled and
     /// that the rounding mode is legal; dirty the FP state
-    fn check_float_access(&mut self, rm: u8) -> Result<(), Exception> {
+    fn check_float_access_and_dirty(&mut self, rm: u8) -> Result<(), Exception> {
         self.check_float_access_ro(rm)?;
         self.fs = 3;
+        native_fp::fflags_clear();
+        // XXX set native rounding mode
         Ok(())
     }
 
@@ -742,7 +742,7 @@ impl Cpu {
         }
 
         match csr {
-            Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access(0)?,
+            Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access_and_dirty(0)?,
             Csr::Cycle => {
                 log::info!("** deny cycle writing");
                 return illegal;
@@ -867,17 +867,8 @@ impl Cpu {
         }
     }
 
-    fn _set_fcsr_nv(&mut self) { self.add_to_fflags(0x10); }
-
-    fn set_fcsr_dz(&mut self) { self.add_to_fflags(8); }
-
-    fn _set_fcsr_of(&mut self) { self.add_to_fflags(4); }
-
-    fn _set_fcsr_uf(&mut self) { self.add_to_fflags(2); }
-
-    fn _set_fcsr_nx(&mut self) { self.add_to_fflags(1); }
-
-    /// Disassembles an instruction pointed by Program Counter
+    /// Disassembles an instruction pointed by Program Counter and
+    /// and return the [possibly] writeback register
     #[allow(clippy::cast_sign_loss)]
     pub fn disassemble_insn(&self, s: &mut String, addr: u64, mut word32: u32, eval: bool) {
         let (insn, _) = decompress(word32);
@@ -1761,6 +1752,8 @@ impl Cpu {
         Ok((decoded.decode)(addr, insn, default_execute))
     }
 }
+
+fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -2898,9 +2891,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_i_fx,
         disassemble: disassemble_i_mem,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(0)?;
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 4)?;
-            Ok((v | fp::NAN_BOX_F32, 0))
+            cpu.check_float_access_and_dirty(0)?;
+            Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 4)? | fp::NAN_BOX_F32, 0))
         },
     },
     RVInsnSpec {
@@ -2910,10 +2902,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_s_xf,
         disassemble: disassemble_s,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             cpu.reservation = None;
-            cpu.mmu
-                .store_virt_u32_(ops.s1.wrapping_add(uop.imm), ops.s2)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 4)?;
             Ok((0, 0))
         },
     },
@@ -2924,12 +2915,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            // XXX Update fflags
-            Ok((
-                op_from_f32(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), op_to_f32(ops.s3))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                a.mul_add(b, c)
+            }))
         },
     },
     RVInsnSpec {
@@ -2939,11 +2928,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f32(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), -op_to_f32(ops.s3))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                a.mul_add(b, -c)
+            }))
         },
     },
     RVInsnSpec {
@@ -2953,11 +2941,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f32(-(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), -op_to_f32(ops.s3)))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                -a.mul_add(b, -c)
+            }))
         },
     },
     RVInsnSpec {
@@ -2967,11 +2954,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f32(-(op_to_f32(ops.s1).mul_add(op_to_f32(ops.s2), op_to_f32(ops.s3)))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                -a.mul_add(b, c)
+            }))
         },
     },
     RVInsnSpec {
@@ -2981,7 +2967,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            //Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a + b))
             Ok(Sf32::fadd(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
@@ -2992,7 +2979,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(Sf32::fsub(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
@@ -3003,9 +2990,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            // @TODO: Update fcsr
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f32(op_to_f32(ops.s1) * op_to_f32(ops.s2)), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a * b))
         },
     },
     RVInsnSpec {
@@ -3015,19 +3001,14 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f32(if op_to_f32(ops.s2) == 0.0 {
-                    cpu.set_fcsr_dz();
-                    f32::INFINITY
-                } else if op_to_f32(ops.s2) == -0.0 {
-                    cpu.set_fcsr_dz();
-                    f32::NEG_INFINITY
-                } else {
-                    op_to_f32(ops.s1) / op_to_f32(ops.s2)
-                }),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            if ops.s2 == 0 {
+                Ok((0xffffffff7f800000u64, DIVIDEZERO)) // INFINITY
+            } else if ops.s2 == 0x8000000000000000u64 {
+                Ok((0xffffffffff800000u64, DIVIDEZERO)) // NEG_INFINITY
+            } else {
+                Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a / b))
+            }
         },
     },
     RVInsnSpec {
@@ -3037,8 +3018,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f32(op_to_f32(ops.s1).sqrt()), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf32::map1(ops.s1, f32::sqrt))
         },
     },
     RVInsnSpec {
@@ -3048,11 +3029,11 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
-            let sign_bit = rs2_bits & 0x80000000u64;
-            Ok((fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff), 0))
+            let sign_bit = rs2_bits & 0x80000000;
+            Ok((fp::NAN_BOX_F32 | sign_bit | rs1_bits & 0x7fffffff, 0))
         },
     },
     RVInsnSpec {
@@ -3062,11 +3043,11 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
-            let sign_bit = !rs2_bits & 0x80000000u64;
-            Ok((fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff), 0))
+            let sign_bit = !rs2_bits & 0x80000000;
+            Ok((fp::NAN_BOX_F32 | sign_bit | rs1_bits & 0x7fffffff, 0))
         },
     },
     RVInsnSpec {
@@ -3076,10 +3057,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
-            let sign_bit = rs2_bits & 0x80000000u64;
+            let sign_bit = rs2_bits & 0x80000000;
             Ok((fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits), 0))
         },
     },
@@ -3090,9 +3071,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
-            let (f1, f2) = (op_to_f32(ops.s1), op_to_f32(ops.s2));
-            Ok((op_from_f32(if f1 < f2 { f1 } else { f2 }), 0))
+            cpu.check_float_access_and_dirty(0)?;
+            Ok(Sf32::min(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3102,9 +3082,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
-            let (f1, f2) = (op_to_f32(ops.s1), op_to_f32(ops.s2));
-            Ok((op_from_f32(if f1 > f2 { f1 } else { f2 }), 0))
+            cpu.check_float_access_and_dirty(0)?;
+            Ok(Sf32::max(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3114,8 +3093,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f32(ops.s1) as i32 as u64, 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok((Sf32::to_float(ops.s1) as i32 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3125,8 +3104,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((sext32(op_to_f32(ops.s1) as u32), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok((u64::from(Sf32::to_float(ops.s1) as u32), 0))
         },
     },
     RVInsnSpec {
@@ -3136,7 +3115,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok((ops.s1 as i32 as u64, 0))
         },
     },
@@ -3147,7 +3126,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok(Sf32::feq(ops.s1, ops.s2))
         },
     },
@@ -3158,7 +3137,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok(Sf32::flt(ops.s1, ops.s2))
         },
     },
@@ -3169,7 +3148,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok(Sf32::fle(ops.s1, ops.s2))
         },
     },
@@ -3180,7 +3159,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok((1 << Sf32::fclass(ops.s1) as usize, 0))
         },
     },
@@ -3191,7 +3170,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(cvt_i32_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
@@ -3202,7 +3181,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(cvt_u32_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
@@ -3213,7 +3192,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r_f,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok((fp::NAN_BOX_F32 | ops.s1, 0))
         },
     },
@@ -3225,8 +3204,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f32(ops.s1) as i64 as u64, 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok((Sf32::to_float(ops.s1) as i64 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3236,8 +3215,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f32(ops.s1) as u64, 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok((Sf32::to_float(ops.s1) as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3247,7 +3226,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(cvt_i64_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
@@ -3258,7 +3237,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(cvt_u64_sf32(ops.s1, cpu.get_rm(uop.rm)))
         },
     },
@@ -3270,7 +3249,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_i_fx,
         disassemble: disassemble_i,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let v = cpu.memop(Read, ops.s1, uop.imm, 0, 8)?;
             Ok((v, 0))
         },
@@ -3282,7 +3261,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_s_xf,
         disassemble: disassemble_s,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             cpu.mmu.store64(ops.s1.wrapping_add(uop.imm), ops.s2)?;
             Ok((0, 0))
         },
@@ -3294,11 +3273,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f64(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), op_to_f64(ops.s3))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                a.mul_add(b, c)
+            }))
         },
     },
     RVInsnSpec {
@@ -3308,11 +3286,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f64(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), -op_to_f64(ops.s3))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                a.mul_add(b, -c)
+            }))
         },
     },
     RVInsnSpec {
@@ -3322,11 +3299,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f64(-(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), -op_to_f64(ops.s3)))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                -a.mul_add(b, -c)
+            }))
         },
     },
     RVInsnSpec {
@@ -3336,11 +3312,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r2_ffff,
         disassemble: disassemble_r2_ffff,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((
-                op_from_f64(-(op_to_f64(ops.s1).mul_add(op_to_f64(ops.s2), op_to_f64(ops.s3)))),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
+                -a.mul_add(b, c)
+            }))
         },
     },
     RVInsnSpec {
@@ -3350,7 +3325,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(Sf64::fadd(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
@@ -3361,7 +3336,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(Sf64::fsub(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
         },
     },
@@ -3372,9 +3347,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            // @TODO: Update fcsr
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(op_to_f64(ops.s1) * op_to_f64(ops.s2)), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf64::map2(ops.s1, ops.s2, |a, b| a * b))
         },
     },
     RVInsnSpec {
@@ -3384,20 +3358,14 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            // Is this implementation correct?
-            Ok((
-                op_from_f64(if op_to_f64(ops.s2) == 0.0 {
-                    cpu.set_fcsr_dz();
-                    f64::INFINITY
-                } else if op_to_f64(ops.s2) == -0.0 {
-                    cpu.set_fcsr_dz();
-                    f64::NEG_INFINITY
-                } else {
-                    op_to_f64(ops.s1) / op_to_f64(ops.s2)
-                }),
-                0,
-            ))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            if ops.s2 == 0 {
+                Ok((f64::INFINITY as u64, DIVIDEZERO)) // XXX??
+            } else if ops.s2 == 0x8000000000000000u64 {
+                Ok((f64::NEG_INFINITY as u64, DIVIDEZERO)) // XXX??
+            } else {
+                Ok(Sf64::map2(ops.s1, ops.s2, |a, b| a / b))
+            }
         },
     },
     RVInsnSpec {
@@ -3407,8 +3375,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(op_to_f64(ops.s1).sqrt()), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(Sf64::map1(ops.s1, f64::sqrt))
         },
     },
     RVInsnSpec {
@@ -3418,7 +3386,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
             let sign_bit = rs2_bits & 0x8000000000000000u64;
@@ -3432,7 +3400,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
             let sign_bit = !rs2_bits & 0x8000000000000000u64;
@@ -3446,7 +3414,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
             let sign_bit = rs2_bits & 0x8000000000000000u64;
@@ -3460,9 +3428,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
-            let (f1, f2) = (op_to_f64(ops.s1), op_to_f64(ops.s2));
-            Ok((op_from_f64(if f1 < f2 { f1 } else { f2 }), 0))
+            cpu.check_float_access_and_dirty(0)?;
+            Ok(Sf64::min(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3472,9 +3439,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
-            let (f1, f2) = (op_to_f64(ops.s1), op_to_f64(ops.s2));
-            Ok((op_from_f64(if f1 > f2 { f1 } else { f2 }), 0))
+            cpu.check_float_access_and_dirty(0)?;
+            Ok(Sf64::max(ops.s1, ops.s2))
         },
     },
     RVInsnSpec {
@@ -3484,8 +3450,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f32(op_to_f64(ops.s1) as f32), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf32::from_float(Sf64::to_float(ops.s1) as f32)))
         },
     },
     RVInsnSpec {
@@ -3495,7 +3461,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fff,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
+            cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(fp::fcvt_d_s(ops.s1))
         },
     },
@@ -3506,7 +3472,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xff,
         disassemble: disassemble_empty,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok(Sf64::feq(ops.s1, ops.s2))
         },
     },
@@ -3517,7 +3483,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok(Sf64::flt(ops.s1, ops.s2))
         },
     },
@@ -3528,7 +3494,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xff,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok(Sf64::fle(ops.s1, ops.s2))
         },
     },
@@ -3539,7 +3505,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok((1 << Sf64::fclass(ops.s1) as usize, 0))
         },
     },
@@ -3550,8 +3516,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f64(ops.s1) as i32 as u64, 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::to_float(ops.s1) as i32 as u64))
         },
     },
     RVInsnSpec {
@@ -3561,8 +3527,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((u64::from(op_to_f64(ops.s1) as u32), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::to_float(ops.s1) as i32 as u64))
         },
     },
     RVInsnSpec {
@@ -3572,8 +3538,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(f64::from(ops.s1 as i32)), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::from_float(f64::from(ops.s1 as i32))))
         },
     },
     RVInsnSpec {
@@ -3583,8 +3549,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(f64::from(ops.s1 as u32)), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::from_float(f64::from(ops.s1 as u32))))
         },
     },
     // RV64D
@@ -3595,8 +3561,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f64(ops.s1) as i64 as u64, 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::to_float(ops.s1) as i64 as u64))
         },
     },
     RVInsnSpec {
@@ -3606,8 +3572,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f64(ops.s1) as u64, 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::to_float(ops.s1) as u64))
         },
     },
     RVInsnSpec {
@@ -3617,7 +3583,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_xf,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok((ops.s1, 0))
         },
     },
@@ -3628,8 +3594,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(ops.s1 as i64 as f64), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::from_float(ops.s1 as i64 as f64)))
         },
     },
     RVInsnSpec {
@@ -3639,8 +3605,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
-            cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(ops.s1 as f64), 0))
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(with_fflags(Sf64::from_float(ops.s1 as f64)))
         },
     },
     RVInsnSpec {
@@ -3650,7 +3616,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r_fx,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            cpu.check_float_access(0)?;
+            cpu.check_float_access_and_dirty(0)?;
             Ok((ops.s1, 0))
         },
     },
