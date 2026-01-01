@@ -99,37 +99,35 @@ impl Emulator {
     /// It can panic
     #[allow(clippy::cast_possible_truncation)]
     pub fn run_test(&mut self) {
-        //use std::io::{self, Write};
-
         let mut s = String::new();
 
         loop {
+            let cycle = self.cpu.cycle;
+            let insn_addr = self.cpu.pc;
+            let insn_word = self.cpu.memop_disass(insn_addr);
+
+            // XXX The disassemble API sucks
             s.clear();
             self.cpu.disassemble(&mut s);
-            // XXX might make sense to return the instruction
             let exceptional = self.tick(1);
-            let cycle = self.cpu.cycle;
-            print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
 
-            if let Ok(word32) = self.cpu.memop_disass(self.cpu.pc) {
+            print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
+            if let Ok(word32) = insn_word {
                 #[allow(clippy::cast_sign_loss)]
                 let (insn, _) = cpu::decompress(word32 as u32);
                 if let Some(decoded) = cpu::decode(&self.cpu.decode_dag, insn) {
-                    let uop = (decoded.decode)(self.cpu.pc, insn, decoded.execute);
-                    let wbr = uop.rd;
-                    if wbr.is_x0_dest() || exceptional {
+                    let uop = (decoded.decode)(insn_addr, insn, decoded.execute);
+                    if uop.rd.is_x0_dest() || exceptional {
                         println!();
                     } else {
-                        println!("{:16x}", self.cpu.read_register(wbr));
+                        println!("{:16x}", self.cpu.read_register(uop.rd));
                     }
                 } else {
-                    println!();
+                    unreachable!("--can't decode {word32:08x}--");
                 }
             } else {
-                println!();
+                println!("--can't fetch from {insn_addr:08x}--");
             }
-
-            //let _ = io::stdout().flush();
 
             if self.handle_htif() {
                 break;
