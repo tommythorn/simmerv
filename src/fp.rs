@@ -9,17 +9,17 @@ use num_derive::FromPrimitive;
 
 // XXX These are expected to be temporary, until fp.rs is complete
 #[must_use]
-pub fn op_from_f32(f: f32) -> i64 { NAN_BOX_F32 | i64::from(f.to_bits()) }
+pub const fn op_from_f32(f: f32) -> u64 { NAN_BOX_F32 | f.to_bits() as u64 }
 #[must_use]
-pub const fn op_from_f64(f: f64) -> i64 { f.to_bits() as i64 }
+pub const fn op_from_f64(f: f64) -> u64 { f.to_bits() }
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[must_use]
-pub fn op_to_f32(v: i64) -> f32 { f32::from_bits(Sf32::unbox(v) as u32) }
+pub fn op_to_f32(v: u64) -> f32 { f32::from_bits(Sf32::unbox(v) as u32) }
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub const fn op_to_f64(v: i64) -> f64 { f64::from_bits(v as u64) }
+pub const fn op_to_f64(v: u64) -> f64 { f64::from_bits(v) }
 
-pub const NAN_BOX_F32: i64 = 0xFFFF_FFFF_0000_0000u64 as i64;
+pub const NAN_BOX_F32: u64 = 0xFFFF_FFFF_0000_0000u64;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, FromPrimitive)]
 pub enum RoundingMode {
@@ -55,18 +55,6 @@ pub enum Fclass {
     Qnan,
 }
 
-// XXX I think I can do better and make this more type safe:
-// pub trait Sf {
-//     fn unpack(a: Sf) -> (i64, i64, i64);
-//     fn pack(s: i64, e: i64, m: i64) -> Sf;
-//     fn fclass(self) -> Fclass { ... }
-//     fn le(self, b: self) -> bool { ... }
-//     ...
-// }
-// struct Sf32(i64)
-// struct Sf64(i64)
-// impl Sf for Sf32 ...
-
 pub trait Sf {
     const N: usize;
     const MANT_SIZE: usize;
@@ -74,43 +62,43 @@ pub trait Sf {
     const IMANT_SIZE: usize = Self::N - 2; /* internal mantissa size */
     const RND_SIZE: usize = Self::IMANT_SIZE - Self::MANT_SIZE;
 
-    const MASK: i64 = if Self::N == 64 { !0 } else { 0xFFFF_FFFF };
-    const MASKSIGN: i64 = if Self::N == 64 {
+    const MASK: u64 = if Self::N == 64 { !0 } else { 0xFFFF_FFFF };
+    const MASKSIGN: u64 = if Self::N == 64 {
         0x7FFF_FFFF_FFFF_FFFF
     } else {
         0x7FFF_FFFF
     };
-    const SIGN_MASK: i64 = (1u64 << (Self::N - 1)) as i64;
-    const EXP_MASK: i64 = (1 << Self::EXP_SIZE) - 1;
-    const MANT_MASK: i64 = (1 << Self::MANT_SIZE) - 1;
-    const QNAN_MASK: i64 = 1 << (Self::MANT_SIZE - 1);
+    const SIGN_MASK: u64 = 1 << (Self::N - 1);
+    const EXP_MASK: u64 = (1 << Self::EXP_SIZE) - 1;
+    const MANT_MASK: u64 = (1 << Self::MANT_SIZE) - 1;
+    const QNAN_MASK: u64 = 1 << (Self::MANT_SIZE - 1);
 
-    const QNAN: i64;
-
-    #[must_use]
-    fn unbox(a: i64) -> i64;
+    const QNAN: u64;
 
     #[must_use]
-    fn nanbox(a: i64) -> i64;
+    fn unbox(a: u64) -> u64;
 
     #[must_use]
-    fn sign(a: i64) -> i64 { (a >> (Self::N - 1)) & 1 }
+    fn nanbox(a: u64) -> u64;
 
     #[must_use]
-    fn exp(a: i64) -> i64 { (a >> Self::MANT_SIZE) & Self::EXP_MASK }
+    fn sign(a: u64) -> u64 { (a >> (Self::N - 1)) & 1 }
 
     #[must_use]
-    fn mant(a: i64) -> i64 { a & Self::MANT_MASK }
+    fn exp(a: u64) -> u64 { (a >> Self::MANT_SIZE) & Self::EXP_MASK }
 
     #[must_use]
-    fn pack(sign: i64, exp: i64, mant: i64) -> i64 {
+    fn mant(a: u64) -> u64 { a & Self::MANT_MASK }
+
+    #[must_use]
+    fn pack(sign: u64, exp: u64, mant: u64) -> u64 {
         assert_eq!(sign & !1, 0);
         assert_eq!(exp & !Self::EXP_MASK, 0);
         Self::nanbox(sign << (Self::N - 1) | exp << Self::MANT_SIZE | mant & Self::MANT_MASK)
     }
 
     #[must_use]
-    fn fclass(a: i64) -> Fclass {
+    fn fclass(a: u64) -> Fclass {
         if Self::exp(a) == Self::EXP_MASK {
             if Self::mant(a) != 0 {
                 if Self::mant(a) & Self::QNAN_MASK != 0 {
@@ -143,22 +131,23 @@ pub trait Sf {
     }
 
     #[must_use]
-    fn is_nan(a: i64) -> bool { Self::exp(a) == Self::EXP_MASK && Self::mant(a) != 0 }
+    fn is_nan(a: u64) -> bool { Self::exp(a) == Self::EXP_MASK && Self::mant(a) != 0 }
 
     #[must_use]
-    fn is_signan(a: i64) -> bool {
+    fn is_signan(a: u64) -> bool {
         let a_exp1 = (a >> (Self::MANT_SIZE - 1)) & ((1 << (Self::EXP_SIZE + 1)) - 1);
         a_exp1 == (2 * Self::EXP_MASK) && Self::mant(a) != 0
     }
 
     #[must_use]
-    fn rshift_rnd(a: i64, d: i64) -> i64 {
+    fn rshift_rnd(a: u64, d: i64) -> u64 {
         if d != 0 {
             if d >= Self::N as i64 {
-                i64::from(a != 0)
+                u64::from(a != 0)
             } else {
+                let d = d as u64;
                 let mask = (1 << d) - 1;
-                (a >> d) | i64::from((a & mask) != 0)
+                ((a as i64) >> d) as u64 | u64::from((a & mask) != 0)
             }
         } else {
             a
@@ -166,7 +155,7 @@ pub trait Sf {
     }
 
     #[must_use]
-    fn feq(a0: i64, b0: i64) -> (i64, u8) {
+    fn feq(a0: u64, b0: u64) -> (u64, u8) {
         let (a, b) = (Self::unbox(a0), Self::unbox(b0));
         if Self::is_nan(a) || Self::is_nan(b) {
             if Self::is_signan(a) || Self::is_signan(b) {
@@ -177,52 +166,52 @@ pub trait Sf {
         } else if (a | b) & Self::MASKSIGN == 0 {
             (1, 0) /* zero case */
         } else {
-            (i64::from(a == b), 0)
+            (u64::from(a == b), 0)
         }
     }
 
     #[must_use]
-    fn fle(a: i64, b: i64) -> (i64, u8) {
+    fn fle(a: u64, b: u64) -> (u64, u8) {
         let (a, b) = (Self::unbox(a), Self::unbox(b));
         if Self::is_nan(a) || Self::is_nan(b) {
             (0, fflag::INVALIDOP)
         } else if Self::sign(a) != Self::sign(b) {
             (
-                i64::from(Self::sign(a) != 0 || (a | b) & Self::MASKSIGN == 0),
+                u64::from(Self::sign(a) != 0 || (a | b) & Self::MASKSIGN == 0),
                 0,
             )
         } else if Self::sign(a) != 0 {
-            (i64::from(a >= b), 0)
+            (u64::from((a as i64) >= (b as i64)), 0)
         } else {
-            (i64::from(a <= b), 0)
+            (u64::from((a as i64) <= (b as i64)), 0)
         }
     }
 
     #[must_use]
-    fn flt(a: i64, b: i64) -> (i64, u8) {
+    fn flt(a: u64, b: u64) -> (u64, u8) {
         let (a, b) = (Self::unbox(a), Self::unbox(b));
         if Self::is_nan(a) || Self::is_nan(b) {
             (0, fflag::INVALIDOP)
         } else if Self::sign(a) != Self::sign(b) {
             (
-                i64::from(Self::sign(a) != 0 && (a | b) & Self::MASKSIGN != 0),
+                u64::from(Self::sign(a) != 0 && (a | b) & Self::MASKSIGN != 0),
                 0,
             )
         } else if Self::sign(a) != 0 {
-            (i64::from(a > b), 0)
+            (u64::from((a as i64) > (b as i64)), 0)
         } else {
-            (i64::from(a < b), 0)
+            (u64::from((a as i64) < (b as i64)), 0)
         }
     }
 
     #[must_use]
-    fn fsub(a: i64, b: i64, rm: RoundingMode) -> (i64, u8) {
+    fn fsub(a: u64, b: u64, rm: RoundingMode) -> (u64, u8) {
         Self::fadd(a, b ^ Self::SIGN_MASK, rm)
     }
 
     #[must_use]
     /* Based heavily on Fabrice Bellard's RISCVEMU/TinyEMU */
-    fn fadd(a: i64, b: i64, rm: RoundingMode) -> (i64, u8) {
+    fn fadd(a: u64, b: u64, rm: RoundingMode) -> (u64, u8) {
         let (a, b) = (Self::unbox(a), Self::unbox(b));
 
         // swap so that abs(a) >= abs(b)
@@ -262,6 +251,8 @@ pub trait Sf {
             b_mant |= 1 << (Self::MANT_SIZE + 3);
         }
 
+        let (mut a_exp, b_exp) = (a_exp as i64, b_exp as i64);
+
         let b_mant = Self::rshift_rnd(b_mant, a_exp - b_exp);
 
         if a_sign == b_sign {
@@ -273,28 +264,28 @@ pub trait Sf {
 
             if a_mant == 0 {
                 /* zero result : the sign needs a specific handling */
-                a_sign = i64::from(rm == RoundingMode::RoundDown);
+                a_sign = u64::from(rm == RoundingMode::RoundDown);
             }
         }
 
-        a_exp += (Self::RND_SIZE - 3) as i64;
+        a_exp += Self::RND_SIZE as i64 - 3;
 
         Self::normalize(a_sign, a_exp, a_mant, rm)
     }
 
     #[must_use]
-    fn normalize(a_sign: i64, mut a_exp: i64, mut a_mant: i64, rm: RoundingMode) -> (i64, u8) {
+    fn normalize(a_sign: u64, a_exp: i64, mut a_mant: u64, rm: RoundingMode) -> (u64, u8) {
         // a_mant is considered to have at most F_SIZE - 1 bits
-        let shift = i64::from(a_mant.leading_zeros()) - (64 - 1 - Self::IMANT_SIZE) as i64;
+        let shift = a_mant.leading_zeros() as isize - (64 - 1 - Self::IMANT_SIZE) as isize;
 
         assert!(shift >= 0);
-        a_exp -= shift;
+        let a_exp = a_exp - (shift as i64);
         a_mant <<= shift;
         Self::round_pack(a_sign, a_exp, a_mant, rm)
     }
 
     #[must_use]
-    fn round_pack(a_sign: i64, mut a_exp: i64, mut a_mant: i64, rm: RoundingMode) -> (i64, u8) {
+    fn round_pack(a_sign: u64, mut a_exp: i64, mut a_mant: u64, rm: RoundingMode) -> (u64, u8) {
         use RoundingMode::RoundDown;
         use RoundingMode::RoundNearestEven;
         use RoundingMode::RoundNearestMagnitude;
@@ -345,11 +336,7 @@ pub trait Sf {
             fflags |= fflag::INEXACT;
         }
 
-        // XXX This is an unfortunate consequence of using i64 for the
-        // primary value. All of the FP really want u64 so the
-        // question becomes one of where to cast.  It's likely that we
-        // could do better.
-        a_mant = ((a_mant.wrapping_add(addend) as u64) >> Self::RND_SIZE) as i64;
+        a_mant = a_mant.wrapping_add(addend) >> Self::RND_SIZE;
 
         // half way: select even result
         if rm == RoundingMode::RoundNearestEven && rnd_bits == (1 << (Self::RND_SIZE - 1)) {
@@ -357,24 +344,24 @@ pub trait Sf {
         }
 
         // Note the rounding adds at least 1, so this is the maximum value
-        a_exp += a_mant >> (Self::MANT_SIZE + 1);
+        a_exp += (a_mant >> (Self::MANT_SIZE + 1)) as i64;
         if a_mant <= Self::MANT_MASK {
             // denormalized or zero
             a_exp = 0;
-        } else if a_exp >= Self::EXP_MASK {
+        } else if a_exp >= Self::EXP_MASK as i64 {
             // overflow
             if addend == 0 {
-                a_exp = Self::EXP_MASK - 1;
+                a_exp = (Self::EXP_MASK - 1) as i64;
                 a_mant = Self::MANT_MASK;
             } else {
                 // infinity
-                a_exp = Self::EXP_MASK;
+                a_exp = Self::EXP_MASK as i64;
                 a_mant = 0;
             }
             fflags |= fflag::OVERFLOW | fflag::INEXACT;
         }
 
-        (Self::pack(a_sign, a_exp, a_mant), fflags)
+        (Self::pack(a_sign, a_exp as u64, a_mant), fflags)
     }
 }
 
@@ -385,31 +372,31 @@ impl Sf for Sf32 {
     const N: usize = 32;
     const MANT_SIZE: usize = 23;
     const EXP_SIZE: usize = 8;
-    const QNAN: i64 = 0x7fc0_0000;
+    const QNAN: u64 = 0x7fc0_0000;
 
-    fn unbox(r: i64) -> i64 {
+    fn unbox(r: u64) -> u64 {
         if (r & NAN_BOX_F32) == NAN_BOX_F32 {
-            r
+            r & !NAN_BOX_F32
         } else {
             Self::QNAN
         }
     }
 
-    fn nanbox(r: i64) -> i64 { r | NAN_BOX_F32 }
+    fn nanbox(r: u64) -> u64 { r | NAN_BOX_F32 }
 }
 
 impl Sf for Sf64 {
     const N: usize = 64;
     const MANT_SIZE: usize = 52;
     const EXP_SIZE: usize = 11;
-    const QNAN: i64 = 0x7ff8_0000_0000_0000; // XXX Check this
+    const QNAN: u64 = 0x7ff8_0000_0000_0000; // XXX Check this
 
-    fn unbox(r: i64) -> i64 { r }
-    fn nanbox(r: i64) -> i64 { r }
+    fn unbox(r: u64) -> u64 { r }
+    fn nanbox(r: u64) -> u64 { r }
 }
 
 #[must_use]
-pub fn fcvt_d_s(a: i64) -> (i64, u8) {
+pub fn fcvt_d_s(a: u64) -> (u64, u8) {
     let a = Sf32::unbox(a);
 
     let a_mant = Sf32::mant(a);
@@ -450,50 +437,50 @@ pub fn fcvt_d_s(a: i64) -> (i64, u8) {
 }
 
 #[allow(dead_code)]
-fn normalize_subnormal_sf32(mant: i64) -> (i64, i64) {
+fn normalize_subnormal_sf32(mant: u64) -> (u64, u64) {
     assert_eq!(mant & !Sf32::MANT_MASK, 0);
     let shift = Sf32::MANT_SIZE - (63 - mant.leading_zeros() as usize);
     log::info!(
         "Normalize 32 0x{mant:x} -> shift {shift} -> new mantissa {:x}",
         mant << shift
     );
-    (1 - shift as i64, (mant << shift) & Sf32::MANT_MASK)
+    (1 - shift as u64, (mant << shift) & Sf32::MANT_MASK)
 }
 
 #[allow(dead_code)]
-fn normalize_subnormal_sf64(mant: i64) -> (i64, i64) {
+fn normalize_subnormal_sf64(mant: u64) -> (u64, u64) {
     let shift = Sf64::MANT_SIZE - (63 - mant.leading_zeros() as usize);
     log::info!(
         "Normalize 64 0x{mant:x} -> shift {shift} -> new mantissa {:x}",
         mant << shift
     );
-    (1 - shift as i64, (mant << shift) & Sf64::MANT_MASK)
+    (1 - shift as u64, (mant << shift) & Sf64::MANT_MASK)
 }
 
 // i64 -> f32
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
 #[must_use]
-pub fn cvt_i64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+pub fn cvt_i64_sf32(a: u64, _rm: RoundingMode) -> (u64, u8) {
+    // XXX The correct implementation, see
+    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
+    // is quite involved and thus slow.  Here we take a horrible
+    // shortcut that ignores rounding modes and flags!
+
+    let f = a as i64 as f32;
+    (NAN_BOX_F32 | u64::from(f.to_bits()), 0)
+}
+
+// u64 -> f32
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+#[must_use]
+pub fn cvt_u64_sf32(a: u64, _rm: RoundingMode) -> (u64, u8) {
     // XXX The correct implementation, see
     // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
     // is quite involved and thus slow.  Here we take a horrible
     // shortcut that ignores rounding modes and flags!
 
     let f = a as f32;
-    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
-}
-
-// u64 -> f32
-#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-#[must_use]
-pub fn cvt_u64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
-    // XXX The correct implementation, see
-    // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
-    // is quite involved and thus slow.  Here we take a horrible
-    // shortcut that ignores rounding modes and flags!
-
-    let f = a as u64 as f32;
-    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+    (NAN_BOX_F32 | u64::from(f.to_bits()), 0)
 }
 
 // u32 -> f32
@@ -503,14 +490,14 @@ pub fn cvt_u64_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
     clippy::cast_possible_truncation
 )]
 #[must_use]
-pub fn cvt_u32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+pub fn cvt_u32_sf32(a: u64, _rm: RoundingMode) -> (u64, u8) {
     // XXX The correct implementation, see
     // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
     // is quite involved and thus slow.  Here we take a horrible
     // shortcut that ignores rounding modes and flags!
 
     let f = a as u32 as f32;
-    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+    (NAN_BOX_F32 | u64::from(f.to_bits()), 0)
 }
 
 // i32 -> f32
@@ -520,14 +507,14 @@ pub fn cvt_u32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
     clippy::cast_possible_truncation
 )]
 #[must_use]
-pub fn cvt_i32_sf32(a: i64, _rm: RoundingMode) -> (i64, u8) {
+pub fn cvt_i32_sf32(a: u64, _rm: RoundingMode) -> (u64, u8) {
     // XXX The correct implementation, see
     // https://github.com/chipsalliance/dromajo/blob/8c0c1e3afd5cdea65d1b35872e395f988b0ec449/include/softfp_template_icvt.h#L130
     // is quite involved and thus slow.  Here we take a horrible
     // shortcut that ignores rounding modes and flags!
 
     let f = a as i32 as f32;
-    (NAN_BOX_F32 | i64::from(f.to_bits()), 0)
+    (NAN_BOX_F32 | u64::from(f.to_bits()), 0)
 }
 
 // The Berkeley Float Test found some issues
@@ -536,11 +523,11 @@ mod test {
     use super::*;
 
     fn test(
-        f: impl Fn(i64, i64, RoundingMode) -> (i64, u8),
-        f1: i64,
-        f2: i64,
+        f: impl Fn(u64, u64, RoundingMode) -> (u64, u8),
+        f1: u64,
+        f2: u64,
         rm: RoundingMode,
-        wantr: i64,
+        wantr: u64,
         wantfflag: u8,
     ) {
         let (r, fflag) = f(f1, f2, rm);
@@ -552,23 +539,23 @@ mod test {
         );
     }
 
-    fn test_bool(f: impl Fn(i64, i64) -> (i64, u8), f1: i64, f2: i64, wantr: bool, wantfflag: u8) {
+    fn test_bool(f: impl Fn(u64, u64) -> (u64, u8), f1: u64, f2: u64, wantr: bool, wantfflag: u8) {
         let (r, fflag) = f(f1, f2);
         assert_eq!(
-            (wantr as i64, wantfflag),
+            (wantr as u64, wantfflag),
             (r, fflag),
             "{f1:08x}, {f2:08x} -> ({r}, {fflag:0x}) / ({wantr}, {wantfflag:0x})",
         );
     }
 
     // Convert John's representation to RISC-V NaN-boxed floats
-    const fn fp32(sign: i64, exp: i64, mant: i64) -> i64 {
+    const fn fp32(sign: u64, exp: u64, mant: u64) -> u64 {
         NAN_BOX_F32 | (sign << 31) | (exp << 23) | mant
     }
 
-    const fn fp64(sign: i64, exp: i64, mant: i64) -> i64 { (sign << 63) | (exp << 52) | mant }
+    const fn fp64(sign: u64, exp: u64, mant: u64) -> u64 { (sign << 63) | (exp << 52) | mant }
 
-    /*    fn fp64(sign: i64, exp: i64, mant: i64) -> i64 {
+    /*    fn fp64(sign: u64, exp: u64, mant: u64) -> u64 {
         sign << 63 | exp << 52 | mant
     }*/
 
@@ -707,9 +694,9 @@ mod test {
         test(
             Sf64::fadd,
             0x2b50000200000020,
-            0xbca0000000000000u64 as i64,
+            0xbca0000000000000u64,
             RoundingMode::RoundNearestEven,
-            0xbca0000000000000u64 as i64,
+            0xbca0000000000000u64,
             1,
         );
     }

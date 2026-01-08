@@ -386,7 +386,7 @@ impl VirtioBlockDisk {
     )]
     fn transfer_from_disk(&self, memory: &mut Memory, pa: u64, disk_address: usize, length: usize) {
         memory
-            .slice(pa as i64, length)
+            .slice(pa, length)
             .expect("transfer_from_disk() reaches outside memory")
             .copy_from_slice(&self.contents[disk_address..disk_address + length]);
     }
@@ -413,7 +413,7 @@ impl VirtioBlockDisk {
     ) {
         self.contents[disk_address..disk_address + length].copy_from_slice(
             memory
-                .slice(pa as i64, length)
+                .slice(pa, length)
                 .expect("transfer_to_disk() reaches outside memory"),
         );
     }

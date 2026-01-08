@@ -1,7 +1,10 @@
 //! The RISC-V CPU core, which handles instruction fetching, decoding, and
 //! execution.
+
+// It's the nature of emulator code to trigger Clippy's neurosis
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
 
 use crate::bounded::Bounded;
 use crate::csr;
@@ -43,12 +46,12 @@ pub type Reg = Bounded<65>;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Exception {
     pub trap: Trap,
-    pub tval: i64,
+    pub tval: u64,
 }
 
-pub type ExecResult = Result<(i64, u8), Exception>;
+pub type ExecResult = Result<(u64, u8), Exception>;
 pub type ExecFn = fn(cpu: &mut Cpu, uop: &Uop, ops: Operands) -> ExecResult;
-pub type DecodeFn = fn(addr: i64, word: u32, exec: ExecFn) -> Uop;
+pub type DecodeFn = fn(addr: u64, word: u32, exec: ExecFn) -> Uop;
 
 /// The decoded instruction, convenient for execution
 // XXX Needs Seqno, ctf_target_opt
@@ -65,7 +68,7 @@ pub struct Uop {
     /// Source Register 3
     pub rs3: Reg,
     /// Immediate field (imm, csrno, or shift amount)
-    pub imm: i64,
+    pub imm: u64,
     /// FP Rounding Mode
     pub rm: u8,
     /// May change the Control Flow
@@ -100,9 +103,9 @@ impl PartialEq for Uop {
 /// Holds information about registers used by an instruction.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Operands {
-    pub s1: i64,
-    pub s2: i64,
-    pub s3: i64,
+    pub s1: u64,
+    pub s2: u64,
+    pub s3: u64,
 }
 
 /// Emulates a RISC-V CPU core
@@ -129,8 +132,8 @@ pub struct Operands {
 // XXX rename ArchState?
 pub struct Cpu {
     // The essential CPU state
-    rf: [i64; 65],
-    pub pc: i64,
+    rf: [u64; 65],
+    pub pc: u64,
 
     // This is fcsr disaggregated
     frm: RoundingMode,
@@ -167,22 +170,20 @@ pub struct Cpu {
 
 #[allow(clippy::type_complexity)]
 /// Instruction specification
-// XXX do we need an execute_s for serialized execution (all the non-trivial
-// instructions)?
 #[derive(Debug)]
 pub struct RVInsnSpec {
     pub name: &'static str,
     pub mask: u32,
     pub bits: u32,
     pub decode: DecodeFn,
-    pub disassemble: fn(s: &mut String, cpu: &Cpu, address: i64, word: u32, evaluate: bool),
+    pub disassemble: fn(s: &mut String, cpu: &Cpu, address: u64, word: u32, evaluate: bool),
     pub execute: ExecFn, // Still stored here for passing to decode
 }
 
 struct FormatB {
     rs1: Reg,
     rs2: Reg,
-    imm: i64,
+    imm: u64,
 }
 
 struct FormatCSR {
@@ -194,12 +195,12 @@ struct FormatCSR {
 struct FormatI {
     rd: Reg,
     rs1: Reg,
-    imm: i64,
+    imm: u64,
 }
 
 struct FormatJ {
     rd: Reg,
-    imm: i64,
+    imm: u64,
 }
 
 #[derive(Debug)]
@@ -219,12 +220,12 @@ struct FormatRShift {
 struct FormatS {
     rs1: Reg,
     rs2: Reg,
-    imm: i64,
+    imm: u64,
 }
 
 struct FormatU {
     rd: Reg,
-    imm: i64,
+    imm: u64,
 }
 
 // has rs3
@@ -316,11 +317,11 @@ impl Cpu {
 
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn read_x(&self, r: Reg) -> i64 { self.rf[r] }
+    fn read_x(&self, r: Reg) -> u64 { self.rf[r] }
 
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn write_x(&mut self, r: Reg, v: i64) {
+    fn write_x(&mut self, r: Reg, v: u64) {
         assert_ne!(r.get(), 0);
         self.rf[r] = v;
     }
@@ -328,20 +329,20 @@ impl Cpu {
     /// Reads Program counter
     #[must_use]
     #[allow(clippy::cast_sign_loss)]
-    pub const fn read_pc(&self) -> i64 { self.pc }
+    pub const fn read_pc(&self) -> u64 { self.pc }
 
     /// Updates Program Counter
     ///
     /// # Arguments
     /// * `value`
-    pub const fn update_pc(&mut self, value: i64) { self.pc = value & !1; }
+    pub const fn update_pc(&mut self, value: u64) { self.pc = value & !1; }
 
     /// Reads integer register
     ///
     /// # Arguments
     /// * `reg` Register number. Must be 0-31
     #[must_use]
-    pub fn read_register(&self, reg: Reg) -> i64 { self.rf[reg] }
+    pub fn read_register(&self, reg: Reg) -> u64 { self.rf[reg] }
 
     /// Checks that float instructions are enabled and
     /// that the rounding mode is legal; do not dirty the FP state
@@ -349,7 +350,7 @@ impl Cpu {
         if self.fs == 0 || rm == 5 || rm == 6 {
             Err(Exception {
                 trap: Trap::IllegalInstruction,
-                tval: 0, // XXX If needed, we can patch this up by re-fetching the bits
+                tval: 0,
             })
         } else {
             Ok(())
@@ -367,7 +368,7 @@ impl Cpu {
     /// Runs program N cycles. Fetch, decode, and execution are completed in a
     /// cycle so far.
     #[allow(clippy::cast_sign_loss)]
-    pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut IntMap<i64, Uop>) -> bool {
+    pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut IntMap<u64, Uop>) -> bool {
         for _ in 0..cpu_steps {
             let insn_addr = self.pc;
             if let Err(exc) = self.step_cpu(uop_cache) {
@@ -387,7 +388,7 @@ impl Cpu {
 
     // It's here, the One Key Function.  This is where it all happens!
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn step_cpu(&mut self, uop_cache: &mut IntMap<i64, Uop>) -> Result<(), Exception> {
+    fn step_cpu(&mut self, uop_cache: &mut IntMap<u64, Uop>) -> Result<(), Exception> {
         self.cycle = self.cycle.wrapping_add(1);
         if self.wfi {
             if self.mmu.mip & self.read_csr_raw(Csr::Mie) != 0 {
@@ -409,7 +410,7 @@ impl Cpu {
         if let Some(uop) = uop_cache.get(insn_addr) {
             //log::debug!("uop cache {insn_addr:x} hit");
 
-            self.pc += i64::from(uop.insn_size);
+            self.pc += u64::from(uop.insn_size);
 
             let ops = Operands {
                 s1: self.read_x(uop.rs1),
@@ -425,7 +426,7 @@ impl Cpu {
             let word = self.memop(Execute, insn_addr, 0, 0, 4)?;
 
             let (insn, insn_size) = decompress(word as u32);
-            self.pc += i64::from(insn_size);
+            self.pc += u64::from(insn_size);
 
             let Some(decoded) = decode(&self.decode_dag, insn) else {
                 return Err(Exception {
@@ -436,25 +437,6 @@ impl Cpu {
 
             let mut uop = (decoded.decode)(insn_addr, insn, decoded.execute);
             uop.insn_size = insn_size;
-
-            /*
-            // XXX refactoring needed
-            if let Some(uop_cached) = uop_cache.get(&insn_addr) {
-                log::debug!("uop cache {:x} hit", insn_addr);
-
-                if uop != *uop_cached {
-                    panic!(
-                        "WTF!?  {:08x} {:08x} {uop_cached:#?} != {uop:#?}",
-                        self.pc, word
-                    );
-                }
-            } else {
-                //println!("uop cache add {:x} {:#?}", self.insn_addr, uop);
-                uop_cache.insert(insn_addr, uop);
-                //let uop_cached = uop_cache.get(&self.insn_addr).unwrap();
-                //assert_eq!(uop, *uop_cached);
-            }*/
-
             uop_cache.insert(insn_addr, uop);
 
             let ops = Operands {
@@ -504,7 +486,7 @@ impl Cpu {
         }
     }
 
-    fn handle_exception(&mut self, exception: &Exception, insn_addr: i64) {
+    fn handle_exception(&mut self, exception: &Exception, insn_addr: u64) {
         if matches!(exception.trap, Trap::IllegalInstruction) {
             log::info!("Illegal instruction {insn_addr:016x}");
         }
@@ -513,7 +495,7 @@ impl Cpu {
 
     #[allow(clippy::similar_names, clippy::too_many_lines)]
     #[allow(clippy::cast_sign_loss)]
-    fn handle_trap(&mut self, exc: &Exception, insn_addr: i64, is_interrupt: bool) -> bool {
+    fn handle_trap(&mut self, exc: &Exception, insn_addr: u64, is_interrupt: bool) -> bool {
         let current_priv_encoding = u64::from(self.mmu.prv);
         let cause = get_trap_cause(exc);
 
@@ -666,14 +648,14 @@ impl Cpu {
             PrivMode::U => Csr::Utvec,
         };
 
-        self.write_csr_raw(csr_epc_address, insn_addr as u64);
+        self.write_csr_raw(csr_epc_address, insn_addr);
         self.write_csr_raw(csr_cause_address, cause);
-        self.write_csr_raw(csr_tval_address, exc.tval as u64);
-        self.pc = self.read_csr_raw(csr_tvec_address) as i64;
+        self.write_csr_raw(csr_tval_address, exc.tval);
+        self.pc = self.read_csr_raw(csr_tvec_address);
 
         // Add 4 * cause if tvec has vector type address
         if self.pc & 3 != 0 {
-            self.pc = (self.pc & !3) + 4 * (cause as i64 & 0xffff);
+            self.pc = (self.pc & !3) + 4 * (cause & 0xffff);
         }
 
         match self.mmu.prv {
@@ -723,7 +705,7 @@ impl Cpu {
     // review each CSR.  Do Not Blanket allow reads and writes from unsupported
     // CSRs
     #[allow(clippy::cast_sign_loss)]
-    fn read_csr(&self, csrno: u16) -> Result<i64, Exception> {
+    fn read_csr(&self, csrno: u16) -> Result<u64, Exception> {
         use PrivMode::S;
 
         let illegal = Err(Exception {
@@ -744,12 +726,12 @@ impl Cpu {
             }
             _ => {}
         }
-        Ok(self.read_csr_raw(csr) as i64)
+        Ok(self.read_csr_raw(csr))
     }
 
     #[allow(clippy::cast_sign_loss)]
-    fn write_csr(&mut self, csrno: u16, value: i64) -> Result<(), Exception> {
-        let mut value = value as u64;
+    fn write_csr(&mut self, csrno: u16, value: u64) -> Result<(), Exception> {
+        let mut value = value;
         let illegal = Err(Exception {
             trap: Trap::IllegalInstruction,
             tval: 0,
@@ -800,7 +782,7 @@ impl Cpu {
         match csr {
             Csr::Fflags => u64::from(self.read_fflags()),
             Csr::Frm => self.read_frm() as u64,
-            Csr::Fcsr => self.read_fcsr() as u64,
+            Csr::Fcsr => self.read_fcsr(),
             Csr::Sstatus => {
                 let mut sstatus = self.mmu.mstatus;
                 sstatus &= !MSTATUS_FS;
@@ -837,7 +819,7 @@ impl Cpu {
             Csr::Frm => self.write_frm(
                 FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
             ),
-            Csr::Fcsr => self.write_fcsr(value as i64),
+            Csr::Fcsr => self.write_fcsr(value),
             Csr::Sstatus => {
                 self.mmu.mstatus &= !0x8000_0003_000d_e162;
                 self.mmu.mstatus |= value & 0x8000_0003_000d_e162;
@@ -887,10 +869,9 @@ impl Cpu {
 
     fn _set_fcsr_nx(&mut self) { self.add_to_fflags(1); }
 
-    /// Disassembles an instruction pointed by Program Counter and
-    /// and return the [possibly] writeback register
+    /// Disassembles an instruction pointed by Program Counter
     #[allow(clippy::cast_sign_loss)]
-    pub fn disassemble_insn(&self, s: &mut String, addr: i64, mut word32: u32, eval: bool) {
+    pub fn disassemble_insn(&self, s: &mut String, addr: u64, mut word32: u32, eval: bool) {
         let (insn, _) = decompress(word32);
         let Some(decoded) = decode(&self.decode_dag, insn) else {
             let _ = write!(s, "{addr:16x} {word32:8x} Illegal instruction");
@@ -926,7 +907,7 @@ impl Cpu {
         self.mmu.get_mut_uart().get_mut_terminal()
     }
 
-    fn read_f(&self, r: Reg) -> i64 {
+    fn read_f(&self, r: Reg) -> u64 {
         assert!(32 <= r.get() && r.get() < 64);
         assert_ne!(self.fs, 0);
         self.rf[r]
@@ -965,18 +946,18 @@ impl Cpu {
     }
 
     #[allow(clippy::precedence)]
-    fn read_fcsr(&self) -> i64 {
+    fn read_fcsr(&self) -> u64 {
         assert_ne!(self.fs, 0);
         assert_eq!(self.fflags & !31, 0);
-        i64::from(self.fflags) | (self.frm as i64) << 5
+        u64::from(self.fflags) | (self.frm as u64) << 5
     }
 
     #[allow(clippy::cast_sign_loss)]
-    fn write_fcsr(&mut self, v: i64) {
+    fn write_fcsr(&mut self, v: u64) {
         assert_ne!(self.fs, 0);
         self.write_fflags((v & 31) as u8);
         // We must refuse to write illegal values FRM
-        if let Some(frm) = FromPrimitive::from_i64((v >> 5) & 7) {
+        if let Some(frm) = FromPrimitive::from_u64((v >> 5) & 7) {
             self.write_frm(frm);
         }
     }
@@ -995,11 +976,11 @@ impl Cpu {
     fn memop(
         &mut self,
         access: MemoryAccessType,
-        baseva: i64,
-        offset: i64,
-        v: i64,
-        size: i64,
-    ) -> Result<i64, Exception> {
+        baseva: u64,
+        offset: u64,
+        v: u64,
+        size: u64,
+    ) -> Result<u64, Exception> {
         if access == MemoryAccessType::Write {
             self.reservation = None;
         }
@@ -1009,7 +990,7 @@ impl Cpu {
 
     /// # Errors
     /// Usual memory exceptions
-    pub fn memop_disass(&mut self, baseva: i64) -> Result<i64, Exception> {
+    pub fn memop_disass(&mut self, baseva: u64) -> Result<u64, Exception> {
         self.memop_general(Execute, baseva, 0, 0, 4, true)
     }
 
@@ -1020,12 +1001,12 @@ impl Cpu {
     fn memop_general(
         &mut self,
         access: MemoryAccessType,
-        baseva: i64,
-        offset: i64,
-        v: i64,
-        size: i64,
+        baseva: u64,
+        offset: u64,
+        v: u64,
+        size: u64,
         side_effect_free: bool,
-    ) -> Result<i64, Exception> {
+    ) -> Result<u64, Exception> {
         let va = baseva.wrapping_add(offset);
 
         if va & 0xfff > 0x1000 - size {
@@ -1034,9 +1015,7 @@ impl Cpu {
             return self.memop_slow(access, va, v, size, side_effect_free);
         }
 
-        let pa = self
-            .mmu
-            .translate_address(va as u64, access, side_effect_free)? as i64;
+        let pa = self.mmu.translate_address(va, access, side_effect_free)?;
 
         let Ok(slice) = self.mmu.memory.slice(pa, size as usize) else {
             return self.memop_slow(access, va, v, size, side_effect_free);
@@ -1044,14 +1023,14 @@ impl Cpu {
 
         match access {
             Write => {
-                slice.copy_from_slice(&i64::to_le_bytes(v)[0..size as usize]);
+                slice.copy_from_slice(&u64::to_le_bytes(v)[0..size as usize]);
                 Ok(0)
             }
             Read | Execute => {
                 // Unsigned, sign extension is the job of the consumer
                 let mut buf = [0; 8];
                 buf[0..size as usize].copy_from_slice(slice);
-                Ok(i64::from_le_bytes(buf))
+                Ok(u64::from_le_bytes(buf))
             }
         }
     }
@@ -1061,11 +1040,11 @@ impl Cpu {
     fn memop_slow(
         &mut self,
         access: MemoryAccessType,
-        va: i64,
-        mut v: i64,
-        size: i64,
+        va: u64,
+        mut v: u64,
+        size: u64,
         side_effect_free: bool,
-    ) -> Result<i64, Exception> {
+    ) -> Result<u64, Exception> {
         let trap = match access {
             Read => Trap::LoadAccessFault,
             Write => Trap::StoreAccessFault,
@@ -1076,10 +1055,10 @@ impl Cpu {
         for i in 0..size {
             let pa = self
                 .mmu
-                .translate_address((va + i) as u64, access, side_effect_free)?;
+                .translate_address(va + i, access, side_effect_free)?;
 
             let mut b = 0;
-            if let Ok(slice) = self.mmu.memory.slice(pa as i64, 1) {
+            if let Ok(slice) = self.mmu.memory.slice(pa, 1) {
                 match access {
                     Write => slice[0] = v as u8,
                     Read | Execute => b = slice[0],
@@ -1091,7 +1070,7 @@ impl Cpu {
 
                 match access {
                     Write => {
-                        if self.mmu.store_mmio_u8(pa as i64, v as u8).is_err() {
+                        if self.mmu.store_mmio_u8(pa, v as u8).is_err() {
                             return Err(Exception { trap, tval: va + i });
                         }
                     }
@@ -1106,9 +1085,13 @@ impl Cpu {
             r |= u64::from(b) << (i * 8);
             v >>= 8;
         }
-        if access == Write { Ok(0) } else { Ok(r as i64) }
+        if access == Write { Ok(0) } else { Ok(r) }
     }
 }
+
+// XXX Not sure where to keep this
+#[must_use]
+pub const fn sext32(x: u32) -> u64 { x as i32 as u64 }
 
 const fn get_trap_cause(exc: &Exception) -> u64 {
     let interrupt_bit = 0x8000_0000_0000_0000_u64;
@@ -1179,11 +1162,11 @@ fn parse_format_b(word: u32) -> FormatB {
         imm: (iword >> 31 << 12 | // imm[31:12] = [31]
             ((iword << 4) & 0x0000_0800) | // imm[11] = [7]
             ((iword >> 20) & 0x0000_07e0) | // imm[10:5] = [30:25]
-            ((iword >> 7) & 0x0000_001e)) as i64, // imm[4:1] = [11:8]
+            ((iword >> 7) & 0x0000_001e)) as u64, // imm[4:1] = [11:8]
     }
 }
 
-fn disassemble_b(s: &mut String, cpu: &Cpu, address: i64, word: u32, evaluate: bool) {
+fn disassemble_b(s: &mut String, cpu: &Cpu, address: u64, word: u32, evaluate: bool) {
     let f = parse_format_b(word);
     *s += get_register_name(f.rs1);
     if evaluate && f.rs1.get() != 0 {
@@ -1196,14 +1179,14 @@ fn disassemble_b(s: &mut String, cpu: &Cpu, address: i64, word: u32, evaluate: b
     let _ = write!(s, ", {:x}", address.wrapping_add(f.imm));
 }
 
-fn decode_empty(_addr: i64, _word: u32, execute: ExecFn) -> Uop {
+fn decode_empty(_addr: u64, _word: u32, execute: ExecFn) -> Uop {
     Uop {
         execute,
         ..Uop::default()
     }
 }
 
-fn decode_b(addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_b(addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_b(word);
     Uop {
         rs1: f.rs1,
@@ -1224,7 +1207,7 @@ fn parse_format_csr(word: u32) -> FormatCSR {
 }
 
 #[allow(clippy::option_if_let_else)] // Clippy is loosing it
-fn disassemble_csr(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_csr(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_csr(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", ");
@@ -1256,7 +1239,7 @@ fn disassemble_csr(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate
 }
 
 #[allow(clippy::option_if_let_else)] // Clippy is loosing it
-fn disassemble_csri(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_csri(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_csr(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", ");
@@ -1284,24 +1267,24 @@ fn disassemble_csri(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluat
     let _ = write!(s, ", {}", f.rs1.get());
 }
 
-fn decode_csr(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_csr(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_csr(word);
     Uop {
         rd: f.rd,
         rs1: f.rs1,
-        imm: i64::from(f.csr),
+        imm: u64::from(f.csr),
         serialize: true,
         execute,
         ..Uop::default()
     }
 }
 
-fn decode_csri(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_csri(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_csr(word); // uimm is not a register read
     Uop {
         rd: f.rd,
         rs1: f.rs1,
-        imm: i64::from(f.csr),
+        imm: u64::from(f.csr),
         serialize: true,
         execute,
         ..Uop::default()
@@ -1313,7 +1296,7 @@ fn parse_format_i(word: u32) -> FormatI {
     FormatI {
         rd: xd((word >> 7) & 0x1f),        // [11:7]
         rs1: x((word >> 15) & 0x1f),       // [19:15]
-        imm: ((word as i32) >> 20) as i64, // [31:20]
+        imm: ((word as i32) >> 20) as u64, // [31:20]
     }
 }
 
@@ -1322,11 +1305,11 @@ fn parse_format_i_fx(word: u32) -> FormatI {
     FormatI {
         rd: f((word >> 7) & 0x1f),         // [11:7]
         rs1: x((word >> 15) & 0x1f),       // [19:15]
-        imm: ((word as i32) >> 20) as i64, // [31:20]
+        imm: ((word as i32) >> 20) as u64, // [31:20]
     }
 }
 
-fn disassemble_i(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_i(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", {}", get_register_name(f.rs1));
@@ -1336,7 +1319,7 @@ fn disassemble_i(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: 
     let _ = write!(s, ", {:x}", f.imm);
 }
 
-fn disassemble_i_mem(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_i_mem(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", {:x}({}", f.imm, get_register_name(f.rs1));
@@ -1346,7 +1329,7 @@ fn disassemble_i_mem(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evalua
     *s += ")";
 }
 
-fn decode_i(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_i(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_i(word);
     Uop {
         rd: f.rd,
@@ -1357,7 +1340,7 @@ fn decode_i(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_i_fx(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_i_fx(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_i_fx(word);
     Uop {
         rd: f.rd,
@@ -1376,17 +1359,17 @@ fn parse_format_j(word: u32) -> FormatJ {
         imm: (iword >> 31 << 20 | // imm[31:20] = [31]
              (iword & 0x000f_f000) | // imm[19:12] = [19:12]
              ((iword & 0x0010_0000) >> 9) | // imm[11] = [20]
-             ((iword & 0x7fe0_0000) >> 20)) as i64, // imm[10:1] = [30:21]
+             ((iword & 0x7fe0_0000) >> 20)) as u64, // imm[10:1] = [30:21]
     }
 }
 
-fn disassemble_j(s: &mut String, _cpu: &Cpu, address: i64, word: u32, _evaluate: bool) {
+fn disassemble_j(s: &mut String, _cpu: &Cpu, address: u64, word: u32, _evaluate: bool) {
     let f = parse_format_j(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", {:x}", address.wrapping_add(f.imm));
 }
 
-fn decode_j(addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_j(addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_j(word);
     Uop {
         rd: f.rd,
@@ -1451,7 +1434,7 @@ fn parse_format_r_fff(word: u32) -> FormatR {
     }
 }
 
-fn disassemble_r(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_r(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_r(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", ");
@@ -1465,7 +1448,7 @@ fn disassemble_r(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: 
     }
 }
 
-fn decode_r(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r(word);
     Uop {
         rd: f.rd,
@@ -1476,7 +1459,7 @@ fn decode_r(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_r_xf(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r_xf(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r_xf(word);
     Uop {
         rd: f.rd,
@@ -1486,7 +1469,7 @@ fn decode_r_xf(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_r_xff(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r_xff(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r_xff(word);
     Uop {
         rd: f.rd,
@@ -1497,7 +1480,7 @@ fn decode_r_xff(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_r_fx(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r_fx(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r_fx(word);
     #[allow(clippy::cast_possible_truncation)]
     Uop {
@@ -1509,7 +1492,7 @@ fn decode_r_fx(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_r_fff(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r_fff(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r_fff(word);
     #[allow(clippy::cast_possible_truncation)]
     Uop {
@@ -1522,7 +1505,7 @@ fn decode_r_fff(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn disassemble_ri(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_ri(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_r(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", ");
@@ -1534,18 +1517,18 @@ fn disassemble_ri(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate:
     let _ = write!(s, ", {shamt}");
 }
 
-fn decode_r_shift(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r_shift(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r_shift(word);
     Uop {
         rd: f.rd,
         rs1: f.rs1,
-        imm: i64::from(f.imm),
+        imm: u64::from(f.imm),
         execute,
         ..Uop::default()
     }
 }
 
-fn disassemble_r_f(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_r_f(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_r(word);
     let _ = write!(s, "{}, ", get_register_name(f.rd));
     *s += get_register_name(f.rs1);
@@ -1568,7 +1551,7 @@ fn parse_format_r2_ffff(word: u32) -> FormatR2 {
     }
 }
 
-fn disassemble_r2_ffff(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_r2_ffff(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_r2_ffff(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", {}", get_register_name(f.rs1));
@@ -1585,7 +1568,7 @@ fn disassemble_r2_ffff(s: &mut String, cpu: &Cpu, _address: i64, word: u32, eval
     }
 }
 
-fn decode_r2_ffff(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_r2_ffff(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_r2_ffff(word);
     Uop {
         rd: f.rd,
@@ -1612,7 +1595,7 @@ fn parse_format_s(word: u32) -> FormatS {
                         ((word >> 20) & 0xfe0) | // imm[11:5] = [31:25]
                         ((word >> 7) & 0x1f)
             // imm[4:0] = [11:7]
-        ) as i32 as i64,
+        ) as i32 as u64,
     }
 }
 
@@ -1630,11 +1613,11 @@ fn parse_format_s_xf(word: u32) -> FormatS {
                         ((word >> 20) & 0xfe0) | // imm[11:5] = [31:25]
                         ((word >> 7) & 0x1f)
             // imm[4:0] = [11:7]
-        ) as i32 as i64,
+        ) as i32 as u64,
     }
 }
 
-fn disassemble_s(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_s(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_s(word);
     *s += get_register_name(f.rs2);
     if evaluate && f.rs2.get() != 0 {
@@ -1647,7 +1630,7 @@ fn disassemble_s(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: 
     *s += ")";
 }
 
-fn decode_s(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_s(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_s(word);
     Uop {
         rs1: f.rs1,
@@ -1658,7 +1641,7 @@ fn decode_s(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_s_xf(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_s_xf(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_s_xf(word);
     Uop {
         rs1: f.rs1,
@@ -1673,11 +1656,11 @@ fn decode_s_xf(_addr: i64, word: u32, execute: ExecFn) -> Uop {
 fn parse_format_u(word: u32) -> FormatU {
     FormatU {
         rd: xd((word >> 7) & 31), // [11:7]
-        imm: (word & 0xfffff000) as i32 as i64,
+        imm: (word & 0xfffff000) as i32 as u64,
     }
 }
 
-fn disassemble_u(s: &mut String, _cpu: &Cpu, _address: i64, word: u32, _evaluate: bool) {
+fn disassemble_u(s: &mut String, _cpu: &Cpu, _address: u64, word: u32, _evaluate: bool) {
     let f = parse_format_u(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", {:x}", f.imm);
@@ -1687,13 +1670,13 @@ fn disassemble_u(s: &mut String, _cpu: &Cpu, _address: i64, word: u32, _evaluate
 const fn disassemble_empty(
     _s: &mut String,
     _cpu: &Cpu,
-    _address: i64,
+    _address: u64,
     _word: u32,
     _evaluate: bool,
 ) {
 }
 
-fn disassemble_jalr(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluate: bool) {
+fn disassemble_jalr(s: &mut String, cpu: &Cpu, _address: u64, word: u32, evaluate: bool) {
     let f = parse_format_i(word);
     *s += get_register_name(f.rd);
     let _ = write!(s, ", {:x}({}", f.imm, get_register_name(f.rs1));
@@ -1703,7 +1686,7 @@ fn disassemble_jalr(s: &mut String, cpu: &Cpu, _address: i64, word: u32, evaluat
     *s += ")";
 }
 
-fn decode_u(_addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_u(_addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_u(word);
     Uop {
         rd: f.rd,
@@ -1713,7 +1696,7 @@ fn decode_u(_addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_auipc(addr: i64, word: u32, execute: ExecFn) -> Uop {
+fn decode_auipc(addr: u64, word: u32, execute: ExecFn) -> Uop {
     let f = parse_format_u(word);
     Uop {
         rd: f.rd,
@@ -1723,7 +1706,7 @@ fn decode_auipc(addr: i64, word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_serialized(_addr: i64, _word: u32, execute: ExecFn) -> Uop {
+fn decode_serialized(_addr: u64, _word: u32, execute: ExecFn) -> Uop {
     Uop {
         ctf: true,
         serialize: true,
@@ -1732,7 +1715,7 @@ fn decode_serialized(_addr: i64, _word: u32, execute: ExecFn) -> Uop {
     }
 }
 
-fn decode_exceptional(_addr: i64, _word: u32, execute: ExecFn) -> Uop {
+fn decode_exceptional(_addr: u64, _word: u32, execute: ExecFn) -> Uop {
     Uop {
         ctf: true,
         exceptional: true,
@@ -1761,7 +1744,7 @@ impl Cpu {
     ///
     /// Returns `Err(())` if the instruction word is illegal or cannot be
     /// decoded.
-    pub fn get_register_info(&self, addr: i64, insn: u32) -> anyhow::Result<Uop> {
+    pub fn get_register_info(&self, addr: u64, insn: u32) -> anyhow::Result<Uop> {
         let (insn, _) = decompress(insn);
         let Some(decoded) = decode(&self.decode_dag, insn) else {
             bail!("Illegal instruction");
@@ -1853,7 +1836,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_b,
         disassemble: disassemble_b,
         execute: |cpu, uop, ops| {
-            if ops.s1 < ops.s2 {
+            if (ops.s1 as i64) < ops.s2 as i64 {
                 cpu.pc = uop.imm;
             }
             Ok((0, 0))
@@ -1866,7 +1849,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_b,
         disassemble: disassemble_b,
         execute: |cpu, uop, ops| {
-            if ops.s1 >= ops.s2 {
+            if (ops.s1 as i64) >= ops.s2 as i64 {
                 cpu.pc = uop.imm;
             }
             Ok((0, 0))
@@ -1879,7 +1862,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_b,
         disassemble: disassemble_b,
         execute: |cpu, uop, ops| {
-            if (ops.s1 as u64) < (ops.s2 as u64) {
+            if ops.s1 < ops.s2 {
                 cpu.pc = uop.imm;
             }
             Ok((0, 0))
@@ -1892,7 +1875,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_b,
         disassemble: disassemble_b,
         execute: |cpu, uop, ops| {
-            if (ops.s1 as u64) >= (ops.s2 as u64) {
+            if ops.s1 >= ops.s2 {
                 cpu.pc = uop.imm;
             }
             Ok((0, 0))
@@ -1904,10 +1887,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00000003,
         decode: decode_i,
         disassemble: disassemble_i_mem,
-        execute: |cpu, uop, ops| {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 1)? as i8 as i64;
-            Ok((v, 0))
-        },
+        execute: |cpu, uop, ops| Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 1)? as i8 as u64, 0)),
     },
     RVInsnSpec {
         name: "LH",
@@ -1915,10 +1895,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00001003,
         decode: decode_i,
         disassemble: disassemble_i_mem,
-        execute: |cpu, uop, ops| {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 2)? as i16 as i64;
-            Ok((v, 0))
-        },
+        execute: |cpu, uop, ops| Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 2)? as i16 as u64, 0)),
     },
     RVInsnSpec {
         name: "LW",
@@ -1926,10 +1903,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00002003,
         decode: decode_i,
         disassemble: disassemble_i_mem,
-        execute: |cpu, uop, ops| {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 4)?;
-            Ok((v as i32 as i64, 0))
-        },
+        execute: |cpu, uop, ops| Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 4)? as i32 as u64, 0)),
     },
     RVInsnSpec {
         name: "LBU",
@@ -1937,10 +1911,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00004003,
         decode: decode_i,
         disassemble: disassemble_i_mem,
-        execute: |cpu, uop, ops| {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 1)?;
-            Ok((v, 0))
-        },
+        execute: |cpu, uop, ops| Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 1)?, 0)),
     },
     RVInsnSpec {
         name: "LHU",
@@ -1948,10 +1919,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00005003,
         decode: decode_i,
         disassemble: disassemble_i_mem,
-        execute: |cpu, uop, ops| {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 2)?;
-            Ok((v, 0))
-        },
+        execute: |cpu, uop, ops| Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 2)?, 0)),
     },
     RVInsnSpec {
         name: "SB",
@@ -2000,7 +1968,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00002013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok((i64::from(ops.s1 < uop.imm), 0)),
+        execute: |_cpu, uop, ops| Ok((u64::from((ops.s1 as i64) < uop.imm as i64), 0)),
     },
     RVInsnSpec {
         name: "SLTIU",
@@ -2008,7 +1976,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00003013,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok((i64::from((ops.s1 as u64) < (uop.imm as u64)), 0)),
+        execute: |_cpu, uop, ops| Ok((u64::from(ops.s1 < uop.imm), 0)),
     },
     RVInsnSpec {
         name: "XORI",
@@ -2067,7 +2035,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00002033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((i64::from(ops.s1 < ops.s2), 0)),
+        execute: |_cpu, _uop, ops| Ok((u64::from((ops.s1 as i64) < ops.s2 as i64), 0)),
     },
     RVInsnSpec {
         name: "SLTU",
@@ -2075,7 +2043,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00003033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((i64::from((ops.s1 as u64) < (ops.s2 as u64)), 0)),
+        execute: |_cpu, _uop, ops| Ok((u64::from(ops.s1 < ops.s2), 0)),
     },
     RVInsnSpec {
         name: "XOR",
@@ -2091,7 +2059,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00005033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((((ops.s1 as u64).wrapping_shr(ops.s2 as u32)) as i64, 0)),
+        execute: |_cpu, _uop, ops| Ok(((ops.s1.wrapping_shr(ops.s2 as u32)), 0)),
     },
     RVInsnSpec {
         name: "SRA",
@@ -2099,7 +2067,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x40005033,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((ops.s1.wrapping_shr(ops.s2 as u32), 0)),
+        execute: |_cpu, _uop, ops| Ok(((ops.s1 as i64).wrapping_shr(ops.s2 as u32) as u64, 0)),
     },
     RVInsnSpec {
         name: "OR",
@@ -2223,7 +2191,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x00005013,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok((((ops.s1 as u64) >> uop.imm) as i64, 0)),
+        execute: |_cpu, uop, ops| Ok((ops.s1 >> uop.imm, 0)),
     },
     RVInsnSpec {
         name: "SRAI",
@@ -2231,7 +2199,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x40005013,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok((ops.s1 >> uop.imm, 0)),
+        execute: |_cpu, uop, ops| Ok((((ops.s1 as i64) >> uop.imm) as u64, 0)),
     },
     RVInsnSpec {
         name: "ADDIW",
@@ -2239,7 +2207,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000001b,
         decode: decode_i,
         disassemble: disassemble_i,
-        execute: |_cpu, uop, ops| Ok((i64::from(ops.s1.wrapping_add(uop.imm) as i32), 0)),
+        execute: |_cpu, uop, ops| Ok((sext32(ops.s1.wrapping_add(uop.imm) as u32), 0)),
     },
     RVInsnSpec {
         name: "SLLIW",
@@ -2247,7 +2215,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000101b,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok((i64::from((ops.s1 as i32) << (uop.imm & 31)), 0)),
+        execute: |_cpu, uop, ops| Ok((((ops.s1 as i32) << (uop.imm & 31)) as u64, 0)),
     },
     RVInsnSpec {
         name: "SRLIW",
@@ -2255,7 +2223,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000501b,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok((i64::from(((ops.s1 as u32) >> (uop.imm & 31)) as i32), 0)),
+        execute: |_cpu, uop, ops| Ok((sext32((ops.s1 as u32) >> (uop.imm & 31)), 0)),
     },
     RVInsnSpec {
         name: "SRAIW",
@@ -2263,7 +2231,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x4000501b,
         decode: decode_r_shift,
         disassemble: disassemble_ri,
-        execute: |_cpu, uop, ops| Ok((i64::from((ops.s1 as i32) >> (uop.imm & 31)), 0)),
+        execute: |_cpu, uop, ops| Ok((((ops.s1 as i32) >> (uop.imm & 31)) as u64, 0)),
     },
     RVInsnSpec {
         name: "ADDW",
@@ -2271,7 +2239,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((i64::from(ops.s1.wrapping_add(ops.s2) as i32), 0)),
+        execute: |_cpu, _uop, ops| Ok((sext32(ops.s1.wrapping_add(ops.s2) as u32), 0)),
     },
     RVInsnSpec {
         name: "SUBW",
@@ -2279,7 +2247,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x4000003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((i64::from(ops.s1.wrapping_sub(ops.s2) as i32), 0)),
+        execute: |_cpu, _uop, ops| Ok((sext32(ops.s1.wrapping_sub(ops.s2) as u32), 0)),
     },
     RVInsnSpec {
         name: "SLLW",
@@ -2287,12 +2255,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000103b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| {
-            Ok((
-                i64::from((ops.s1 as u32).wrapping_shl(ops.s2 as u32) as i32),
-                0,
-            ))
-        },
+        execute: |_cpu, _uop, ops| Ok((sext32((ops.s1 as u32).wrapping_shl(ops.s2 as u32)), 0)),
     },
     RVInsnSpec {
         name: "SRLW",
@@ -2300,12 +2263,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0000503b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| {
-            Ok((
-                i64::from((ops.s1 as u32).wrapping_shr(ops.s2 as u32) as i32),
-                0,
-            ))
-        },
+        execute: |_cpu, _uop, ops| Ok((sext32((ops.s1 as u32).wrapping_shr(ops.s2 as u32)), 0)),
     },
     RVInsnSpec {
         name: "SRAW",
@@ -2313,7 +2271,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x4000503b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((i64::from((ops.s1 as i32).wrapping_shr(ops.s2 as u32)), 0)),
+        execute: |_cpu, _uop, ops| Ok(((ops.s1 as i32).wrapping_shr(ops.s2 as u32) as u64, 0)),
     },
     // RV32/RV64 Zifencei
     RVInsnSpec {
@@ -2388,7 +2346,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             } else {
                 cpu.read_csr(uop.imm as u16)?
             };
-            cpu.write_csr(uop.imm as u16, uop.rs1.get() as i64)?;
+            cpu.write_csr(uop.imm as u16, uop.rs1.get() as u64)?;
 
             Ok((res, 0))
         },
@@ -2402,7 +2360,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, _ops| {
             let data = cpu.read_csr(uop.imm as u16)?;
             if uop.rs1.get() != 0 {
-                cpu.write_csr(uop.imm as u16, data | uop.rs1.get() as i64)?;
+                cpu.write_csr(uop.imm as u16, data | uop.rs1.get() as u64)?;
             }
             Ok((data, 0))
         },
@@ -2416,7 +2374,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, uop, _ops| {
             let data = cpu.read_csr(uop.imm as u16)?;
             if uop.rs1.get() != 0 {
-                cpu.write_csr(uop.imm as u16, data & !(uop.rs1.get() as i64))?;
+                cpu.write_csr(uop.imm as u16, data & !(uop.rs1.get() as u64))?;
             }
             Ok((data, 0))
         },
@@ -2437,7 +2395,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
-            Ok((((i128::from(ops.s1) * i128::from(ops.s2)) >> 64) as i64, 0))
+            Ok((
+                ((i128::from(ops.s1 as i64) * i128::from(ops.s2 as i64)) >> 64) as u64,
+                0,
+            ))
         },
     },
     RVInsnSpec {
@@ -2448,7 +2409,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
             Ok((
-                ((ops.s1 as u128).wrapping_mul(u128::from(ops.s2 as u64)) >> 64) as i64,
+                ((ops.s1 as i64 as u128).wrapping_mul(u128::from(ops.s2)) >> 64) as u64,
                 0,
             ))
         },
@@ -2461,7 +2422,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
             Ok((
-                (u128::from(ops.s1 as u64).wrapping_mul(u128::from(ops.s2 as u64)) >> 64) as i64,
+                (u128::from(ops.s1).wrapping_mul(u128::from(ops.s2)) >> 64) as u64,
                 0,
             ))
         },
@@ -2475,11 +2436,11 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |_cpu, _uop, ops| {
             Ok((
                 if ops.s2 == 0 {
-                    -1
-                } else if ops.s1 == i64::MIN && ops.s2 == -1 {
+                    !0
+                } else if ops.s1 as i64 == i64::MIN && ops.s2 as i64 == -1 {
                     ops.s1
                 } else {
-                    ops.s1.wrapping_div(ops.s2)
+                    (ops.s1 as i64).wrapping_div(ops.s2 as i64) as u64
                 },
                 0,
             ))
@@ -2493,10 +2454,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
             Ok((
-                if ops.s2 as u64 == 0 {
-                    -1
+                if ops.s2 == 0 {
+                    !0
                 } else {
-                    (ops.s1 as u64).wrapping_div(ops.s2 as u64) as i64
+                    ops.s1.wrapping_div(ops.s2)
                 },
                 0,
             ))
@@ -2512,10 +2473,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             Ok((
                 if ops.s2 == 0 {
                     ops.s1
-                } else if ops.s1 == i64::MIN && ops.s2 == -1 {
+                } else if ops.s1 as i64 == i64::MIN && ops.s2 as i64 == -1 {
                     0
                 } else {
-                    ops.s1.wrapping_rem(ops.s2)
+                    (ops.s1 as i64).wrapping_rem(ops.s2 as i64) as u64
                 },
                 0,
             ))
@@ -2529,9 +2490,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
             Ok((
-                match ops.s2 as u64 {
-                    0 => ops.s1 as u64 as i64,
-                    _ => (ops.s1 as u64).wrapping_rem(ops.s2 as u64) as i64,
+                match ops.s2 {
+                    0 => ops.s1,
+                    _ => ops.s1.wrapping_rem(ops.s2),
                 },
                 0,
             ))
@@ -2544,7 +2505,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         bits: 0x0200003b,
         decode: decode_r,
         disassemble: disassemble_r,
-        execute: |_cpu, _uop, ops| Ok((i64::from((ops.s1 as i32).wrapping_mul(ops.s2 as i32)), 0)),
+        execute: |_cpu, _uop, ops| Ok(((ops.s1 as i32).wrapping_mul(ops.s2 as i32) as u64, 0)),
     },
     RVInsnSpec {
         name: "DIVW",
@@ -2553,13 +2514,14 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
+            let (s1, s2) = (ops.s1 as i32, ops.s2 as i32);
             Ok((
-                if ops.s2 as i32 == 0 {
-                    -1
-                } else if ops.s1 as i32 == i32::MIN && ops.s2 as i32 == -1 {
-                    i64::from(ops.s1 as i32)
+                if s2 == 0 {
+                    !0
+                } else if s1 == i32::MIN && s2 == -1 {
+                    s1 as u64
                 } else {
-                    i64::from((ops.s1 as i32).wrapping_div(ops.s2 as i32))
+                    s1.wrapping_div(s2) as u64
                 },
                 0,
             ))
@@ -2574,9 +2536,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |_cpu, _uop, ops| {
             Ok((
                 if ops.s2 as u32 == 0 {
-                    -1
+                    !0
                 } else {
-                    i64::from((ops.s1 as u32).wrapping_div(ops.s2 as u32) as i32)
+                    sext32((ops.s1 as u32).wrapping_div(ops.s2 as u32))
                 },
                 0,
             ))
@@ -2589,13 +2551,14 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |_cpu, _uop, ops| {
+            let (s1, s2) = (ops.s1 as i32, ops.s2 as i32);
             Ok((
-                if ops.s2 as i32 == 0 {
-                    i64::from(ops.s1 as i32)
-                } else if ops.s1 as i32 == i32::MIN && ops.s2 as i32 == -1 {
+                if s2 == 0 {
+                    s1 as u64
+                } else if s1 == i32::MIN && s2 == -1 {
                     0
                 } else {
-                    i64::from((ops.s1 as i32).wrapping_rem(ops.s2 as i32))
+                    s1.wrapping_rem(s2) as u64
                 },
                 0,
             ))
@@ -2610,8 +2573,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |_cpu, _uop, ops| {
             Ok((
                 match ops.s2 as u32 {
-                    0 => i64::from(ops.s1 as u32 as i32),
-                    _ => i64::from((ops.s1 as u32).wrapping_rem(ops.s2 as u32) as i32),
+                    0 => ops.s1 as i32 as u64,
+                    _ => sext32((ops.s1 as u32).wrapping_rem(ops.s2 as u32)),
                 },
                 0,
             ))
@@ -2625,12 +2588,12 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let data = cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32;
+            let data = sext32(cpu.mmu.load_virt_u32(ops.s1)?);
             let pa = cpu
                 .mmu
-                .translate_address(ops.s1 as u64, MemoryAccessType::Read, false)?;
+                .translate_address(ops.s1, MemoryAccessType::Read, false)?;
             cpu.reservation = Some(pa);
-            Ok((i64::from(data), 0))
+            Ok((data, 0))
         },
     },
     RVInsnSpec {
@@ -2642,9 +2605,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             let pa = cpu
                 .mmu
-                .translate_address(ops.s1 as u64, MemoryAccessType::Write, false)?;
+                .translate_address(ops.s1, MemoryAccessType::Write, false)?;
             let res = if cpu.reservation == Some(pa) {
-                cpu.mmu.store_virt_u32(ops.s1 as u64, ops.s2 as u32)?;
+                cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32)?;
                 0
             } else {
                 1
@@ -2660,9 +2623,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = i64::from(cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32);
-            cpu.mmu.store_virt_u32(ops.s1 as u64, ops.s2 as u32)?;
-            Ok((tmp, 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32)?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2672,10 +2635,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
             cpu.mmu
-                .store_virt_u32(ops.s1 as u64, tmp.wrapping_add(ops.s2 as u32))?;
-            Ok((i64::from(tmp as i32), 0))
+                .store_virt_u32(ops.s1, tmp.wrapping_add(ops.s2 as u32))?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2685,10 +2648,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
-            cpu.mmu
-                .store_virt_u32(ops.s1 as u64, (ops.s2 as u32) ^ tmp)?;
-            Ok((i64::from(tmp as i32), 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32 ^ tmp)?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2698,10 +2660,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = i64::from(cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32);
-            cpu.mmu
-                .store_virt_u32(ops.s1 as u64, (ops.s2 & tmp) as u32)?;
-            Ok((tmp, 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32 & tmp)?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2711,10 +2672,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = i64::from(cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32);
-            cpu.mmu
-                .store_virt_u32(ops.s1 as u64, (ops.s2 | tmp) as u32)?;
-            Ok((tmp, 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32 | tmp)?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2724,10 +2684,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32;
-            let val = ops.s2 as i32;
-            cpu.mmu.store_virt_u32(ops.s1 as u64, val.min(tmp) as u32)?;
-            Ok((i64::from(tmp), 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu
+                .store_virt_u32(ops.s1, (ops.s2 as i32).min(tmp as i32) as u32)?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2737,10 +2697,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)? as i32;
-            let val = ops.s2 as i32;
-            cpu.mmu.store_virt_u32(ops.s1 as u64, val.max(tmp) as u32)?;
-            Ok((i64::from(tmp), 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu
+                .store_virt_u32(ops.s1, (ops.s2 as i32).max(tmp as i32) as u32)?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2750,10 +2710,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
-            let val = ops.s2 as u32;
-            cpu.mmu.store_virt_u32(ops.s1 as u64, val.min(tmp))?;
-            Ok((i64::from(tmp as i32), 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu.store_virt_u32(ops.s1, (ops.s2 as u32).min(tmp))?;
+            Ok((sext32(tmp), 0))
         },
     },
     RVInsnSpec {
@@ -2763,10 +2722,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1 as u64)?;
-            let val = ops.s2 as u32;
-            cpu.mmu.store_virt_u32(ops.s1 as u64, val.max(tmp))?;
-            Ok((i64::from(tmp as i32), 0))
+            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
+            cpu.mmu.store_virt_u32(ops.s1, (ops.s2 as u32).max(tmp))?;
+            Ok((sext32(tmp), 0))
         },
     },
     // RV64A
@@ -2777,12 +2735,12 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let data = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
+            let data = cpu.mmu.load_virt_u64(ops.s1)?;
             let pa = cpu
                 .mmu
-                .translate_address(ops.s1 as u64, MemoryAccessType::Read, false)?;
+                .translate_address(ops.s1, MemoryAccessType::Read, false)?;
             cpu.reservation = Some(pa);
-            Ok((data as i64, 0))
+            Ok((data, 0))
         },
     },
     RVInsnSpec {
@@ -2794,9 +2752,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         execute: |cpu, _uop, ops| {
             let pa = cpu
                 .mmu
-                .translate_address(ops.s1 as u64, MemoryAccessType::Write, false)?;
+                .translate_address(ops.s1, MemoryAccessType::Write, false)?;
             let res = if cpu.reservation == Some(pa) {
-                cpu.mmu.store_virt_u64(ops.s1 as u64, ops.s2 as u64)?;
+                cpu.mmu.store_virt_u64(ops.s1, ops.s2)?;
                 0
             } else {
                 1
@@ -2812,8 +2770,8 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)? as i64;
-            cpu.mmu.store_virt_u64(ops.s1 as u64, ops.s2 as u64)?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, ops.s2)?;
             cpu.reservation = None;
             Ok((tmp, 0))
         },
@@ -2825,11 +2783,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
-            cpu.mmu
-                .store_virt_u64(ops.s1 as u64, tmp.wrapping_add(ops.s2 as u64))?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, tmp.wrapping_add(ops.s2))?;
             cpu.reservation = None;
-            Ok((tmp as i64, 0))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2839,11 +2796,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
-            cpu.mmu
-                .store_virt_u64(ops.s1 as u64, tmp ^ (ops.s2 as u64))?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, tmp ^ ops.s2)?;
             cpu.reservation = None;
-            Ok((tmp as i64, 0))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2853,11 +2809,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
-            cpu.mmu
-                .store_virt_u64(ops.s1 as u64, tmp & (ops.s2 as u64))?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, tmp & ops.s2)?;
             cpu.reservation = None;
-            Ok((tmp as i64, 0))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2867,11 +2822,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
-            cpu.mmu
-                .store_virt_u64(ops.s1 as u64, tmp | (ops.s2 as u64))?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, tmp | ops.s2)?;
             cpu.reservation = None;
-            Ok((tmp as i64, 0))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2881,9 +2835,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)? as i64;
-            let val = ops.s2;
-            cpu.mmu.store_virt_u64(ops.s1 as u64, val.min(tmp) as u64)?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu
+                .store_virt_u64(ops.s1, (ops.s2 as i64).min(tmp as i64) as u64)?;
             cpu.reservation = None;
             Ok((tmp, 0))
         },
@@ -2895,9 +2849,9 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)? as i64;
-            let val = ops.s2;
-            cpu.mmu.store_virt_u64(ops.s1 as u64, val.max(tmp) as u64)?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu
+                .store_virt_u64(ops.s1, (ops.s2 as i64).max(tmp as i64) as u64)?;
             cpu.reservation = None;
             Ok((tmp, 0))
         },
@@ -2909,11 +2863,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
-            let val = ops.s2 as u64;
-            cpu.mmu.store_virt_u64(ops.s1 as u64, val.min(tmp))?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, ops.s2.min(tmp))?;
             cpu.reservation = None;
-            Ok((tmp as i64, 0))
+            Ok((tmp, 0))
         },
     },
     RVInsnSpec {
@@ -2923,11 +2876,10 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         decode: decode_r,
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1 as u64)?;
-            let val = ops.s2 as u64;
-            cpu.mmu.store_virt_u64(ops.s1 as u64, val.max(tmp))?;
+            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
+            cpu.mmu.store_virt_u64(ops.s1, ops.s2.max(tmp))?;
             cpu.reservation = None;
-            Ok((tmp as i64, 0))
+            Ok((tmp, 0))
         },
     },
     // RV32F
@@ -3091,7 +3043,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
-            let sign_bit = rs2_bits & (0x80000000u64 as i64);
+            let sign_bit = rs2_bits & 0x80000000u64;
             Ok((fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff), 0))
         },
     },
@@ -3105,7 +3057,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
-            let sign_bit = !rs2_bits & (0x80000000u64 as i64);
+            let sign_bit = !rs2_bits & 0x80000000u64;
             Ok((fp::NAN_BOX_F32 | sign_bit | (rs1_bits & 0x7fffffff), 0))
         },
     },
@@ -3119,7 +3071,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let rs1_bits = Sf32::unbox(ops.s1);
             let rs2_bits = Sf32::unbox(ops.s2);
-            let sign_bit = rs2_bits & (0x80000000u64 as i64);
+            let sign_bit = rs2_bits & 0x80000000u64;
             Ok((fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits), 0))
         },
     },
@@ -3155,7 +3107,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((i64::from(op_to_f32(ops.s1) as i32), 0))
+            Ok((op_to_f32(ops.s1) as i32 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3166,7 +3118,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((i64::from(op_to_f32(ops.s1) as u32), 0))
+            Ok((sext32(op_to_f32(ops.s1) as u32), 0))
         },
     },
     RVInsnSpec {
@@ -3177,7 +3129,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, _uop, ops| {
             cpu.check_float_access(0)?;
-            Ok((i64::from(ops.s1 as i32), 0))
+            Ok((ops.s1 as i32 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3266,7 +3218,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f32(ops.s1) as i64, 0))
+            Ok((op_to_f32(ops.s1) as i64 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3277,7 +3229,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f32(ops.s1) as u64 as i64, 0))
+            Ok((op_to_f32(ops.s1) as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3461,7 +3413,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
-            let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
+            let sign_bit = rs2_bits & 0x8000000000000000u64;
             Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
         },
     },
@@ -3475,7 +3427,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
-            let sign_bit = !rs2_bits & (0x8000000000000000u64 as i64);
+            let sign_bit = !rs2_bits & 0x8000000000000000u64;
             Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
         },
     },
@@ -3489,7 +3441,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
             cpu.check_float_access(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
-            let sign_bit = rs2_bits & (0x8000000000000000u64 as i64);
+            let sign_bit = rs2_bits & 0x8000000000000000u64;
             Ok((sign_bit ^ rs1_bits, 0))
         },
     },
@@ -3591,7 +3543,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((i64::from(op_to_f64(ops.s1) as i32), 0))
+            Ok((op_to_f64(ops.s1) as i32 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3602,7 +3554,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((i64::from(op_to_f64(ops.s1) as u32), 0))
+            Ok((u64::from(op_to_f64(ops.s1) as u32), 0))
         },
     },
     RVInsnSpec {
@@ -3636,7 +3588,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f64(ops.s1) as i64, 0))
+            Ok((op_to_f64(ops.s1) as i64 as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3647,7 +3599,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((op_to_f64(ops.s1) as u64 as i64, 0))
+            Ok((op_to_f64(ops.s1) as u64, 0))
         },
     },
     RVInsnSpec {
@@ -3669,7 +3621,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(ops.s1 as f64), 0))
+            Ok((op_from_f64(ops.s1 as i64 as f64), 0))
         },
     },
     RVInsnSpec {
@@ -3680,7 +3632,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
         disassemble: disassemble_r,
         execute: |cpu, uop, ops| {
             cpu.check_float_access(uop.rm)?;
-            Ok((op_from_f64(ops.s1 as u64 as f64), 0))
+            Ok((op_from_f64(ops.s1 as f64), 0))
         },
     },
     RVInsnSpec {
@@ -3910,7 +3862,7 @@ const INSTRUCTIONS: [RVInsnSpec; INSTRUCTION_NUM] = [
 #[cfg(test)]
 mod test_cpu {
     use super::*;
-    use crate::mmu::DRAM_BASE;
+    use crate::mmu::MEMORY_BASE;
     use crate::terminal::DummyTerminal;
 
     fn create_cpu() -> Cpu { Cpu::new(Box::new(DummyTerminal::new()), 8) }
@@ -3924,8 +3876,8 @@ mod test_cpu {
         assert_eq!(0, cpu.read_pc());
         cpu.update_pc(1);
         assert_eq!(0, cpu.read_pc());
-        cpu.update_pc(0xffffffffffffffffu64 as i64);
-        assert_eq!(0xfffffffffffffffeu64 as i64, cpu.read_pc());
+        cpu.update_pc(0xffffffffffffffffu64);
+        assert_eq!(0xfffffffffffffffeu64, cpu.read_pc());
     }
 
     #[test]
@@ -3943,27 +3895,27 @@ mod test_cpu {
     fn tick() {
         let mut uop_cache = IntMap::new();
         let mut cpu = create_cpu();
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
 
         // Write non-compressed "addi x1, x1, 1" instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00108093) {
+        match cpu.get_mut_mmu().store_virt_u32(MEMORY_BASE, 0x00108093) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         // Write compressed "addi x8, x0, 8" instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE + 4, 0x20) {
+        match cpu.get_mut_mmu().store_virt_u32(MEMORY_BASE + 4, 0x20) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
 
         cpu.run_soc(1, &mut uop_cache);
 
-        assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
+        assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
         assert_eq!(1, cpu.read_register(x(1)));
 
         cpu.run_soc(1, &mut uop_cache);
 
-        assert_eq!(DRAM_BASE as i64 + 6, cpu.read_pc());
+        assert_eq!(MEMORY_BASE + 6, cpu.read_pc());
         assert_eq!(8, cpu.read_register(x(8)));
     }
 
@@ -3972,18 +3924,18 @@ mod test_cpu {
     fn step_cpu() {
         let mut uop_cache = IntMap::new();
         let mut cpu = create_cpu();
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
         // write non-compressed "addi a0, a0, 12" instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0xc50513) {
+        match cpu.get_mut_mmu().store_virt_u32(MEMORY_BASE, 0xc50513) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
-        assert_eq!(DRAM_BASE as i64, cpu.read_pc());
+        assert_eq!(MEMORY_BASE, cpu.read_pc());
         assert_eq!(0, cpu.read_register(x(10)));
         if let Err(exc) = cpu.step_cpu(&mut uop_cache) {
-            cpu.handle_exception(&exc, DRAM_BASE as i64);
+            cpu.handle_exception(&exc, MEMORY_BASE);
         }
-        assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
+        assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
         // "addi a0, a0, a12" instruction writes 12 to a0 register.
         assert_eq!(12, cpu.read_register(x(10)));
     }
@@ -4027,18 +3979,21 @@ mod test_cpu {
             Some(inst) => assert_eq!(inst.name, "WFI"),
             None => panic!("Failed to decode"),
         }
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
         // write WFI instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, wfi_instruction) {
+        match cpu
+            .get_mut_mmu()
+            .store_virt_u32(MEMORY_BASE, wfi_instruction)
+        {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         cpu.run_soc(1, &mut uop_cache);
-        assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
+        assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
         for _i in 0..10 {
             // Until interrupt happens, .tick() does nothing
             cpu.run_soc(1, &mut uop_cache);
-            assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
+            assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
         }
         // Machine timer interrupt
         cpu.write_csr_raw(Csr::Mie, MIP_MTIP);
@@ -4057,11 +4012,11 @@ mod test_cpu {
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write non-compressed "addi x0, x0, 1" instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00100013) {
+        match cpu.get_mut_mmu().store_virt_u32(MEMORY_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
 
         // Machine timer interrupt but mie in mstatus is not enabled yet
         cpu.write_csr_raw(Csr::Mie, MIP_MTIP);
@@ -4071,16 +4026,16 @@ mod test_cpu {
         cpu.run_soc(1, &mut uop_cache);
 
         // Interrupt isn't caught because mie is disabled
-        assert_eq!(DRAM_BASE as i64 + 4, cpu.read_pc());
+        assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
 
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
         // Enable mie in mstatus
         cpu.write_csr_raw(Csr::Mstatus, 0x8);
 
         cpu.run_soc(1, &mut uop_cache);
 
         // Interrupt happened and moved to handler
-        assert_eq!(handler_vector as i64, cpu.read_pc());
+        assert_eq!(handler_vector, cpu.read_pc());
 
         // CSR Cause register holds the reason what caused the interrupt
         assert_eq!(0x8000000000000007, cpu.read_csr_raw(Csr::Mcause));
@@ -4099,17 +4054,17 @@ mod test_cpu {
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write ECALL instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00000073) {
+        match cpu.get_mut_mmu().store_virt_u32(MEMORY_BASE, 0x00000073) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         cpu.write_csr_raw(Csr::Mtvec, handler_vector);
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
 
         cpu.run_soc(1, &mut uop_cache);
 
         // Interrupt happened and moved to handler
-        assert_eq!(handler_vector as i64, cpu.read_pc());
+        assert_eq!(handler_vector, cpu.read_pc());
 
         // CSR Cause register holds the reason what caused the trap
         assert_eq!(0xb, cpu.read_csr_raw(Csr::Mcause));
@@ -4126,15 +4081,18 @@ mod test_cpu {
         let mut uop_cache = IntMap::new();
 
         let mut cpu = create_cpu();
-        cpu.update_pc(DRAM_BASE as i64);
+        cpu.update_pc(MEMORY_BASE);
 
         // Write non-compressed "addi x0, x0, 1" instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE, 0x00100013) {
+        match cpu.get_mut_mmu().store_virt_u32(MEMORY_BASE, 0x00100013) {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }
         // Write non-compressed "addi x1, x1, 1" instruction
-        match cpu.get_mut_mmu().store_virt_u32(DRAM_BASE + 4, 0x00108093) {
+        match cpu
+            .get_mut_mmu()
+            .store_virt_u32(MEMORY_BASE + 4, 0x00108093)
+        {
             Ok(()) => {}
             Err(_e) => panic!("Failed to store"),
         }

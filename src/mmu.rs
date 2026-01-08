@@ -237,19 +237,16 @@ impl Mmu {
         }
     }
 
-    /// Loads eight bytes as i64. This method takes virtual address and
+    /// Loads eight bytes as u64. This method takes virtual address and
     /// translates into physical address inside.
     ///
     /// # Arguments
     /// * `va` Virtual address
     /// # Errors
     /// Exceptions are returned as errors
-    // XXX in contrast to `load_virt_u64` it takes the address as i64.  Eventually all the memory
-    // ops will do this, but for the moment we have this odd ugliness
     #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-    pub fn load_virt_u64_(&mut self, va: i64) -> Result<i64, Exception> {
-        // XXX All addresses should be i64
-        Ok(self.load_virt_bytes(va as u64, 8)? as i64)
+    pub fn load_virt_u64_(&mut self, va: u64) -> Result<u64, Exception> {
+        self.load_virt_bytes(va, 8)
     }
 
     /// Store an byte. This method takes virtual address and translates
@@ -264,7 +261,7 @@ impl Mmu {
         let pa = self.translate_address(va, MemoryAccessType::Write, false)?;
         self.store_phys_u8(pa, value).map_err(|()| Exception {
             trap: Trap::StoreAccessFault,
-            tval: va as i64,
+            tval: va,
         })
     }
 
@@ -298,7 +295,7 @@ impl Mmu {
             };
             r.map_err(|()| Exception {
                 trap: Trap::StoreAccessFault,
-                tval: va as i64,
+                tval: va,
             })
         } else {
             for i in 0..width {
@@ -347,17 +344,15 @@ impl Mmu {
     /// # Errors
     /// Exceptions are returned as errors
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store64(&mut self, va: i64, value: i64) -> Result<(), Exception> {
-        self.store_virt_bytes(va as u64, value as u64, 8)
+    pub fn store64(&mut self, va: u64, value: u64) -> Result<(), Exception> {
+        self.store_virt_bytes(va, value, 8)
     }
 
     /// # Errors
     /// Exceptions are returned as errors
-    // XXX in contrast to `store_virt_u32` it takes the address and data as i64.
-    // Eventually all the memory ops will do this, but for the moment we have this odd ugliness
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn store_virt_u32_(&mut self, va: i64, value: i64) -> Result<(), Exception> {
-        self.store_virt_bytes(va as u64, value as u64, 4)
+    pub fn store_virt_u32_(&mut self, va: u64, value: u64) -> Result<(), Exception> {
+        self.store_virt_bytes(va, value, 4)
     }
 
     /// Loads a byte from main memory or peripheral devices depending on
@@ -369,8 +364,7 @@ impl Mmu {
     /// Can panic ...
     #[allow(clippy::cast_possible_truncation, clippy::unwrap_used)]
     pub fn load_phys_u8(&mut self, pa: u64) -> u8 {
-        // @TODO: Mapping should be configurable with dtb
-        if pa >= DRAM_BASE {
+        if pa >= MEMORY_BASE {
             self.memory.read_u8(pa)
         } else {
             self.load_mmio_u8(pa).unwrap()
@@ -382,9 +376,6 @@ impl Mmu {
     #[allow(clippy::result_unit_err, clippy::cast_possible_truncation)]
     pub fn load_mmio_u8(&mut self, pa: u64) -> Result<u8, ()> {
         match pa {
-            // I don't know why but dtb data seems to be stored from 0x1020 on Linux.
-            // It might be from self.x[0xb] initialization?
-            // And DTB size is arbitray.
             0x00001020..=0x00001fff => Ok(self.dtb[pa as usize - 0x1020]),
             0x02000000..=0x0200ffff => Ok(self.clint.load(pa)),
             0x0C000000..=0x0fffffff => Ok(self.plic.load(pa)),
@@ -400,7 +391,7 @@ impl Mmu {
     /// # Arguments
     /// * `pa` Physical address
     fn load_phys_u16(&mut self, pa: u64) -> u16 {
-        if pa >= DRAM_BASE && pa.wrapping_add(1) > pa {
+        if pa >= MEMORY_BASE && pa.wrapping_add(1) > pa {
             // Fast path. Directly load main memory at a time.
             self.memory.read_u16(pa)
         } else {
@@ -418,7 +409,7 @@ impl Mmu {
     /// # Arguments
     /// * `pa` Physical address
     pub fn load_phys_u32(&mut self, pa: u64) -> u32 {
-        if pa >= DRAM_BASE && pa.wrapping_add(3) > pa {
+        if pa >= MEMORY_BASE && pa.wrapping_add(3) > pa {
             self.memory.read_u32(pa)
         } else {
             let mut data = 0_u32;
@@ -435,7 +426,7 @@ impl Mmu {
     /// # Arguments
     /// * `pa` Physical address
     pub fn load_phys_u64(&mut self, pa: u64) -> u64 {
-        if pa >= DRAM_BASE && pa.wrapping_add(7) > pa {
+        if pa >= MEMORY_BASE && pa.wrapping_add(7) > pa {
             self.memory.read_u64(pa)
         } else {
             let mut data = 0_u64;
@@ -455,8 +446,7 @@ impl Mmu {
     /// # Errors
     /// Will return error for access outside supported memory range
     #[allow(clippy::result_unit_err, clippy::cast_sign_loss)]
-    pub fn store_mmio_u8(&mut self, pa: i64, value: u8) -> Result<(), ()> {
-        let pa = pa as u64;
+    pub fn store_mmio_u8(&mut self, pa: u64, value: u8) -> Result<(), ()> {
         match pa {
             0x02000000..=0x0200ffff => self.clint.store(pa, value, &mut self.mip),
             0x0c000000..=0x0fffffff => self.plic.store(pa, value, &mut self.mip),
@@ -477,11 +467,10 @@ impl Mmu {
         clippy::cast_possible_wrap
     )]
     pub fn store_phys_u8(&mut self, pa: u64, value: u8) -> Result<(), ()> {
-        // @TODO: Mapping should be configurable with dtb
-        if DRAM_BASE <= pa {
+        if MEMORY_BASE <= pa {
             self.memory.write_u8(pa, value)
         } else {
-            self.store_mmio_u8(pa as i64, value)
+            self.store_mmio_u8(pa, value)
         }
     }
 
@@ -497,7 +486,7 @@ impl Mmu {
     /// If any part of the access is outside of memory, a unit error is returned
     #[allow(clippy::result_unit_err)]
     pub fn store_phys_u16(&mut self, pa: u64, value: u16) -> Result<(), ()> {
-        if pa >= DRAM_BASE {
+        if pa >= MEMORY_BASE {
             self.memory.write_u16(pa, value)
         } else {
             for i in 0..2 {
@@ -517,7 +506,7 @@ impl Mmu {
     /// If any part of the access is outside of memory, a unit error is returned
     #[allow(clippy::result_unit_err)]
     pub fn store_phys_u32(&mut self, pa: u64, value: u32) -> Result<(), ()> {
-        if pa >= DRAM_BASE {
+        if pa >= MEMORY_BASE {
             self.memory.write_u32(pa, value)
         } else {
             for i in 0..4 {
@@ -537,7 +526,7 @@ impl Mmu {
     /// If any part of the access is outside of memory, a unit error is returned
     #[allow(clippy::result_unit_err)]
     pub fn store_phys_u64(&mut self, pa: u64, value: u64) -> Result<(), ()> {
-        if pa >= DRAM_BASE {
+        if pa >= MEMORY_BASE {
             self.memory.write_u64(pa, value)
         } else {
             for i in 0..8 {
@@ -625,7 +614,7 @@ impl Mmu {
         // Check for canonical addresses
         if ((va as i64) << vaddr_shift) >> vaddr_shift != va as i64 {
             // XXX Some debugging logging here might be useful
-            return page_fault(va as i64, access);
+            return page_fault(va, access);
         }
         let pte_addr_bits = 44;
         let page_table_root = (self.satp >> SATP_PPN_SHIFT) & SATP_PPN_MASK;
@@ -650,7 +639,6 @@ impl Mmu {
                 break;
             }
 
-            // XXX too many hardcoded values
             let paddr = (pte >> 10) << PG_SHIFT;
             let mut xwr = (pte >> 1) & 7;
             if xwr == 0 {
@@ -675,7 +663,7 @@ impl Mmu {
             } else if pte & PTE_U_MASK == 0 {
                 // XXX Debug log would be useful
                 warn!("** {prv:?} mode access to {va:08x} denied: !U");
-                return page_fault(va as i64, access);
+                return page_fault(va, access);
             }
 
             /* protection check */
@@ -722,7 +710,7 @@ impl Mmu {
                     && !side_effect_free
                     && self.store_phys_u64(pte_addr, new_pte).is_err()
                 {
-                    return access_fault(va as i64, access);
+                    return access_fault(va, access);
                 }
             }
 
@@ -730,7 +718,7 @@ impl Mmu {
             return Ok(paddr & !vaddr_mask | va & vaddr_mask);
         }
 
-        page_fault(va as i64, access)
+        page_fault(va, access)
     }
 
     /// Returns immutable reference to `Clint`.
@@ -744,8 +732,7 @@ impl Mmu {
     pub const fn get_mut_uart(&mut self) -> &mut Uart { &mut self.uart }
 }
 
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // XXX Try to remove this later when the u64 -> i64 conversion is done
-const fn page_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Exception> {
+const fn page_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T, Exception> {
     Err::<T, Exception>(Exception {
         trap: match access_type {
             MemoryAccessType::Read => Trap::LoadPageFault,
@@ -756,8 +743,7 @@ const fn page_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T,
     })
 }
 
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // XXX Try to remove this later when the u64 -> i64 conversion is done
-const fn access_fault<T>(address: i64, access_type: MemoryAccessType) -> Result<T, Exception> {
+const fn access_fault<T>(address: u64, access_type: MemoryAccessType) -> Result<T, Exception> {
     Err::<T, Exception>(Exception {
         trap: match access_type {
             MemoryAccessType::Read => Trap::LoadAccessFault,

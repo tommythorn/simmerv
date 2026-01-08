@@ -42,7 +42,7 @@ pub struct Emulator {
     /// Stores mapping from symbol to virtual address
     pub symbol_map: FnvHashMap<String, u64>,
 
-    uop_cache: IntMap<i64, cpu::Uop>,
+    uop_cache: IntMap<u64, cpu::Uop>,
 
     /// The address where data will be sent to terminal
     pub tohost_addr: u64,
@@ -218,7 +218,7 @@ impl Emulator {
         buf: &[u8],
         load_addr: Option<u64>,
         symbols: &mut BTreeMap<String, u64>,
-    ) -> anyhow::Result<i64> {
+    ) -> anyhow::Result<u64> {
         let elf_file = xmas_elf::ElfFile::new(buf);
         if elf_file.is_err() {
             let Some(load_addr) = load_addr else {
@@ -233,10 +233,10 @@ impl Emulator {
             self.cpu
                 .mmu
                 .memory
-                .slice(load_addr as i64, size)
+                .slice(load_addr, size)
                 .map_err(|()| anyhow!("load_image reaches outside memory"))?
                 .copy_from_slice(buf);
-            return Ok(load_addr as i64);
+            return Ok(load_addr);
         }
         let elf_file = elf_file.map_err(|e| anyhow!(e))?;
         xmas_elf::header::sanity_check(&elf_file).map_err(|e| anyhow!(e))?;
@@ -293,7 +293,7 @@ impl Emulator {
             }
         }
 
-        Ok((elf_file.header.pt2.entry_point() + relocation_offset) as i64)
+        Ok(elf_file.header.pt2.entry_point() + relocation_offset)
     }
 
     /// Sets up filesystem. Use this method if program (e.g. Linux) uses

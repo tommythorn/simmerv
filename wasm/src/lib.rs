@@ -139,7 +139,7 @@ impl WasmRiscv {
     pub fn run_until_breakpoints(&mut self, breakpoints: Vec<u64>, max_cycles: u32) -> bool {
         let mut table = HashMap::new();
         for breakpoint in breakpoints {
-            table.insert(breakpoint as i64, true);
+            table.insert(breakpoint, true);
         }
         for _i in 0..max_cycles {
             self.emulator.tick(40);
@@ -173,7 +173,7 @@ impl WasmRiscv {
     }
 
     /// Reads Program Counter content.
-    pub fn read_pc(&self) -> i64 { self.emulator.get_cpu().read_pc() }
+    pub fn read_pc(&self) -> u64 { self.emulator.get_cpu().read_pc() }
 
     /// Gets ascii code byte sent from the emulator to terminal.
     /// The emulator holds output buffer inside. This method returns zero
