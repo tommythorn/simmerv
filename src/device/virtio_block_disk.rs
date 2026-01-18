@@ -8,10 +8,6 @@ use crate::mmu::Memory;
 // 0x2000 is an arbitary number.
 const MAX_QUEUE_SIZE: u64 = 0x2000;
 
-// To simulate disk access time.
-// @TODO: Set more proper number. 500 core cycles may be too short.
-const DISK_ACCESS_DELAY: u64 = 500;
-
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 
 // 0: buffer is write-only = read from disk operation
@@ -116,8 +112,7 @@ impl VirtioBlockDisk {
     /// * `memory`
     pub fn service(&mut self, memory: &mut Memory, cycle: u64) {
         self.cycle = cycle;
-        if !self.notify_cycles.is_empty() && self.cycle >= self.notify_cycles[0] + DISK_ACCESS_DELAY
-        {
+        if !self.notify_cycles.is_empty() {
             // bit 0 in interrupt_status register indicates
             // the interrupt was asserted because the device has used a buffer
             // in at least one of the active virtual queues.
@@ -341,14 +336,7 @@ impl VirtioBlockDisk {
                 self.queue_notify = (self.queue_notify & !(0xff << 24)) | ((value as u32) << 24);
                 self.notify_cycles.push(self.cycle);
             }
-            0x10001064 => {
-                // interrupt ack
-                if value & 1 == 1 {
-                    self.interrupt_status &= !1;
-                } else {
-                    panic!("Unknown ack {value:X}");
-                }
-            }
+            0x10001064 => self.interrupt_status &= !(value as u32), // interrupt ack
             0x10001070 => {
                 self.status = (self.status & !0xff) | (value as u32);
             }
