@@ -8203,7 +8203,7 @@ pub fn uncompress(insn16: u32) -> u32 {
         0 => match funct3 {
             0 => {
                 // C.ADDI4SPN
-                // addi rd+8, x2, nzuimm
+                // addi rd+8, sp, nzuimm
                 let rd = (insn16 >> 2) & 7; // [4:2]
                 let nzuimm = ((insn16 >> 7) & 0x30) | // nzuimm[5:4] <= [12:11]
                 ((insn16 >> 1) & 0x3c0) | // nzuimm{9:6] <= [10:7]

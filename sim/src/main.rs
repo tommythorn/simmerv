@@ -47,8 +47,9 @@ struct Args {
     #[argh(switch, short = 'c')]
     ctrlc_breaks: bool,
 
-    /// memory images, with optional comma separated options,
-    /// such as '0x8200000'
+    /// memory images, elf or binary blobs, optionally follow by a comma and the
+    /// the "0x"-prefixed load address in hex (this is required for binary
+    /// blobs)
     #[argh(positional)]
     images: Vec<String>,
 }

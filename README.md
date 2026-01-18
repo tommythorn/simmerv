@@ -15,7 +15,7 @@ and off-the-shelf Linux distributions.
 You can run Linux on the emulator in your browser: [online demo is
 here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
-## Screenshots
+## Screenshots (somewhat out of date)
 
 ![animation](./screenshots/animation.gif)
 ![debugger](./screenshots/debugger.gif)
@@ -50,7 +50,7 @@ many FP instructions) are not 100% to the spec.
 
 ### Current Issues Being Worked
 
-- Newer Linux kernel have issues (which is a problem for newer binaries)
+- Newer Linux kernel have issues with VirtIO block devices (initramfs works)
 - U-boot loads but hangs before hand-off; might be an issue with ELF loading
 
 ### High Priority Work Post Issues
@@ -62,7 +62,7 @@ many FP instructions) are not 100% to the spec.
 - Improve the disassembler to recognize pseudo ops like li, mv, ret,
   etc. (This requires a structural change).
 
-## How to run Linux
+## How to run Linux with VirtIO Block Device (/dev/vda)
 
 *VERY IMPORTANT: images are stored with git LFS*. Install LFS (don't
 forget `git lfs install` also) and recheckout if needed.  Otherwise
@@ -75,6 +75,12 @@ $ cargo r -r -- linux/fw_payload.elf -f linux/rootfs.img
 or
 ```sh
 $ cargo r -r -- -c linux/opensbi/fw_jump.elf,0x80000000 linux/vmlinux,0x80200000 -f linux/rootfs.img
+```
+
+## How to run Linux with initramfs (/dev/ram)
+
+```sh
+$ cargo r --example sim -r -- -d linux/with-initrd.dtb linux/fw_payload.elf linux/initrd.xz,0xa0000000
 ```
 
 ## How to run riscv-tests
