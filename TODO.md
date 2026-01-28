@@ -4,14 +4,15 @@
 
 - Fix boot with the newest kernels (it hangs, unknown why)
 
-- CSR handling is still a bit suspect; the access checks looks
-  broken. Need to cross check the read/write CSR behavior against
-  Dromajo
+- CSR handling is still a bit suspect
+  The access checks looks broken and we shouldn't have a CSR array but instead
+  individually implement CSR registers we support and trap access to everything else.
+  need to cross check the read/write CSR behavior against Dromajo
 
 - Go though all explicit usage of cpu.f[] and look for mistakes
 
 - Pass all of riscv-test (status: debug, svnapot, and lots of FP.
-  Might punt on debug and svnapot for now)
+  Might punt on debug and svnapot)
 
 - Pass all of riscof
 

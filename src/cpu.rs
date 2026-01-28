@@ -140,7 +140,7 @@ pub struct Cpu {
 
     // Supervisor and CSR
     pub cycle: u64,
-    csr: csr::CsrFile,
+    csr: Box<[u64]>, // XXX this should be replaced with individual registers
     reservation: Option<u64>,
 
     // Wait-For-Interrupt; relax and await further instruction
@@ -297,13 +297,17 @@ impl Cpu {
             cycle: 0,
             wfi: false,
             pc: 0,
-            csr: CsrFile::new(),
+            csr: vec![0; 4096].into_boxed_slice(), // XXX MUST GO AWAY SOON
             mmu,
             reservation: None,
             flush_icache: false,
             decode_dag: dag_decoder::new(&patterns),
         };
-        log::trace!("FDT is {} entries", cpu.decode_dag.len());
+        log::info!("FDT is {} entries", cpu.decode_dag.len());
+        cpu.csr[Csr::Misa as usize] = 1 << 63; // RV64
+        for c in "SUIMAFDC".bytes() {
+            cpu.csr[Csr::Misa as usize] |= 1 << (c as usize - 65);
+        }
         cpu.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
         cpu.write_x(x(11), 0x1020); // start of DTB (XXX could put that elsewhere);
         cpu
@@ -387,7 +391,7 @@ impl Cpu {
     fn step_cpu(&mut self, uop_cache: &mut IntMap<u64, Uop>) -> Result<(), Exception> {
         self.cycle = self.cycle.wrapping_add(1);
         if self.wfi {
-            if self.mmu.mip & self.csr.mie != 0 {
+            if self.mmu.mip & self.read_csr_raw(Csr::Mie) != 0 {
                 self.wfi = false;
             }
             return Ok(());
@@ -456,7 +460,7 @@ impl Cpu {
         use self::Trap::SupervisorExternalInterrupt;
         use self::Trap::SupervisorSoftwareInterrupt;
         use self::Trap::SupervisorTimerInterrupt;
-        let minterrupt = self.mmu.mip & self.csr.mie;
+        let minterrupt = self.mmu.mip & self.read_csr_raw(Csr::Mie);
         if minterrupt == 0 {
             return;
         }
@@ -498,16 +502,16 @@ impl Cpu {
         // First, determine which privilege mode should handle the trap.
         // @TODO: Check if this logic is correct
         let mdeleg = if is_interrupt {
-            self.csr.mideleg
+            self.read_csr_raw(Csr::Mideleg)
         } else {
-            self.csr.medeleg
+            self.read_csr_raw(Csr::Medeleg)
         };
         let sdeleg = if is_interrupt {
-            self.csr.sideleg
+            self.read_csr_raw(Csr::Sideleg)
         } else {
-            self.csr.sedeleg
+            self.read_csr_raw(Csr::Sedeleg)
         };
-        let pos = cause & 63;
+        let pos = cause & 0xffff;
 
         let new_priv_mode = if (mdeleg >> pos) & 1 == 0 {
             PrivMode::M
@@ -524,11 +528,11 @@ impl Cpu {
             let current_status = match self.mmu.prv {
                 PrivMode::M => self.read_csr_raw(Csr::Mstatus),
                 PrivMode::S => self.read_csr_raw(Csr::Sstatus),
-                PrivMode::U => self.csr.ustatus,
+                PrivMode::U => self.read_csr_raw(Csr::Ustatus),
             };
 
             let ie = match new_priv_mode {
-                PrivMode::M => self.csr.mie,
+                PrivMode::M => self.read_csr_raw(Csr::Mie),
                 PrivMode::S => self.read_csr_raw(Csr::Sie),
                 PrivMode::U => self.read_csr_raw(Csr::Uie),
             };
@@ -638,15 +642,16 @@ impl Cpu {
             PrivMode::S => Csr::Stval,
             PrivMode::U => Csr::Utval,
         };
-        self.pc = match self.mmu.prv {
-            PrivMode::M => self.read_csr_raw(Csr::Mtvec),
-            PrivMode::S => self.read_csr_raw(Csr::Stvec),
-            PrivMode::U => self.read_csr_raw(Csr::Utvec),
+        let csr_tvec_address = match self.mmu.prv {
+            PrivMode::M => Csr::Mtvec,
+            PrivMode::S => Csr::Stvec,
+            PrivMode::U => Csr::Utvec,
         };
 
         self.write_csr_raw(csr_epc_address, insn_addr);
         self.write_csr_raw(csr_cause_address, cause);
         self.write_csr_raw(csr_tval_address, exc.tval);
+        self.pc = self.read_csr_raw(csr_tvec_address);
 
         // Add 4 * cause if tvec has vector type address
         if self.pc & 3 != 0 {
@@ -718,7 +723,6 @@ impl Cpu {
                 if self.mmu.prv == S && self.mmu.mstatus & MSTATUS_TVM != 0 {
                     return illegal;
                 }
-                return Ok(self.mmu.satp);
             }
             _ => {}
         }
@@ -727,6 +731,7 @@ impl Cpu {
 
     #[allow(clippy::cast_sign_loss)]
     fn write_csr(&mut self, csrno: u16, value: u64) -> Result<(), Exception> {
+        let mut value = value;
         let illegal = Err(Exception {
             trap: Trap::IllegalInstruction,
             tval: 0,
@@ -742,6 +747,10 @@ impl Cpu {
         }
 
         match csr {
+            Csr::Mstatus => {
+                let mask = MSTATUS_MASK & !(MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
+                value = value & mask | self.mmu.mstatus & !mask;
+            }
             Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access_and_dirty(0)?,
             Csr::Cycle => {
                 log::info!("** deny cycle writing");
@@ -759,9 +768,6 @@ impl Cpu {
                     log::warn!("wrote illegal value {value:x} to satp");
                     return illegal;
                 }
-
-                self.mmu.satp = value;
-                return Ok(());
             }
             _ => {}
         }
@@ -774,19 +780,19 @@ impl Cpu {
     #[allow(clippy::cast_sign_loss)]
     fn read_csr_raw(&self, csr: Csr) -> u64 {
         match csr {
-            Csr::Cycle | Csr::Mcycle | Csr::Minstret => self.cycle,
-            Csr::Fcsr => self.read_fcsr(),
             Csr::Fflags => u64::from(self.read_fflags()),
             Csr::Frm => self.read_frm() as u64,
-            Csr::Mcause => self.csr.mcause,
-            Csr::Medeleg => self.csr.medeleg,
-            Csr::Mepc => self.csr.mepc,
-            Csr::Mhartid => self.csr.mhartid,
-            Csr::Mideleg => self.csr.mideleg,
-            Csr::Mie => self.csr.mie,
-            Csr::Mip => self.mmu.mip,
-            Csr::Misa => self.csr.misa,
-            Csr::Mscratch => self.csr.mscratch,
+            Csr::Fcsr => self.read_fcsr(),
+            Csr::Sstatus => {
+                let mut sstatus = self.mmu.mstatus;
+                sstatus &= !MSTATUS_FS;
+                sstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
+                sstatus &= 0x8000_0003_000d_e162;
+                if self.fs == 3 {
+                    sstatus |= 1 << 63;
+                }
+                sstatus
+            }
             Csr::Mstatus => {
                 let mut mstatus = self.mmu.mstatus;
                 mstatus &= !MSTATUS_FS;
@@ -796,74 +802,60 @@ impl Cpu {
                 }
                 mstatus
             }
-            Csr::Mtval => self.csr.mtval,
-            Csr::Mtvec => self.csr.mtvec,
-            Csr::Satp => self.mmu.satp,
-            Csr::Scause => self.csr.scause,
-            Csr::Sedeleg => self.csr.sedeleg,
-            Csr::Sepc => self.csr.sepc,
-            Csr::Sideleg => self.csr.sideleg,
-            Csr::Sie => self.csr.mie & self.csr.mideleg,
-            Csr::Sip => self.mmu.mip & self.csr.mideleg,
-            Csr::Sscratch => self.csr.sscratch,
-            Csr::Sstatus => {
-                let mut mstatus = self.mmu.mstatus;
-                mstatus &= !MSTATUS_FS;
-                mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
-                mstatus &= 0x8000_0003_000d_e162;
-                if self.fs == 3 {
-                    mstatus |= 1 << 63;
-                }
-                mstatus
-            }
-            Csr::Stval => self.csr.stval,
-            Csr::Stvec => self.csr.stvec,
+            Csr::Sie => self.csr[Csr::Mie as usize] & self.csr[Csr::Mideleg as usize],
+            Csr::Sip => self.mmu.mip & self.csr[Csr::Mideleg as usize],
+            Csr::Mip => self.mmu.mip,
             Csr::Time => self.mmu.get_clint().read_mtime(),
-            Csr::Ustatus => self.csr.ustatus,
-            _ => 0,
+            Csr::Cycle | Csr::Mcycle | Csr::Minstret => self.cycle,
+            Csr::Satp => self.mmu.satp,
+            _ => self.csr[csr as usize],
         }
     }
 
     fn write_csr_raw(&mut self, csr: Csr, value: u64) {
         match csr {
-            Csr::Mcycle => self.cycle = value,
-            Csr::Fcsr => self.write_fcsr(value),
+            Csr::Misa => {} // Not writable
             Csr::Fflags => self.write_fflags((value & 31) as u8),
             Csr::Frm => self.write_frm(
                 FromPrimitive::from_u64(value & 7).unwrap_or(RoundingMode::RoundNearestEven),
             ),
-            Csr::Mcause => self.csr.mcause = value,
-            Csr::Medeleg => self.csr.medeleg = value,
-            Csr::Mepc => self.csr.mepc = value,
-            Csr::Mhartid => self.csr.mhartid = value,
-            Csr::Mideleg => self.csr.mideleg = value & 0x222,
-            Csr::Mie => self.csr.mie = value,
-            Csr::Mip => self.mmu.mip = value,
-            Csr::Mscratch => self.csr.mscratch = value,
-            Csr::Mstatus => {
-                let mask = MSTATUS_MASK & !(MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
-                self.mmu.mstatus = value & mask | self.mmu.mstatus & !mask;
-                self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
-            }
-            Csr::Mtval => self.csr.mtval = value,
-            Csr::Mtvec => self.csr.mtvec = value,
-            Csr::Scause => self.csr.scause = value,
-            Csr::Sedeleg => self.csr.sedeleg = value,
-            Csr::Sepc => self.csr.sepc = value,
-            Csr::Sideleg => self.csr.sideleg = value,
-            Csr::Sie => self.csr.mie = self.csr.mie & !0x222 | value & 0x222,
-            Csr::Sip => self.mmu.mip = value & 0x222 | self.mmu.mip & !0x222,
-            Csr::Sscratch => self.csr.sscratch = value,
+            Csr::Fcsr => self.write_fcsr(value),
             Csr::Sstatus => {
                 self.mmu.mstatus &= !0x8000_0003_000d_e162;
                 self.mmu.mstatus |= value & 0x8000_0003_000d_e162;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
             }
-            Csr::Stval => self.csr.stval = value,
-            Csr::Stvec => self.csr.stvec = value,
-            Csr::Time => self.mmu.get_mut_clint().write_mtime(value), // XXX SHOULD trap
-            Csr::Ustatus => self.csr.ustatus = value,
-            _ => log::warn!("We are ignoring writes to {csr:?}"),
+            Csr::Sie => {
+                self.csr[Csr::Mie as usize] &= !0x222;
+                self.csr[Csr::Mie as usize] |= value & 0x222;
+            }
+            Csr::Sip => {
+                let mask = 0x222;
+                self.mmu.mip = value & mask | self.mmu.mip & !mask;
+            }
+            Csr::Mip => {
+                let mask = !0; // XXX 0x555 was too restrictive?? Stopped Ubuntu booting
+                self.mmu.mip = value & mask | self.mmu.mip & !mask;
+            }
+            Csr::Mideleg => {
+                self.csr[Csr::Mideleg as usize] = value & 0x222;
+            }
+            Csr::Mstatus => {
+                self.mmu.mstatus = value;
+                self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
+            }
+            Csr::Time => {
+                // XXX This should trap actually
+                self.mmu.get_mut_clint().write_mtime(value);
+            }
+            Csr::Satp => {
+                self.mmu.satp = value;
+                self.mmu.clear_page_cache();
+            }
+            /* Csr::Cycle | */ Csr::Mcycle => self.cycle = value,
+            _ => {
+                self.csr[csr as usize] = value;
+            }
         }
     }
 
@@ -3858,10 +3850,10 @@ mod test_cpu {
     fn decode_sh2add() {
         let cpu = create_cpu();
         //    10894:       20e74633                sh2add  a2,a4,a4
-        let Some(inst) = decode(&cpu.decode_dag, 0x20e74633) else {
-            panic!("Failed to decode");
-        };
-        assert_eq!(inst.name, "SH2ADD");
+        match decode(&cpu.decode_dag, 0x20e74633) {
+            Some(inst) => assert_eq!(inst.name, "SH2ADD"),
+            _err => panic!("Failed to decode"),
+        }
     }
 
     #[test]
@@ -3970,7 +3962,7 @@ mod test_cpu {
             assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
         }
         // Machine timer interrupt
-        cpu.csr.mie = MIP_MTIP;
+        cpu.write_csr_raw(Csr::Mie, MIP_MTIP);
         cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(Csr::Mstatus, 0x8);
         cpu.write_csr_raw(Csr::Mtvec, 0x0);
@@ -3993,7 +3985,7 @@ mod test_cpu {
         cpu.update_pc(MEMORY_BASE);
 
         // Machine timer interrupt but mie in mstatus is not enabled yet
-        cpu.csr.mie = MIP_MTIP;
+        cpu.write_csr_raw(Csr::Mie, MIP_MTIP);
         cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(Csr::Mtvec, handler_vector);
 
