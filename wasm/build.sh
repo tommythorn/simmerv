@@ -1,3 +1,3 @@
-cargo install wasm-pack wasm-bindgen-cli
+cargo install --locked wasm-pack wasm-bindgen-cli
 wasm-pack build
 wasm-bindgen ../target/wasm32-unknown-unknown/release/simmerv_wasm.wasm --out-dir ./web --target web --no-typescript
