@@ -79,8 +79,11 @@ $ cargo r -r -- -c linux/opensbi/fw_jump.elf,0x80000000 linux/vmlinux,0x80200000
 
 ## How to run Linux with initramfs (/dev/ram)
 
+Allocate 2 GiB, use a device tree with initramfs at 0xa0000000 and
+load the initrd2+gdb.cpio binary at that address.
+
 ```sh
-$ cargo r --example sim -r -- -d linux/with-initrd.dtb linux/fw_payload.elf linux/initrd.xz,0xa0000000
+$ (cd linux;cargo r -r -- -m 2048 -d with-initrd.dtb fw_payload.elf initrd2+gdb.cpio,0xa0000000)
 ```
 
 ## How to run riscv-tests
