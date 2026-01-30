@@ -58,7 +58,7 @@ impl Uart {
         // Reads input.
         // We only check the terminal every Nth iteration as it's not cheap
         // (XXX we could use a better solution)
-        if self.clock.is_multiple_of(4096) && self.lsr & LSR_DATA_AVAILABLE == 0 {
+        if self.clock.is_multiple_of(4096) {
             let value = self.terminal.get_input();
             if value != 0 {
                 self.rbr = value;
