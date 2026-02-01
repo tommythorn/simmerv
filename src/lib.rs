@@ -3,6 +3,7 @@
 pub mod bounded;
 pub mod cpu;
 pub mod csr;
+pub mod dcache;
 pub mod default_terminal;
 pub mod device;
 pub mod fp;
