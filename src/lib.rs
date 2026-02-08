@@ -14,7 +14,6 @@ pub mod new_decoder;
 pub mod riscv;
 pub mod riscv_decoding;
 pub mod riscv_insns;
-pub mod rvc;
 pub mod terminal;
 
 use crate::cpu::Cpu;
