@@ -78,7 +78,6 @@ fn decode_cb(a: u64, insn: u32, op: Op) -> Uop {
         rs1: x(r + 8),
         rs2: x(0),
         imm,
-        ctf: true,
         ..Uop::default()
     }
 }
@@ -326,7 +325,6 @@ impl RiscvDecoder for Decoder {
         Uop {
             op: Op::CJ,
             imm: a.wrapping_add(imm as u64),
-            ctf: true,
             ..Uop::default()
         }
     }
@@ -830,8 +828,6 @@ fn decode_auipc(addr: u64, word: u32, op: Op) -> Uop {
 fn decode_serialized(_addr: u64, _word: u32, op: Op) -> Uop {
     Uop {
         op,
-        ctf: true,
-        serialize: true,
         ..Uop::default()
     }
 }
@@ -839,9 +835,6 @@ fn decode_serialized(_addr: u64, _word: u32, op: Op) -> Uop {
 fn decode_exceptional(_addr: u64, _word: u32, op: Op) -> Uop {
     Uop {
         op,
-        ctf: true,
-        exceptional: true,
-        serialize: true,
         ..Uop::default()
     }
 }
@@ -851,7 +844,6 @@ fn decode_j(addr: u64, word: u32, op: Op) -> Uop {
     Uop {
         op,
         rd: xd((word >> 7) & 31), // [11:7]
-        ctf: true,
         imm: addr.wrapping_add(
             (iword >> 31 << 20 | // imm[31:20] = [31]
              (iword & 0x000f_f000) | // imm[19:12] = [19:12]
@@ -881,7 +873,6 @@ fn decode_b(addr: u64, word: u32, op: Op) -> Uop {
             ((iword >> 20) & 0x0000_07e0) | // imm[10:5] = [30:25]
             ((iword >> 7) & 0x0000_001e)) as u64,
         ), // imm[4:1] = [11:8]
-        ctf: true,
         ..Uop::default()
     }
 }
@@ -892,7 +883,6 @@ fn decode_csr(_addr: u64, word: u32, op: Op) -> Uop {
         rd: xd((word >> 7) & 31),             // [11:7]
         rs1: x((word >> 15) & 31),            // [19:15], also uimm
         imm: u64::from((word >> 20) & 0xfff), // [31:20]
-        serialize: true,
         ..Uop::default()
     }
 }
@@ -904,7 +894,6 @@ fn decode_csri(_addr: u64, word: u32, op: Op) -> Uop {
         rd: xd((word >> 7) & 31),             // [11:7]
         rs1: x((word >> 15) & 31),            // [19:15], also uimm
         imm: u64::from((word >> 20) & 0xfff), // [31:20]
-        serialize: true,
         ..Uop::default()
     }
 }

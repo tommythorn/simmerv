@@ -71,16 +71,52 @@ pub struct Uop {
     pub rs3: Reg,
     /// FP Rounding Mode
     pub rm: u8,
-    /// May change the Control Flow (XXX derive from op)
-    pub ctf: bool,
-    /// May throw exception (ecall/ebreak are guaranteed to) (XXX derive from
-    /// op)
-    pub exceptional: bool,
-    /// Serialized instructions cannot execute out-of-order and
-    /// almost certainly change system state (XXX derive from op)
-    pub serialize: bool,
-    /// Size of the original instruction (XXX derive from op)
-    pub insn_size: u8,
+}
+
+impl Uop {
+    const fn get_insn_size(&self) -> u64 {
+        match self.op {
+            Op::CUnimp
+            | Op::CAddi4spn
+            | Op::CFld
+            | Op::CLw
+            | Op::CLd
+            | Op::CFsd
+            | Op::CSw
+            | Op::CSd
+            | Op::CNop
+            | Op::CAddi
+            | Op::CAddiw
+            | Op::CLi
+            | Op::CAddi16sp
+            | Op::CLui
+            | Op::CSrli
+            | Op::CSrai
+            | Op::CAndi
+            | Op::CSub
+            | Op::CXor
+            | Op::COr
+            | Op::CAnd
+            | Op::CSubw
+            | Op::CAddw
+            | Op::CJ
+            | Op::CBeqz
+            | Op::CBnez
+            | Op::CSlli
+            | Op::CFldsp
+            | Op::CLwsp
+            | Op::CLdsp
+            | Op::CJr
+            | Op::CMv
+            | Op::CEbreak
+            | Op::CJalr
+            | Op::CAdd
+            | Op::CFsdsp
+            | Op::CSwsp
+            | Op::CSdsp => 2,
+            _ => 4,
+        }
+    }
 }
 
 impl PartialEq for Uop {
@@ -92,10 +128,6 @@ impl PartialEq for Uop {
             && self.rs3 == other.rs3
             && self.imm == other.imm
             && self.rm == other.rm
-            && self.ctf == other.ctf
-            && self.exceptional == other.exceptional
-            && self.serialize == other.serialize
-            && self.insn_size == other.insn_size
     }
 }
 
@@ -176,10 +208,6 @@ impl Default for Uop {
             rs3: ZEROREG,
             imm: 0,
             rm: 0,
-            ctf: false,
-            exceptional: false,
-            serialize: false,
-            insn_size: 0,
         }
     }
 }
@@ -325,7 +353,7 @@ impl Cpu {
         if let Some(uop) = uop_cache.get(insn_addr) {
             //log::debug!("uop cache {insn_addr:x} hit");
 
-            self.pc += u64::from(uop.insn_size);
+            self.pc += uop.get_insn_size();
 
             let ops = Operands {
                 s1: self.read_x(uop.rs1),
@@ -340,14 +368,8 @@ impl Cpu {
             // XXX For full correctness we mustn't fail if we _can_ fetch 16-bit
             // _and_ it turns out to be a legal instruction.
             let insn = self.memop(Execute, insn_addr, 0, 0, 4)? as u32;
-
-            let insn_size = if insn & 3 == 3 { 4 } else { 2 };
-            self.pc += u64::from(insn_size);
-
-            // XXX Eliminate the mut by eliminating the insn_size
-            // which is redundant and can be derived directly from the
-            // op
-            let mut uop = decode(insn_addr, insn);
+            self.pc += if insn & 3 == 3 { 4 } else { 2 };
+            let uop = decode(insn_addr, insn);
             if matches!(uop.op, Op::CUnimp | Op::Unimp) {
                 return Err(Exception {
                     trap: Trap::IllegalInstruction,
@@ -355,7 +377,6 @@ impl Cpu {
                 });
             }
 
-            uop.insn_size = insn_size;
             uop_cache.insert(insn_addr, uop);
 
             let ops = Operands {
