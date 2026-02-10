@@ -40,7 +40,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 - [x] CSR (nearly complete)
 - [x] Sv39, Sv48, Sv57
 - [x] Privileged instructions
-- [-] PMP (this is intensionally not implemented as it will negatively affect performance)
+- [-] PMP (this is deliberately not implemented as it will negatively affect performance)
 
 The emulator supports all instructions listed above but some (like
 many FP instructions) are not 100% to the spec.
