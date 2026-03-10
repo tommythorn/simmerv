@@ -511,50 +511,32 @@ impl Cpu {
             // where x is a new privilege mode.
 
             match exc.trap {
-                Trap::UserSoftwareInterrupt => {
-                    if usie == 0 {
-                        return false;
-                    }
+                Trap::UserSoftwareInterrupt if usie == 0 => {
+                    return false;
                 }
-                Trap::SupervisorSoftwareInterrupt => {
-                    if ssie == 0 {
-                        return false;
-                    }
+                Trap::SupervisorSoftwareInterrupt if ssie == 0 => {
+                    return false;
                 }
-                Trap::MachineSoftwareInterrupt => {
-                    if msie == 0 {
-                        return false;
-                    }
+                Trap::MachineSoftwareInterrupt if msie == 0 => {
+                    return false;
                 }
-                Trap::UserTimerInterrupt => {
-                    if utie == 0 {
-                        return false;
-                    }
+                Trap::UserTimerInterrupt if utie == 0 => {
+                    return false;
                 }
-                Trap::SupervisorTimerInterrupt => {
-                    if stie == 0 {
-                        return false;
-                    }
+                Trap::SupervisorTimerInterrupt if stie == 0 => {
+                    return false;
                 }
-                Trap::MachineTimerInterrupt => {
-                    if mtie == 0 {
-                        return false;
-                    }
+                Trap::MachineTimerInterrupt if mtie == 0 => {
+                    return false;
                 }
-                Trap::UserExternalInterrupt => {
-                    if ueie == 0 {
-                        return false;
-                    }
+                Trap::UserExternalInterrupt if ueie == 0 => {
+                    return false;
                 }
-                Trap::SupervisorExternalInterrupt => {
-                    if seie == 0 {
-                        return false;
-                    }
+                Trap::SupervisorExternalInterrupt if seie == 0 => {
+                    return false;
                 }
-                Trap::MachineExternalInterrupt => {
-                    if meie == 0 {
-                        return false;
-                    }
+                Trap::MachineExternalInterrupt if meie == 0 => {
+                    return false;
                 }
                 _ => {}
             }

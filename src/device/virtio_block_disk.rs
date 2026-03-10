@@ -349,10 +349,8 @@ impl VirtioBlockDisk {
             0x10001073 => {
                 self.status = (self.status & !(0xff << 24)) | ((value as u32) << 24);
             }
-            0x10001114 => {
-                if (self.driver_features & (1 << VIRTIO_BLK_F_CONFIG_WCE)) != 0 {
-                    self.writeback = value != 0;
-                }
+            0x10001114 if (self.driver_features & (1 << VIRTIO_BLK_F_CONFIG_WCE)) != 0 => {
+                self.writeback = value != 0;
             }
             _ => {}
         }
