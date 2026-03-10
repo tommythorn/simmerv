@@ -345,10 +345,16 @@ impl Cpu {
         self.seqno = self.seqno.wrapping_add(1);
         let insn_addr = self.pc;
 
-        // XXX refactoring needed
-        if let Some(uop) = uop_cache.get(insn_addr) {
-            //log::debug!("uop cache {insn_addr:x} hit");
+        // Tag M-mode cache entries with bit 0 to distinguish M-mode physical
+        // addresses from S/U-mode virtual addresses that share the same value.
+        // Valid fetch addresses are always 2-byte aligned so bit 0 is free.
+        let cache_key = if self.mmu.prv == PrivMode::M {
+            insn_addr | 1
+        } else {
+            insn_addr
+        };
 
+        if let Some(uop) = uop_cache.get(cache_key) {
             self.pc += uop.get_insn_size();
 
             let ops = Operands {
@@ -373,7 +379,7 @@ impl Cpu {
                 });
             }
 
-            uop_cache.insert(insn_addr, uop);
+            uop_cache.insert(cache_key, uop);
 
             let ops = Operands {
                 s1: self.read_x(uop.rs1),
@@ -684,6 +690,7 @@ impl Cpu {
 
                 self.mmu.satp = value;
                 self.mmu.clear_page_cache();
+                self.flush_icache = true;
                 return Ok(());
             }
             _ => {}

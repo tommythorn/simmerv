@@ -86,7 +86,7 @@ impl Emulator {
     /// Runs program set by `load_image()`. The emulator will run forever.
     pub fn run_program(&mut self) {
         loop {
-            self.tick(52);
+            self.tick(6);
             if self.handle_htif() {
                 break;
             }
