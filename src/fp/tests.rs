@@ -172,9 +172,9 @@ fn test_fadd() {
     test(
         Sf64::fadd,
         0x2b50000200000020,
-        0xbca0000000000000u64,
+        0xbca0000000000000,
         RoundingMode::RoundNearestEven,
-        0xbca0000000000000u64,
+        0xbca0000000000000,
         1,
     );
 }

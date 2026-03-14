@@ -7,6 +7,8 @@
 #![allow(clippy::cast_sign_loss)]
 
 use crate::csr;
+use crate::device::Pack;
+use crate::device::Unpack;
 use crate::fp;
 use crate::fp::fflag::DIVIDEZERO;
 use crate::generated_riscv_decoder::Op;
@@ -19,7 +21,7 @@ use crate::new_decoder::Reg;
 use crate::new_decoder::ZEROREG;
 use crate::new_decoder::x;
 use crate::riscv;
-use crate::terminal;
+use crate::serial_backend::SerialBackend;
 pub use csr::*;
 use fp::RoundingMode;
 use fp::Sf;
@@ -40,7 +42,6 @@ use riscv::PrivMode;
 use riscv::Trap;
 use riscv::priv_mode_from;
 use std::fmt::Write as _;
-use terminal::Terminal;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Exception {
@@ -213,20 +214,12 @@ impl Default for Uop {
 }
 
 impl Cpu {
-    /// Creates a new `Cpu`.
-    ///
-    /// # Arguments
-    /// * `Terminal` (for the UART)
-    /// * memory `capacity`
-    // XXX This is not great.  We should instead give given an MMIO object and
-    // a memory device. This file shouldn't even need to know about
-    // "terminals" and the memory object needn't be a single contigous range.
+    /// Creates a new `Cpu` around a fully configured `Mmu` (memory allocated,
+    /// devices attached).  Use [`Mmu::new`] → [`Mmu::add_memory`] →
+    /// [`Mmu::attach_uart`] to build the `Mmu` before calling this.
     #[must_use]
     #[allow(clippy::precedence)]
-    pub fn new(terminal: Box<dyn Terminal>, capacity: usize) -> Self {
-        let mut mmu = Mmu::new(terminal);
-        mmu.init_memory(capacity);
-
+    pub fn new(mmu: Mmu) -> Self {
         let mut cpu = Self {
             rf: [0; 65],
             frm: RoundingMode::RoundNearestEven,
@@ -748,7 +741,7 @@ impl Cpu {
             }
             Csr::Stval => self.csr.stval,
             Csr::Stvec => self.csr.stvec,
-            Csr::Time => self.mmu.get_clint().read_mtime(),
+            Csr::Time => self.mmu.read_mtime_csr(),
             Csr::Ustatus => self.csr.ustatus,
             _ => 0,
         }
@@ -791,7 +784,7 @@ impl Cpu {
             }
             Csr::Stval => self.csr.stval = value,
             Csr::Stvec => self.csr.stvec = value,
-            Csr::Time => self.mmu.get_mut_clint().write_mtime(value), // XXX SHOULD trap
+            Csr::Time => self.mmu.write_mtime_csr(value), // XXX SHOULD trap
             Csr::Ustatus => self.csr.ustatus = value,
             _ => log::warn!("We are ignoring writes to {csr:?}"),
         }
@@ -829,9 +822,128 @@ impl Cpu {
     /// Returns mutable `Mmu`
     pub const fn get_mut_mmu(&mut self) -> &mut Mmu { &mut self.mmu }
 
-    /// Returns mutable `Terminal`
-    pub fn get_mut_terminal(&mut self) -> &mut Box<dyn Terminal> {
-        self.mmu.get_mut_uart().get_mut_terminal()
+    // --- Snapshot ---
+
+    /// Serialises CPU architectural state (registers, PC, CSRs, cycle, MMU).
+    ///
+    /// Format:
+    ///   [65×8 B] integer + FP register file (rf[0..65])
+    ///   [8 B] pc
+    ///   [1 B] frm
+    ///   [1 B] fflags
+    ///   [1 B] fs
+    ///   [8 B] cycle
+    ///   [1 B] wfi
+    ///   [1 B] reservation flag (0=None, 1=Some) + [8 B] value
+    ///   [18×8 B] CSR fields (fixed order, see `read_state`)
+    ///   [? B] MMU state (via `Mmu::write_state`)
+    pub fn write_state(&self, out: &mut Vec<u8>) {
+        {
+            let mut w = Pack::new(out);
+            for &r in &self.rf {
+                w.u64(r);
+            }
+            w.u64(self.pc);
+            w.u8(self.frm as u8);
+            w.u8(self.fflags);
+            w.u8(self.fs);
+            w.u64(self.cycle);
+            w.bool(self.wfi);
+            match self.reservation {
+                None => {
+                    w.u8(0);
+                    w.u64(0);
+                }
+                Some(v) => {
+                    w.u8(1);
+                    w.u64(v);
+                }
+            }
+            let c = &self.csr;
+            for &v in &[
+                c.mcause, c.medeleg, c.mepc, c.mhartid, c.mideleg, c.mie, c.misa, c.mscratch,
+                c.mtval, c.mtvec, c.scause, c.sedeleg, c.sepc, c.sideleg, c.sscratch, c.stval,
+                c.stvec, c.ustatus,
+            ] {
+                w.u64(v);
+            }
+        }
+        self.mmu.write_state(out);
+    }
+
+    /// Restores CPU state from a blob produced by `write_state`.
+    ///
+    /// # Errors
+    /// Returns `Err(())` on truncation or malformed data.
+    /// # Panics
+    /// Will not panic on well-formed input; the inner `unwrap` calls on
+    /// fixed-size slice conversions are infallible after the length check.
+    #[allow(clippy::missing_panics_doc, clippy::result_unit_err)]
+    pub fn read_state(
+        &mut self,
+        data: &[u8],
+        make_device: impl FnMut(
+            &str,
+            std::ops::Range<u64>,
+        ) -> Option<Box<dyn crate::device::MemoryMapped>>,
+    ) -> Result<(), ()> {
+        let mut r = Unpack::new(data);
+
+        for reg in &mut self.rf {
+            *reg = r.u64()?;
+        }
+        self.pc = r.u64()?;
+        self.frm = match r.u8()? {
+            0 => RoundingMode::RoundNearestEven,
+            1 => RoundingMode::RoundTowardsZero,
+            2 => RoundingMode::RoundDown,
+            3 => RoundingMode::RoundUp,
+            4 => RoundingMode::RoundNearestMagnitude,
+            5 => RoundingMode::Reserved5,
+            6 => RoundingMode::Reserved6,
+            7 => RoundingMode::Dynamic,
+            _ => return Err(()),
+        };
+        self.fflags = r.u8()?;
+        self.fs = r.u8()?;
+        self.cycle = r.u64()?;
+        self.wfi = r.bool()?;
+        self.reservation = if r.u8()? == 0 {
+            let _ = r.u64()?;
+            None
+        } else {
+            Some(r.u64()?)
+        };
+        let c = &mut self.csr;
+        for field in [
+            &mut c.mcause,
+            &mut c.medeleg,
+            &mut c.mepc,
+            &mut c.mhartid,
+            &mut c.mideleg,
+            &mut c.mie,
+            &mut c.misa,
+            &mut c.mscratch,
+            &mut c.mtval,
+            &mut c.mtvec,
+            &mut c.scause,
+            &mut c.sedeleg,
+            &mut c.sepc,
+            &mut c.sideleg,
+            &mut c.sscratch,
+            &mut c.stval,
+            &mut c.stvec,
+            &mut c.ustatus,
+        ] {
+            *field = r.u64()?;
+        }
+        self.flush_icache = true;
+        self.mmu.read_state(r.remaining(), make_device)
+    }
+
+    /// Returns mutable reference to the serial backend, if any.
+    pub fn get_mut_serial_backend(&mut self) -> Option<&mut dyn SerialBackend> {
+        self.mmu.get_mut_serial_backend()
     }
 
     fn read_frm(&self) -> RoundingMode {
@@ -938,7 +1050,7 @@ impl Cpu {
 
         let pa = self.mmu.translate_address(va, access, side_effect_free)?;
 
-        let Ok(slice) = self.mmu.memory.slice(pa, size as usize) else {
+        let Ok(slice) = self.mmu.dma_slice(pa, size as usize) else {
             return self.memop_slow(access, va, v, size, side_effect_free);
         };
 
@@ -979,7 +1091,7 @@ impl Cpu {
                 .translate_address(va + i, access, side_effect_free)?;
 
             let mut b = 0;
-            if let Ok(slice) = self.mmu.memory.slice(pa, 1) {
+            if let Ok(slice) = self.mmu.dma_slice(pa, 1) {
                 match access {
                     Write => slice[0] = v as u8,
                     Read | Execute => b = slice[0],
@@ -1008,6 +1120,17 @@ impl Cpu {
         }
         if access == Write { Ok(0) } else { Ok(r) }
     }
+
+    /// For a given instruction word, find which registers it may read and
+    /// write.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` if the instruction word is illegal or cannot be
+    /// decoded.
+    pub fn get_register_info(&self, addr: u64, insn: u32) -> anyhow::Result<Uop> {
+        Ok(decode(addr, insn))
+    }
 }
 
 // XXX Not sure where to keep this
@@ -1025,19 +1148,6 @@ const fn get_trap_cause(exc: &Exception) -> u64 {
 
 #[must_use]
 pub fn decode(a: u64, word: u32) -> Uop { decoder(a, word, &mut new_decoder::Decoder {}) }
-
-impl Cpu {
-    /// For a given instruction word, find which registers it may read and
-    /// write.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(())` if the instruction word is illegal or cannot be
-    /// decoded.
-    pub fn get_register_info(&self, addr: u64, insn: u32) -> anyhow::Result<Uop> {
-        Ok(decode(addr, insn))
-    }
-}
 
 fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
 
@@ -1540,9 +1650,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::FdivS => {
             cpu.check_float_access_and_dirty(uop.rm)?;
             if ops.s2 == 0 {
-                Ok((0xffffffff7f800000u64, DIVIDEZERO)) // INFINITY
-            } else if ops.s2 == 0x8000000000000000u64 {
-                Ok((0xffffffffff800000u64, DIVIDEZERO)) // NEG_INFINITY
+                Ok((0xffffffff7f800000, DIVIDEZERO)) // INFINITY
+            } else if ops.s2 == 0x8000000000000000 {
+                Ok((0xffffffffff800000, DIVIDEZERO)) // NEG_INFINITY
             } else {
                 Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a / b))
             }
@@ -1688,7 +1798,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             cpu.check_float_access_and_dirty(uop.rm)?;
             if ops.s2 == 0 {
                 Ok((f64::INFINITY as u64, DIVIDEZERO)) // XXX??
-            } else if ops.s2 == 0x8000000000000000u64 {
+            } else if ops.s2 == 0x8000000000000000 {
                 Ok((f64::NEG_INFINITY as u64, DIVIDEZERO)) // XXX??
             } else {
                 Ok(Sf64::map2(ops.s1, ops.s2, |a, b| a / b))
@@ -1702,21 +1812,21 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
-            let sign_bit = rs2_bits & 0x8000000000000000u64;
+            let sign_bit = rs2_bits & 0x8000000000000000;
             Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
         }
         Op::FsgnjnD => {
             cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
-            let sign_bit = !rs2_bits & 0x8000000000000000u64;
+            let sign_bit = !rs2_bits & 0x8000000000000000;
             Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
         }
         Op::FsgnjxD => {
             cpu.check_float_access_and_dirty(0)?;
             let rs1_bits = ops.s1;
             let rs2_bits = ops.s2;
-            let sign_bit = rs2_bits & 0x8000000000000000u64;
+            let sign_bit = rs2_bits & 0x8000000000000000;
             Ok((sign_bit ^ rs1_bits, 0))
         }
         Op::FminD => {
@@ -1890,10 +2000,18 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
 #[cfg(test)]
 mod test_cpu {
     use super::*;
-    use crate::mmu::MEMORY_BASE;
-    use crate::terminal::DummyTerminal;
+    use crate::mmu::Mmu;
+    use crate::serial_backend::DummySerialBackend;
 
-    fn create_cpu() -> Cpu { Cpu::new(Box::new(DummyTerminal::new()), 8) }
+    // Primary RAM base — matches the address used in Emulator::new.
+    const MEMORY_BASE: u64 = 0x8000_0000;
+
+    fn create_cpu() -> Cpu {
+        let mut mmu = Mmu::new();
+        mmu.add_memory(MEMORY_BASE, 8 * 1024 * 1024);
+        mmu.attach_uart(Box::new(DummySerialBackend::new()));
+        Cpu::new(mmu)
+    }
 
     #[test]
     fn initialize() { let _cpu = create_cpu(); }
@@ -1904,8 +2022,8 @@ mod test_cpu {
         assert_eq!(0, cpu.read_pc());
         cpu.update_pc(1);
         assert_eq!(0, cpu.read_pc());
-        cpu.update_pc(0xffffffffffffffffu64);
-        assert_eq!(0xfffffffffffffffeu64, cpu.read_pc());
+        cpu.update_pc(0xffffffffffffffff);
+        assert_eq!(0xfffffffffffffffe, cpu.read_pc());
     }
 
     #[test]

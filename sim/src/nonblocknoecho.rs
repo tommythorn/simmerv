@@ -1,18 +1,25 @@
-use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
 use std::io::Stdin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 pub struct NonblockNoEcho {
     stdin: i32,
     orig_termios: termios::Termios,
     reader: Stdin,
-    secondaries: VecDeque<u8>,
+    exit_flag: Arc<AtomicBool>,
+    verbose_flag: Arc<AtomicBool>,
 }
 
 impl NonblockNoEcho {
     #[allow(clippy::expect_used, clippy::unwrap_used)]
-    pub fn new(ctrlc_breaks: bool) -> Self {
+    pub fn new(
+        ctrlc_breaks: bool,
+        exit_flag: Arc<AtomicBool>,
+        verbose_flag: Arc<AtomicBool>,
+    ) -> Self {
         use std::os::unix::io::AsRawFd;
         use termios::ECHO;
         use termios::ICANON;
@@ -58,7 +65,8 @@ impl NonblockNoEcho {
             stdin,
             orig_termios,
             reader: io::stdin(),
-            secondaries: VecDeque::new(),
+            exit_flag,
+            verbose_flag,
         }
     }
 
@@ -70,7 +78,10 @@ impl NonblockNoEcho {
         })?;
 
         if got == 3 {
-            eprintln!("[[x - eXit, t - tracing ON, p - panic, else, pass on to guest]]");
+            let verbose = self.verbose_flag.load(Ordering::Relaxed);
+            eprintln!(
+                "[[v - Verbose({verbose}), x - eXit, t - tracing ON, p - panic, else, pass on to guest]]"
+            );
             // XXX Should turn on blocking
             loop {
                 let Some(snd) = self.reader.read(&mut buffer).map_or(None, |n| {
@@ -84,9 +95,13 @@ impl NonblockNoEcho {
                 match snd as char {
                     'p' => panic!("Well, you asked for it!"),
                     't' => eprintln!("Visualize tracing turned on"),
+                    'v' => {
+                        let was = self.verbose_flag.fetch_xor(true, Ordering::Relaxed);
+                        eprintln!("Verbose {}", if was { "OFF" } else { "ON" });
+                    }
                     'x' => {
-                        self.secondaries.push_back(snd);
-                        todo!("Graceful exits");
+                        self.exit_flag.store(true, Ordering::Relaxed);
+                        return None;
                     }
                     _ => return Some(snd),
                 }

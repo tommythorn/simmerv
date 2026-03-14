@@ -9,7 +9,7 @@ use crate::native_fp;
 
 use num_derive::FromPrimitive;
 
-pub const NAN_BOX_F32: u64 = 0xFFFF_FFFF_0000_0000u64;
+pub const NAN_BOX_F32: u64 = 0xFFFF_FFFF_0000_0000;
 
 pub mod fflag {
     pub const INEXACT: u8 = 1;

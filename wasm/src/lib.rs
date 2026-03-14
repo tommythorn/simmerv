@@ -1,5 +1,5 @@
 use simmerv::Emulator;
-use simmerv::default_terminal::DefaultTerminal;
+use simmerv::buffered_serial_backend::BufferedSerialBackend;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
@@ -57,7 +57,7 @@ impl WasmRiscv {
     #[allow(clippy::new_without_default)] // #[wasm_bindgen] trait impls are not supported
     pub fn new() -> Self {
         WasmRiscv {
-            emulator: Emulator::new(Box::new(DefaultTerminal::new()), WASM_MEMORY_SIZE),
+            emulator: Emulator::new(Box::new(BufferedSerialBackend::new()), WASM_MEMORY_SIZE),
         }
     }
 
@@ -157,9 +157,11 @@ impl WasmRiscv {
         let cpu = self.emulator.get_mut_cpu();
         let mut s = String::new();
         cpu.disassemble(&mut s);
-        let bytes = s.as_bytes();
-        for &b in bytes {
-            self.emulator.get_mut_terminal().put_byte(b);
+        let bytes = s.as_bytes().to_vec();
+        for b in bytes {
+            if let Some(b_end) = self.emulator.get_mut_serial_backend() {
+                b_end.put_byte(b);
+            }
         }
     }
 
@@ -191,13 +193,21 @@ impl WasmRiscv {
     ///   }
     /// }
     /// ```
-    pub fn get_output(&mut self) -> u8 { self.emulator.get_mut_terminal().get_output() }
+    pub fn get_output(&mut self) -> u8 {
+        self.emulator
+            .get_mut_serial_backend()
+            .map_or(0, |b| b.get_output())
+    }
 
     /// Puts ascii code byte sent from terminal to the emulator.
     ///
     /// # Arguments
     /// * `data` Ascii code byte
-    pub fn put_input(&mut self, data: u8) { self.emulator.get_mut_terminal().put_input(data); }
+    pub fn put_input(&mut self, data: u8) {
+        if let Some(b) = self.emulator.get_mut_serial_backend() {
+            b.put_input(data);
+        }
+    }
 
     /// Enables or disables page cache optimization.
     /// Page cache optimization is an experimental feature.

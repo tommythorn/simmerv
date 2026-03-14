@@ -1,28 +1,33 @@
 #![allow(clippy::unreadable_literal)]
 
 pub mod bounded;
+pub mod buffered_serial_backend;
 pub mod cpu;
 pub mod csr;
-pub mod default_terminal;
 pub mod device;
 pub mod fp;
 pub mod generated_riscv_decoder;
-pub mod memory;
 pub mod mmu;
 pub mod native_fp;
 pub mod new_decoder;
 pub mod riscv;
 pub mod riscv_decoding;
 pub mod riscv_insns;
-pub mod terminal;
+pub mod serial_backend;
 
 use crate::cpu::Cpu;
-use crate::terminal::Terminal;
+use crate::device::Dtb;
+use crate::device::virtio_block_disk::VirtioBlockDisk;
+use crate::mmu::Mmu;
+use crate::serial_backend::SerialBackend;
 use anyhow::anyhow;
 use anyhow::bail;
 use fnv::FnvHashMap;
 use intmap::IntMap;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use xmas_elf::sections::SectionData;
 use xmas_elf::symbol_table::Entry;
 
@@ -31,7 +36,7 @@ use xmas_elf::symbol_table::Entry;
 /// Sample code to run the emulator.
 /// ```ignore
 /// // Creates an emulator with arbitary terminal
-/// let mut emulator = Emulator::new(Box::new(DefaultTerminal::new()));
+/// let mut emulator = Emulator::new(Box::new(BufferedSerialBackend::new()));
 /// // Set up program content binary
 /// emulator.load_image(program_content);
 /// // Set up Filesystem content binary
@@ -49,19 +54,41 @@ pub struct Emulator {
 
     /// The address where data will be sent to terminal
     pub tohost_addr: u64,
+
+    /// Set to `true` to break out of the run loop (e.g. from the exit menu).
+    pub exit_flag: Arc<AtomicBool>,
+
+    /// When `true`, log a message to stderr each time a snapshot is written.
+    pub verbose: Arc<AtomicBool>,
 }
 
 impl Emulator {
-    /// Creates a new `Emulator`. [`Terminal`](terminal/trait.Terminal.html)
-    /// is internally used for transferring input/output data to/from
-    /// `Emulator`.
+    /// Creates a new `Emulator` with the standard `SoC` configuration.
     ///
     /// # Arguments
-    /// * `terminal`
+    /// * `backend` — the serial I/O implementation
+    /// * `capacity` — RAM size in bytes
     #[must_use]
-    pub fn new(terminal: Box<dyn Terminal>, capacity: usize) -> Self {
+    pub fn new(backend: Box<dyn SerialBackend>, capacity: usize) -> Self {
+        let mut mmu = Mmu::new();
+        // RAM regions must be added before I/O devices so the dispatch fast-path
+        // hits on the first iteration.  Primary RAM first, then secondary.
+        mmu.add_memory(0x8000_0000, capacity);
+        mmu.add_memory(0x7000_0000, 1024 * 1024);
+        mmu.attach_uart(backend);
+
+        #[allow(clippy::cast_possible_truncation)]
+        let dtb_size = (Mmu::DTB_END - Mmu::DTB_BASE) as usize;
+        let mut dtb_data = vec![0u8; dtb_size];
+        let dtb_content = include_bytes!("./device/dtb.dtb");
+        dtb_data[..dtb_content.len()].copy_from_slice(dtb_content);
+        mmu.add_device(Mmu::DTB_BASE..Mmu::DTB_END, Box::new(Dtb::new(dtb_data)));
+        mmu.add_device(
+            Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
+            Box::new(VirtioBlockDisk::new(Vec::new(), Mmu::VIRTIO_IRQ)),
+        );
         Self {
-            cpu: Cpu::new(terminal, capacity),
+            cpu: Cpu::new(mmu),
 
             symbol_map: FnvHashMap::default(),
 
@@ -69,6 +96,9 @@ impl Emulator {
 
             // These can be updated in load_image()
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists
+
+            exit_flag: Arc::new(AtomicBool::new(false)),
+            verbose: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -87,10 +117,109 @@ impl Emulator {
     pub fn run_program(&mut self) {
         loop {
             self.tick(6);
-            if self.handle_htif() {
+            if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
                 break;
             }
         }
+    }
+
+    /// Runs program with periodic snapshots written to disk.
+    ///
+    /// # Arguments
+    /// * `interval` — number of ticks between snapshots
+    /// * `base` — base filename; snapshots are named `base.0`, `base.1`, etc.
+    pub fn run_with_periodic_snapshots(&mut self, interval: usize, base: &str) {
+        let mut snap_counter: usize = 0;
+        let mut snap_num: usize = 0;
+        loop {
+            self.tick(6);
+            if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            snap_counter += 6;
+            if snap_counter >= interval {
+                snap_counter = 0;
+                let path = format!("{base}.{snap_num}");
+                snap_num += 1;
+                self.write_snapshot_verbose(&path);
+            }
+        }
+    }
+
+    fn write_snapshot_verbose(&self, path: &str) {
+        self.write_snapshot(path)
+            .unwrap_or_else(|e| eprintln!("snapshot failed: {e}"));
+        if self.verbose.load(Ordering::Relaxed) {
+            eprintln!("snapshot → {path} [seqno={}]", self.cpu.seqno);
+        }
+    }
+
+    /// Write a snapshot of the current machine state to `path`.
+    ///
+    /// The snapshot body is brotli-compressed; the magic is `SIMMERVC2`.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be written.
+    pub fn write_snapshot(&self, path: &str) -> anyhow::Result<()> {
+        let mut state = Vec::new();
+        self.cpu.write_state(&mut state);
+
+        let mut data = b"SIMMERVC3".to_vec();
+        {
+            let params = brotli::enc::BrotliEncoderParams {
+                quality: 5,
+                ..Default::default()
+            };
+            brotli::BrotliCompress(&mut state.as_slice(), &mut data, &params)
+                .map_err(|e| anyhow!("brotli compress: {e}"))?;
+        }
+        std::fs::write(path, &data).map_err(|e| anyhow!(e))
+    }
+
+    /// Load a snapshot produced by `write_snapshot`.
+    ///
+    /// The device list is reconstructed from the snapshot — there is no
+    /// requirement that the emulator was started with matching devices.
+    ///
+    /// # Errors
+    /// Returns an error if the data is not a valid snapshot or is corrupt.
+    pub fn load_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        if data.len() < 9 || &data[..9] != b"SIMMERVC3" {
+            bail!("not a valid snapshot");
+        }
+        let mut state = Vec::new();
+        brotli::BrotliDecompress(&mut &data[9..], &mut state)
+            .map_err(|e| anyhow!("brotli decompress: {e}"))?;
+
+        // Reclaim the serial backend before clearing the device list so we can
+        // hand it to the freshly-constructed UART during restore.
+        let mut uart_backend = self.cpu.mmu.take_uart_backend();
+
+        self.uop_cache.clear();
+        self.cpu
+            .read_state(&state, |name, range| {
+                use crate::device::Dtb;
+                use crate::device::plic::Plic;
+                use crate::device::uart::Uart;
+                use crate::device::virtio_block_disk::VirtioBlockDisk;
+                match name {
+                    "NS16550A" => uart_backend
+                        .take()
+                        .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
+                    "SiFive PLIC" => {
+                        Some(Box::new(Plic::new()) as Box<dyn crate::device::MemoryMapped>)
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    "DTB" => Some(
+                        Box::new(Dtb::new(vec![0u8; (range.end - range.start) as usize]))
+                            as Box<dyn crate::device::MemoryMapped>,
+                    ),
+                    "VirtIO Block" => Some(Box::new(VirtioBlockDisk::new(Vec::new(), 1))
+                        as Box<dyn crate::device::MemoryMapped>),
+                    _ => None,
+                }
+            })
+            .map_err(|()| anyhow!("snapshot corrupt"))
     }
 
     /// Method for running [`riscv-tests`](https://github.com/riscv/riscv-tests) program.
@@ -135,7 +264,7 @@ impl Emulator {
                             let i = 4 - i;
                             print!(
                                 "{}",
-                                if (self.cpu.fflags >> i) & 1 == 0 {
+                                if self.cpu.fflags >> i & 1 == 0 {
                                     '.'
                                 } else {
                                     FLAG_NAMES[i]
@@ -149,7 +278,7 @@ impl Emulator {
                 println!("--can't fetch from {insn_addr:08x}--");
             }
 
-            if self.handle_htif() {
+            if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
                 break;
             }
         }
@@ -252,8 +381,7 @@ impl Emulator {
             // XXX this should be a function
             self.cpu
                 .mmu
-                .memory
-                .slice(load_addr, size)
+                .dma_slice(load_addr, size)
                 .map_err(|()| anyhow!("load_image reaches outside memory"))?
                 .copy_from_slice(buf);
             return Ok(load_addr);
@@ -322,7 +450,10 @@ impl Emulator {
     /// # Arguments
     /// * `content` File system content binary
     pub fn setup_filesystem(&mut self, content: Vec<u8>) {
-        self.cpu.get_mut_mmu().init_disk(content);
+        self.cpu.get_mut_mmu().replace_device(
+            Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
+            Box::new(VirtioBlockDisk::new(content, Mmu::VIRTIO_IRQ)),
+        );
     }
 
     /// Sets up device tree. The emulator has default device tree configuration.
@@ -331,7 +462,15 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `content` DTB content binary
-    pub fn setup_dtb(&mut self, content: &[u8]) { self.cpu.get_mut_mmu().init_dtb(content); }
+    pub fn setup_dtb(&mut self, content: &[u8]) {
+        #[allow(clippy::cast_possible_truncation)]
+        let dtb_size = (Mmu::DTB_END - Mmu::DTB_BASE) as usize;
+        let mut dtb = Dtb::new(vec![0u8; dtb_size]);
+        dtb.load(content);
+        self.cpu
+            .get_mut_mmu()
+            .replace_device(Mmu::DTB_BASE..Mmu::DTB_END, Box::new(dtb));
+    }
 
     /// Enables or disables page cache optimization.
     /// Page cache optimization is experimental feature.
@@ -343,8 +482,16 @@ impl Emulator {
         self.cpu.get_mut_mmu().enable_page_cache(enabled);
     }
 
-    /// Returns mutable reference to `Terminal`.
-    pub fn get_mut_terminal(&mut self) -> &mut Box<dyn Terminal> { self.cpu.get_mut_terminal() }
+    /// Returns mutable reference to the serial backend, if any.
+    pub fn get_mut_serial_backend(&mut self) -> Option<&mut dyn SerialBackend> {
+        self.cpu.get_mut_serial_backend()
+    }
+
+    /// Returns mutable reference to the backend (alias for
+    /// `get_mut_serial_backend`).
+    pub fn get_mut_backend(&mut self) -> Option<&mut dyn SerialBackend> {
+        self.get_mut_serial_backend()
+    }
 
     /// Returns immutable reference to `Cpu`.
     #[must_use]

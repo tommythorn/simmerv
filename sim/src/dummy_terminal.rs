@@ -2,7 +2,7 @@ use std::io::Write;
 use std::io::stdout;
 use std::str;
 
-use simmerv::terminal::Terminal;
+use simmerv::serial_backend::SerialBackend;
 
 /// Dummy `Terminal`. Output will be displayed in command line
 /// and input will not be handled.
@@ -12,7 +12,7 @@ impl DummyTerminal {
     pub const fn new() -> Self { Self {} }
 }
 
-impl Terminal for DummyTerminal {
+impl SerialBackend for DummyTerminal {
     fn put_byte(&mut self, value: u8) {
         let str = vec![value];
         match str::from_utf8(&str) {

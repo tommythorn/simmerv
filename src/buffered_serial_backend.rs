@@ -1,16 +1,16 @@
-use crate::terminal::Terminal;
+use crate::serial_backend::SerialBackend;
 
-/// Standard `Terminal`.
-pub struct DefaultTerminal {
+/// Buffered `SerialBackend` — used by the WASM host which drives both sides.
+pub struct BufferedSerialBackend {
     input_data: Vec<u8>,
     output_data: Vec<u8>,
 }
 
-impl Default for DefaultTerminal {
+impl Default for BufferedSerialBackend {
     fn default() -> Self { Self::new() }
 }
 
-impl DefaultTerminal {
+impl BufferedSerialBackend {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -20,9 +20,8 @@ impl DefaultTerminal {
     }
 }
 
-impl Terminal for DefaultTerminal {
+impl SerialBackend for BufferedSerialBackend {
     fn put_byte(&mut self, value: u8) { self.output_data.push(value); }
-
     fn get_input(&mut self) -> u8 {
         if self.input_data.is_empty() {
             0
@@ -30,9 +29,7 @@ impl Terminal for DefaultTerminal {
             self.input_data.remove(0)
         }
     }
-
     fn put_input(&mut self, value: u8) { self.input_data.push(value); }
-
     fn get_output(&mut self) -> u8 {
         if self.output_data.is_empty() {
             0

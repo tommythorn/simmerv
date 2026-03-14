@@ -29,6 +29,7 @@ unreadable-literal = "allow"
 travis-ci = { repository = "tommythorn/simmerv" }
 
 [dependencies]
+brotli = { version = "7", default-features = false, features = ["std"] }
 fnv = "1.0.7"
 num-traits = "*"
 num-derive = "*"

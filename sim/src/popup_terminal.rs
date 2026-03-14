@@ -1,8 +1,10 @@
 use crate::nonblocknoecho::NonblockNoEcho;
-use simmerv::terminal::Terminal;
+use simmerv::serial_backend::SerialBackend;
 use std::io::Stdout;
 use std::io::Write;
 use std::io::{self};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Popup `Terminal` used for desktop program.
 pub struct PopupTerminal {
@@ -10,14 +12,18 @@ pub struct PopupTerminal {
 }
 
 impl PopupTerminal {
-    pub fn new(ctrlc_breaks: bool) -> Self {
+    pub fn new(
+        ctrlc_breaks: bool,
+        exit_flag: Arc<AtomicBool>,
+        verbose_flag: Arc<AtomicBool>,
+    ) -> Self {
         Self {
-            input: NonblockNoEcho::new(ctrlc_breaks),
+            input: NonblockNoEcho::new(ctrlc_breaks, exit_flag, verbose_flag),
         }
     }
 }
 
-impl Terminal for PopupTerminal {
+impl SerialBackend for PopupTerminal {
     fn put_byte(&mut self, value: u8) {
         let stdout: Stdout = io::stdout();
         loop {

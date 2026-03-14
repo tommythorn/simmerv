@@ -1,7 +1,17 @@
 #![allow(clippy::unreadable_literal)]
 
+use super::Context;
+use super::MemoryMapped;
+use super::MemoryMappedInfo;
+use super::Pack;
+use super::Unpack;
+use super::read_u32;
+use super::read_u64;
+use super::write_u32;
+use super::write_u64;
 use crate::cpu::MIP_MEIP;
 use crate::cpu::MIP_SEIP;
+use std::ops::Range;
 
 // Based on SiFive Interrupt Cookbook
 // https://sifive.cdn.prismic.io/sifive/0d163928-2128-42be-a75a-464df65e04e0_sifive-interrupt-cookbook.pdf
@@ -10,18 +20,12 @@ use crate::cpu::MIP_SEIP;
 /// Refer to the [specification](https://sifive.cdn.prismic.io/sifive%2Fc89f6e5a-cf9e-44c3-a3db-04420702dcc1_sifive+e31+manual+v19.08.pdf)
 /// for the detail.
 pub struct Plic {
-    irq: u32,
-    enabled: u64,
-    threshold: u32,
-    ips: [u8; 1024],
-    priorities: [u32; 1024],
-    needs_update_irq: bool,
-    virtio_ip_cache: bool,
+    pub irq: u32,
+    pub enabled: u64,
+    pub threshold: u32,
+    pub ips: [u8; 1024],
+    pub priorities: [u32; 1024],
 }
-
-// @TODO: IRQ numbers should be configurable with device tree
-const VIRTIO_IRQ: u32 = 1;
-const UART_IRQ: u32 = 10;
 
 impl Default for Plic {
     fn default() -> Self { Self::new() }
@@ -37,75 +41,35 @@ impl Plic {
             threshold: 0,
             priorities: [0; 1024],
             ips: [0; 1024],
-            needs_update_irq: false,
-            virtio_ip_cache: false,
         }
     }
 
-    /// Runs one cycle. Takes interrupting signals from devices and
-    /// raises an interrupt to CPU depending on configuration.
-    /// If interrupt occurs a certain bit of `mip` regiser is risen
-    /// depending on interrupt type.
-    ///
-    /// # Arguments
-    /// * `virtio_ip`
-    /// * `uart_ip`
-    /// * `mip`
-    pub fn service(&mut self, virtio_ip: bool, uart_ip: bool, mip: &mut u64) {
-        // Handling interrupts as "Edge-triggered" interrupt so far
-
-        // Our VirtIO disk implements an interrupt as "Level-triggered" and
-        // virtio_ip is always true while interrupt pending bit is asserted.
-        // Then our Plic caches virtio_ip and detects the rise edge.
-        if self.virtio_ip_cache != virtio_ip {
-            if virtio_ip {
-                self.set_ip(VIRTIO_IRQ);
+    /// Tick: set IPs for the given asserted IRQs and run `update_irq` if
+    /// needed.
+    pub fn tick(&mut self, asserted_irqs: &[u32], mip: &mut u64) {
+        for &irq in asserted_irqs {
+            if irq > 0 && irq < 64 {
+                self.set_ip(irq);
             }
-            self.virtio_ip_cache = virtio_ip;
         }
-
-        // Our Uart implements an interrupt as "Edge-triggered" and
-        // uart_ip is true only at the cycle when an interrupt happens
-        if uart_ip {
-            self.set_ip(UART_IRQ);
-        }
-
-        if self.needs_update_irq {
-            self.update_irq(mip);
-            self.needs_update_irq = false;
-        }
+        self.update_irq(mip);
     }
 
     fn update_irq(&mut self, mip: &mut u64) {
-        // Hardcoded VirtIO and UART
-        // @TODO: Should be configurable with device tree
+        let mut best_irq = 0;
+        let mut best_priority = 0;
 
-        let virtio_ip = ((self.ips[(VIRTIO_IRQ >> 3) as usize] >> (VIRTIO_IRQ & 7)) & 1) == 1;
-        let uart_ip = ((self.ips[(UART_IRQ >> 3) as usize] >> (UART_IRQ & 7)) & 1) == 1;
-
-        // Which should be prioritized, virtio or uart?
-
-        let virtio_priority = self.priorities[VIRTIO_IRQ as usize];
-        let uart_priority = self.priorities[UART_IRQ as usize];
-
-        let virtio_enabled = ((self.enabled >> VIRTIO_IRQ) & 1) == 1;
-        let uart_enabled = ((self.enabled >> UART_IRQ) & 1) == 1;
-
-        let ips = [virtio_ip, uart_ip];
-        let enables = [virtio_enabled, uart_enabled];
-        let priorities = [virtio_priority, uart_priority];
-        let irqs = [VIRTIO_IRQ, UART_IRQ];
-
-        let mut irq = 0;
-        let mut priority = 0;
-        for i in 0..2 {
-            if ips[i] && enables[i] && priorities[i] > self.threshold && priorities[i] > priority {
-                irq = irqs[i];
-                priority = priorities[i];
+        for irq in 1..64 {
+            let ip = (self.ips[irq >> 3] >> (irq & 7)) & 1 == 1;
+            let enabled = (self.enabled >> irq) & 1 == 1;
+            let priority = self.priorities[irq];
+            if ip && enabled && priority > self.threshold && priority > best_priority {
+                best_irq = irq;
+                best_priority = priority;
             }
         }
 
-        self.irq = irq;
+        self.irq = best_irq as u32;
         if self.irq != 0 {
             *mip |= MIP_MEIP | MIP_SEIP;
         } else {
@@ -116,122 +80,90 @@ impl Plic {
     const fn set_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] |= 1 << (irq & 7);
-        self.needs_update_irq = true;
     }
 
     const fn clear_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] &= !(1 << (irq & 7));
-        self.needs_update_irq = true;
     }
+}
 
-    /// Loads register content
-    ///
-    /// # Arguments
-    /// * `address`
-    #[allow(clippy::cast_possible_truncation)]
-    #[must_use]
-    pub const fn load(&self, address: u64) -> u8 {
-        //println!("PLIC Load AD:{:X}", address);
-        match address {
-            0x0c000000..=0x0c000fff => {
-                let offset = address % 4;
-                let index = ((address - 0xc000000) >> 2) as usize;
-                let pos = offset << 3;
-                (self.priorities[index] >> pos) as u8
+impl MemoryMapped for Plic {
+    /// Register layout by offset:
+    ///   0x000000..=0x000fff: priorities[offset>>2] (u32 each)
+    ///   0x001000..=0x00107f: ips[offset-0x1000] (u8 array)
+    ///   0x002080..=0x002087: enabled (u64 LE)
+    ///   0x201000..=0x201003: threshold (u32 LE)
+    ///   0x201004..=0x201007: irq/claim (u32 LE)
+    fn read(
+        &mut self,
+        _ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &mut [u8],
+    ) {
+        match offset {
+            0x000000..=0x000fff => read_u32(offset, size, self.priorities[offset / 4], data),
+            0x001000..=0x00107f => {
+                let idx = offset - 0x1000;
+                let src = self.ips.get(idx..).unwrap_or(&[]);
+                let copy_len = src.len().min(size);
+                data[..copy_len].copy_from_slice(&src[..copy_len]);
+                data[copy_len..size].fill(0);
             }
-            0x0c001000..=0x0c00107f => {
-                let index = (address - 0xc001000) as usize;
-                self.ips[index]
-            }
-            0x0c002080 => self.enabled as u8,
-            0x0c002081 => (self.enabled >> 8) as u8,
-            0x0c002082 => (self.enabled >> 16) as u8,
-            0x0c002083 => (self.enabled >> 24) as u8,
-            0x0c002084 => (self.enabled >> 32) as u8,
-            0x0c002085 => (self.enabled >> 40) as u8,
-            0x0c002086 => (self.enabled >> 48) as u8,
-            0x0c002087 => (self.enabled >> 56) as u8,
-            0x0c201000 => self.threshold as u8,
-            0x0c201001 => (self.threshold >> 8) as u8,
-            0x0c201002 => (self.threshold >> 16) as u8,
-            0x0c201003 => (self.threshold >> 24) as u8,
-            0x0c201004 => self.irq as u8,
-            0x0c201005 => (self.irq >> 8) as u8,
-            0x0c201006 => (self.irq >> 16) as u8,
-            0x0c201007 => (self.irq >> 24) as u8,
-            _ => 0,
+            0x002080..=0x002087 => read_u64(offset, size, self.enabled, data),
+            0x201000..=0x201003 => read_u32(offset, size, self.threshold, data),
+            0x201004..=0x201007 => read_u32(offset, size, self.irq, data),
+            _ => data[..size].fill(0),
         }
     }
 
-    /// Stores register content
-    ///
-    /// # Arguments
-    /// * `address`
-    /// * `value`
-    #[allow(clippy::cast_lossless)]
-    pub fn store(&mut self, address: u64, value: u8, mip: &mut u64) {
-        //println!("PLIC Store AD:{:X} VAL:{:X}", address, value);
-        match address {
-            0x0c000000..=0x0c000fff => {
-                let offset = address % 4;
-                let index = ((address - 0xc000000) >> 2) as usize;
-                let pos = offset << 3;
-                self.priorities[index] =
-                    (self.priorities[index] & !(0xff << pos)) | ((value as u32) << pos);
-                self.needs_update_irq = true;
-            }
-            // Enable. Only first 64 interrupt sources support so far.
-            // @TODO: Implement all 1024 interrupt source enables.
-            0x0c002080 => {
-                self.enabled = (self.enabled & !0xff) | (value as u64);
-                self.needs_update_irq = true;
-            }
-            0x0c002081 => {
-                self.enabled = (self.enabled & !(0xff << 8)) | ((value as u64) << 8);
-            }
-            0x0c002082 => {
-                self.enabled = (self.enabled & !(0xff << 16)) | ((value as u64) << 16);
-            }
-            0x0c002083 => {
-                self.enabled = (self.enabled & !(0xff << 24)) | ((value as u64) << 24);
-            }
-            0x0c002084 => {
-                self.enabled = (self.enabled & !(0xff << 32)) | ((value as u64) << 32);
-            }
-            0x0c002085 => {
-                self.enabled = (self.enabled & !(0xff << 40)) | ((value as u64) << 40);
-            }
-            0x0c002086 => {
-                self.enabled = (self.enabled & !(0xff << 48)) | ((value as u64) << 48);
-            }
-            0x0c002087 => {
-                self.enabled = (self.enabled & !(0xff << 56)) | ((value as u64) << 56);
-            }
-            0x0c201000 => {
-                self.threshold = (self.threshold & !0xff) | (value as u32);
-                self.needs_update_irq = true;
-            }
-            0x0c201001 => {
-                self.threshold = (self.threshold & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x0c201002 => {
-                self.threshold = (self.threshold & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x0c201003 => {
-                self.threshold = (self.threshold & !(0xff << 24)) | ((value as u32) << 24);
-            }
-            // Claim
-            0x0c201004 => {
-                // Assuming written data is a byte so far
-                // @TODO: Should be four bytes.
-                self.clear_ip(value as u32);
+    fn write(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
+        match offset {
+            0x000000..=0x000fff => write_u32(offset, size, &mut self.priorities[offset / 4], data),
+            0x002080..=0x002087 => write_u64(offset, size, &mut self.enabled, data),
+            0x201000..=0x201003 => write_u32(offset, size, &mut self.threshold, data),
+            0x201004..=0x201007 => {
+                let mut claimed_irq = 0;
+                write_u32(offset, size, &mut claimed_irq, data);
+                if 0 < claimed_irq && claimed_irq < 64 {
+                    self.clear_ip(claimed_irq);
+                }
             }
             _ => {}
         }
-        if self.needs_update_irq {
-            self.update_irq(mip);
-            self.needs_update_irq = false;
+        self.update_irq(&mut ctx.mip);
+    }
+
+    fn service(&mut self, _ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {}
+
+    fn process_irqs(&mut self, irqs: &[u32], mip: &mut u64) { self.tick(irqs, mip); }
+
+    fn save_state(&self, w: &mut Pack) {
+        w.u32(self.irq);
+        w.u64(self.enabled);
+        w.u32(self.threshold);
+        w.raw(&self.ips);
+        for p in &self.priorities {
+            w.u32(*p);
+        }
+    }
+
+    fn restore_state(&mut self, r: &mut Unpack) -> Result<(), ()> {
+        self.irq = r.u32()?;
+        self.enabled = r.u64()?;
+        self.threshold = r.u32()?;
+        self.ips.copy_from_slice(r.raw(1024)?);
+        for p in &mut self.priorities {
+            *p = r.u32()?;
+        }
+        Ok(())
+    }
+
+    fn info(&self) -> MemoryMappedInfo {
+        MemoryMappedInfo {
+            name: "SiFive PLIC".to_string(),
         }
     }
 }

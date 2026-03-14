@@ -9,10 +9,13 @@ use anyhow::anyhow;
 use anyhow::bail;
 use argh::FromArgs;
 use simmerv::Emulator;
-use simmerv::terminal::Terminal;
+use simmerv::serial_backend::SerialBackend;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 #[derive(FromArgs)]
 #[allow(clippy::doc_markdown)]
@@ -47,6 +50,14 @@ struct Args {
     #[argh(switch, short = 'c')]
     ctrlc_breaks: bool,
 
+    /// write a snapshot on exit to the given path
+    #[argh(option, short = 'w')]
+    write_snapshot: Option<String>,
+
+    /// take periodic snapshots: format "N:base_name" where N is tick interval
+    #[argh(option, short = 'S')]
+    snapshot_interval: Option<String>,
+
     /// memory images, elf or binary blobs, optionally follow by a comma and the
     /// the "0x"-prefixed load address in hex (this is required for binary
     /// blobs)
@@ -59,12 +70,29 @@ enum TerminalType {
     DummyTerminal,
 }
 
-fn get_terminal(terminal_type: &TerminalType, ctrlc_breaks: bool) -> Box<dyn Terminal> {
+fn get_terminal(
+    terminal_type: &TerminalType,
+    ctrlc_breaks: bool,
+    exit_flag: Arc<AtomicBool>,
+    verbose_flag: Arc<AtomicBool>,
+) -> Box<dyn SerialBackend> {
     match terminal_type {
-        TerminalType::PopupTerminal => Box::new(PopupTerminal::new(ctrlc_breaks)),
+        TerminalType::PopupTerminal => {
+            Box::new(PopupTerminal::new(ctrlc_breaks, exit_flag, verbose_flag))
+        }
         TerminalType::DummyTerminal => Box::new(DummyTerminal::new()),
     }
 }
+
+fn write_snap(emulator: &mut Emulator, path: &str) -> anyhow::Result<()> {
+    emulator.write_snapshot(path)?;
+    if emulator.verbose.load(Ordering::Relaxed) {
+        eprintln!("snapshot → {path} [seqno={}]", emulator.cpu.seqno);
+    }
+    Ok(())
+}
+
+fn is_snapshot(data: &[u8]) -> bool { data.len() >= 9 && data[..9] == *b"SIMMERVC3" }
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() -> anyhow::Result<()> {
@@ -76,16 +104,26 @@ fn main() -> anyhow::Result<()> {
     } else {
         TerminalType::PopupTerminal
     };
+    let exit_flag = Arc::new(AtomicBool::new(false));
+    let verbose_flag = Arc::new(AtomicBool::new(false));
     let mut symbols = BTreeMap::new();
     let memory_megs = args.memory_megs.unwrap_or(2048);
     let mut emulator = Emulator::new(
-        get_terminal(&terminal_type, args.ctrlc_breaks),
+        get_terminal(
+            &terminal_type,
+            args.ctrlc_breaks,
+            Arc::clone(&exit_flag),
+            Arc::clone(&verbose_flag),
+        ),
         memory_megs * 1024 * 1024,
     );
+    emulator.exit_flag = Arc::clone(&exit_flag);
+    emulator.verbose = Arc::clone(&verbose_flag);
     let mut img_contents = vec![];
     let mut load_addr = None;
     let mut emu_start = None;
     let mut images = 0;
+    let mut loaded_snapshot = false;
 
     for img_path in args.images {
         img_contents.clear();
@@ -102,6 +140,17 @@ fn main() -> anyhow::Result<()> {
             } else {
                 bail!("Unsupported file option {part}");
             }
+        }
+
+        // Detect snapshot files by magic header.
+        if is_snapshot(&img_contents) {
+            emulator
+                .load_snapshot(&img_contents)
+                .with_context(|| filename.to_string())?;
+            loaded_snapshot = true;
+            images += 1;
+            load_addr = None;
+            continue;
         }
 
         let entry = emulator
@@ -147,9 +196,28 @@ fn main() -> anyhow::Result<()> {
         bail!("I have nothing to run");
     }
 
-    emulator.cpu.update_pc(emu_start.unwrap_or(0x8000_0000));
+    // Only set the PC if we didn't load a snapshot (snapshot already has PC).
+    if !loaded_snapshot {
+        emulator.cpu.update_pc(emu_start.unwrap_or(0x8000_0000));
+    }
 
-    emulator.run(args.tracing);
+    // Run with optional periodic snapshots, or plain run.
+    if let Some(spec) = args.snapshot_interval {
+        // Format: "N:base_name"
+        let mut parts = spec.splitn(2, ':');
+        let interval_str = parts.next().unwrap_or("0");
+        let base = parts.next().unwrap_or("snapshot");
+        let interval: usize = interval_str
+            .parse()
+            .with_context(|| format!("invalid snapshot interval: {interval_str}"))?;
+        emulator.run_with_periodic_snapshots(interval, base);
+    } else {
+        emulator.run(args.tracing);
+    }
+
+    if let Some(path) = args.write_snapshot {
+        write_snap(&mut emulator, &path).with_context(|| format!("writing snapshot to {path}"))?;
+    }
 
     Ok(())
 }
