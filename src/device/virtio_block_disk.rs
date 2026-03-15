@@ -12,52 +12,66 @@ use crate::device::dma_slice;
 use crate::device::dma_write_u8;
 use std::ops::Range;
 
-// Based on Virtual I/O Device (VIRTIO) Version 1.1
-// https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html
+// Based on Virtual I/O Device (VIRTIO) Version 1.2
+// https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
+// Section 4.2: Virtio Over MMIO (modern, Version=2)
+// Section 5.2: Block Device
 
-// 0x2000 is an arbitary number.
-const MAX_QUEUE_SIZE: u64 = 0x2000;
+const MAX_QUEUE_SIZE: u32 = 0x100;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 
-// 0: buffer is write-only = read from disk operation
-// 1: buffer is read-only = write to disk operation
+// VIRTQ_DESC_F_WRITE: buffer is write-only *from the device's perspective*
+// (i.e., the device writes into it — this is a READ from disk operation)
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 const SECTOR_SIZE: usize = 512;
 
-// Feature bits for virtio block device
-const VIRTIO_BLK_F_BLK_SIZE: u64 = 6; // Block size of disk is available
-const VIRTIO_BLK_F_FLUSH: u64 = 9; // Cache flush command support
-const VIRTIO_BLK_F_TOPOLOGY: u64 = 10; // Device exports information on optimal I/O alignment
-const VIRTIO_BLK_F_CONFIG_WCE: u64 = 11; // Device can toggle its cache between writeback and writethrough modes
-const VIRTIO_BLK_F_DISCARD: u64 = 13; // Device can support discard command
-const VIRTIO_BLK_F_WRITE_ZEROES: u64 = 14; // Device can support write zeroes command
+// VirtIO block device feature bits (section 5.2.3)
+const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
+const VIRTIO_BLK_F_TOPOLOGY: u32 = 10;
+const VIRTIO_BLK_F_CONFIG_WCE: u32 = 11;
 
-// Default block size in bytes
+// Common VirtIO feature bits (section 6)
+const VIRTIO_F_VERSION_1: u32 = 32;
+
+const DEVICE_FEATURES: u64 = (1_u64 << VIRTIO_F_VERSION_1)
+    | (1_u64 << VIRTIO_BLK_F_BLK_SIZE)
+    | (1_u64 << VIRTIO_BLK_F_TOPOLOGY)
+    | (1_u64 << VIRTIO_BLK_F_CONFIG_WCE);
+
 const DEFAULT_BLOCK_SIZE: u32 = 512;
 
-/// Emulates Virtio Block device. Refer to the [specification](https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html)
-/// for the detail. It follows legacy API.
+/// Emulates a `VirtIO` 1.2 (modern) block device over MMIO.
+///
+/// Register layout follows section 4.2.2 of the `VirtIO` specification.
+/// The three virtqueue address registers (desc, driver, device) replace the
+/// legacy page-frame-number scheme.
 pub struct VirtioBlockDisk {
     pub used_ring_index: u16,
-    pub device_features: u64,     // read only
-    pub device_features_sel: u32, // write only
-    pub driver_features: u64,     // write only
-    _driver_features_sel: u32,    // write only
-    pub guest_page_size: u32,     // write only
-    pub queue_select: u32,        // write only
-    pub queue_size: u32,          // write only
-    pub queue_align: u32,         // write only
-    pub queue_pfn: u32,           // read and write
-    pub queue_notify: u32,        // write only
-    pub interrupt_status: u32,    // read only
-    pub status: u32,              // read and write
-    /// Number of pending disk requests (replaces `notify_cycles` Vec).
+
+    // Feature negotiation
+    pub device_features: u64,
+    pub device_features_sel: u32,
+    pub driver_features: u64,
+    pub driver_features_sel: u32,
+
+    // Queue setup
+    pub queue_select: u32,
+    pub queue_size: u32,
+    pub queue_ready: bool,
+    pub queue_desc_addr: u64,   // physical address of descriptor table
+    pub queue_driver_addr: u64, // physical address of available ring (driver area)
+    pub queue_device_addr: u64, // physical address of used ring (device area)
+
+    pub queue_notify: u32,
+    pub interrupt_status: u32,
+    pub status: u32,
+    /// Number of pending disk requests.
     pub pending_requests: u32,
     pub contents: Vec<u8>,
-    pub block_size: u32, // Block size in bytes
-    pub writeback: bool, // Cache mode (true = writeback, false = writethrough)
+    pub block_size: u32,
+    pub writeback: bool,
     /// IRQ number asserted on the PLIC when interrupting.
     pub irq: u32,
 }
@@ -67,29 +81,23 @@ impl Default for VirtioBlockDisk {
 }
 
 impl VirtioBlockDisk {
-    /// Creates a new `VirtioBlockDisk`.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub const fn new(contents: Vec<u8>, irq: u32) -> Self {
         Self {
             used_ring_index: 0,
-            device_features: (1 << VIRTIO_BLK_F_BLK_SIZE)
-                | (1 << VIRTIO_BLK_F_FLUSH)
-                | (1 << VIRTIO_BLK_F_TOPOLOGY)
-                | (1 << VIRTIO_BLK_F_CONFIG_WCE)
-                | (1 << VIRTIO_BLK_F_DISCARD)
-                | (1 << VIRTIO_BLK_F_WRITE_ZEROES),
+            device_features: DEVICE_FEATURES,
             device_features_sel: 0,
             driver_features: 0,
-            _driver_features_sel: 0,
-            guest_page_size: 0,
+            driver_features_sel: 0,
             queue_select: 0,
             queue_size: 0,
-            queue_align: 0x1000, // xv6 seems to expect this default value
-            queue_pfn: 0,
+            queue_ready: false,
+            queue_desc_addr: 0,
+            queue_driver_addr: 0,
+            queue_device_addr: 0,
             queue_notify: 0,
-            status: 0,
             interrupt_status: 0,
+            status: 0,
             pending_requests: 0,
             contents,
             block_size: DEFAULT_BLOCK_SIZE,
@@ -98,14 +106,7 @@ impl VirtioBlockDisk {
         }
     }
 
-    /// Indicates whether `VirtioBlockDisk` raises an interrupt signal
-    pub const fn is_interrupting(&mut self) -> bool { self.interrupt_status & 1 == 1 }
-
-    /// Initializes filesystem content. The method is expected to be called
-    /// only up to once.
-    ///
-    /// # Arguments
-    /// * `contents` filesystem content binary
+    /// Initializes filesystem content. Expected to be called at most once.
     #[allow(clippy::cast_lossless)]
     pub fn init(&mut self, contents: Vec<u8>) {
         if !contents.len().is_multiple_of(SECTOR_SIZE) {
@@ -117,16 +118,44 @@ impl VirtioBlockDisk {
         self.contents = contents;
     }
 
-    /// Runs one service tick. If `pending_requests > 0`, handles disk access.
-    /// Returns `Some(irq)` if interrupting, `None` otherwise.
+    /// Returns `true` when the device has an asserted interrupt pending.
+    #[must_use]
+    pub const fn is_interrupting(&self) -> bool { self.interrupt_status & 1 == 1 }
+
+    /// Resets the device to its power-on state (triggered by writing Status=0).
+    /// Disk contents and block size are preserved.
+    const fn reset(&mut self) {
+        self.device_features_sel = 0;
+        self.driver_features = 0;
+        self.driver_features_sel = 0;
+        self.queue_select = 0;
+        self.queue_size = 0;
+        self.queue_ready = false;
+        self.queue_desc_addr = 0;
+        self.queue_driver_addr = 0;
+        self.queue_device_addr = 0;
+        self.queue_notify = 0;
+        self.interrupt_status = 0;
+        self.used_ring_index = 0;
+        self.pending_requests = 0;
+    }
+
+    /// Services all pending disk requests and returns `Some(irq)` if the
+    /// device should assert an interrupt, `None` otherwise.
+    ///
+    /// The driver may batch multiple requests into the available ring before
+    /// issuing a single `QueueNotify` (this became common in kernel 6.x).
+    /// We therefore drain the entire ring up to `avail->idx` on each service
+    /// call rather than processing one request per notification.
     pub fn service_disk(&mut self, memory: &mut [(Range<u64>, Vec<u8>)]) -> Option<u32> {
         if self.pending_requests > 0 {
-            // bit 0 in interrupt_status register indicates
-            // the interrupt was asserted because the device has used a buffer
-            // in at least one of the active virtual queues.
+            // avail->idx lives at queue_driver_addr + 2 (u16, wrapping counter).
+            let avail_idx = dma_read_u16(memory, self.queue_driver_addr.wrapping_add(2));
+            while self.used_ring_index != avail_idx {
+                self.handle_disk_access(memory);
+            }
             self.interrupt_status |= 1;
-            self.handle_disk_access(memory);
-            self.pending_requests -= 1;
+            self.pending_requests = 0;
         }
         if self.is_interrupting() {
             Some(self.irq)
@@ -135,246 +164,170 @@ impl VirtioBlockDisk {
         }
     }
 
-    /// Loads register content
+    /// Reads a MMIO register byte (offset from `VIRTIO_BASE`).
     ///
-    /// # Arguments
-    /// * `offset` offset from the `VirtIO` device base address
-    #[allow(clippy::match_same_arms, clippy::cast_possible_truncation)]
-    pub fn load(&mut self, offset: u64) -> u8 {
+    /// Register layout per `VirtIO` 1.2 §4.2.2 (modern, Version=2).
+    #[must_use]
+    #[allow(
+        clippy::match_same_arms,
+        clippy::cast_possible_truncation,
+        clippy::cast_lossless
+    )]
+    pub fn load(&self, offset: u64) -> u8 {
         match offset {
-            // Magic number: 0x74726976
+            // Magic value: "virt" = 0x74726976
             0x000 => 0x76,
             0x001 => 0x69,
             0x002 => 0x72,
             0x003 => 0x74,
-            // Device version: 1 (Legacy device)
-            0x004 => 1,
-            // Virtio Subsystem Device id: 2 (Block device)
+            // Version: 2 (modern)
+            0x004 => 2,
+            0x005..=0x007 => 0,
+            // Device ID: 2 (block device)
             0x008 => 2,
-            // Virtio Subsystem Vendor id: 0x554d4551
+            0x009..=0x00b => 0,
+            // Vendor ID: 0x554d4551 ("QEMU")
             0x00c => 0x51,
             0x00d => 0x45,
             0x00e => 0x4d,
             0x00f => 0x55,
-            // Flags representing features the device supports
-            0x010 => ((self.device_features >> (self.device_features_sel * 32)) & 0xff) as u8,
-            0x011 => {
-                (((self.device_features >> (self.device_features_sel * 32)) >> 8) & 0xff) as u8
+            // 0x010: DeviceFeatures (R) — 32-bit page selected by DeviceFeaturesSel
+            0x010..=0x013 => {
+                let shift = u64::from(self.device_features_sel) * 32 + (offset - 0x010) * 8;
+                (self.device_features >> shift) as u8
             }
-            0x012 => {
-                (((self.device_features >> (self.device_features_sel * 32)) >> 16) & 0xff) as u8
-            }
-            0x013 => {
-                (((self.device_features >> (self.device_features_sel * 32)) >> 24) & 0xff) as u8
-            }
-            // Maximum virtual queue size
-            0x034 => MAX_QUEUE_SIZE as u8,
-            0x035 => (MAX_QUEUE_SIZE >> 8) as u8,
-            0x036 => (MAX_QUEUE_SIZE >> 16) as u8,
-            0x037 => (MAX_QUEUE_SIZE >> 24) as u8,
-            // Guest physical page number of the virtual queue
-            0x040 => self.queue_pfn as u8,
-            0x041 => (self.queue_pfn >> 8) as u8,
-            0x042 => (self.queue_pfn >> 16) as u8,
-            0x043 => (self.queue_pfn >> 24) as u8,
-            // Interrupt status
-            0x060 => self.interrupt_status as u8,
-            0x061 => (self.interrupt_status >> 8) as u8,
-            0x062 => (self.interrupt_status >> 16) as u8,
-            0x063 => (self.interrupt_status >> 24) as u8,
-            // Device status
-            0x070 => self.status as u8,
-            0x071 => (self.status >> 8) as u8,
-            0x072 => (self.status >> 16) as u8,
-            0x073 => (self.status >> 24) as u8,
-            // Configurations
+            // 0x014: DeviceFeaturesSel (W only; reads reserved → 0)
+            0x014..=0x017 => 0,
+            // 0x034: QueueNumMax
+            0x034..=0x037 => (MAX_QUEUE_SIZE >> ((offset - 0x034) * 8)) as u8,
+            // 0x044: QueueReady
+            0x044 => u8::from(self.queue_ready),
+            0x045..=0x047 => 0,
+            // 0x060: InterruptStatus
+            0x060..=0x063 => (self.interrupt_status >> ((offset - 0x060) * 8)) as u8,
+            // 0x070: Status
+            0x070..=0x073 => (self.status >> ((offset - 0x070) * 8)) as u8,
+            // 0x080: QueueDescLow/High (readable so driver can verify)
+            0x080..=0x087 => (self.queue_desc_addr >> ((offset - 0x080) * 8)) as u8,
+            // 0x090: QueueDriverLow/High
+            0x090..=0x097 => (self.queue_driver_addr >> ((offset - 0x090) * 8)) as u8,
+            // 0x0a0: QueueDeviceLow/High
+            0x0a0..=0x0a7 => (self.queue_device_addr >> ((offset - 0x0a0) * 8)) as u8,
+            // 0x0fc: ConfigGeneration (we never change config during operation)
+            0x0fc..=0x0ff => 0,
+
+            // ── Config space (§5.2.4) ──────────────────────────────────────
+            // offset  size  field              feature
+            // 0x000      8  capacity (sectors) always
+            // 0x008      4  size_max           SIZE_MAX (not advertised)
+            // 0x00c      4  seg_max            SEG_MAX  (not advertised)
+            // 0x010      4  geometry           GEOMETRY (not advertised)
+            // 0x014      4  blk_size           BLK_SIZE
+            // 0x018      1  physical_block_exp TOPOLOGY
+            // 0x019      1  alignment_offset   TOPOLOGY
+            // 0x01a      2  min_io_size        TOPOLOGY
+            // 0x01c      4  opt_io_size        TOPOLOGY
+            // 0x020      1  writeback          CONFIG_WCE
             0x100..=0x107 => {
-                let n_secs: u64 = self.contents.len() as u64 / u64::from(self.block_size);
-                let n_secs_as_u8: [u8; 8] = n_secs.to_le_bytes();
-                n_secs_as_u8[offset as usize & 7]
+                let n_secs = self.contents.len() as u64 / 512;
+                (n_secs >> ((offset - 0x100) * 8)) as u8
             }
-            // Block size configuration
-            0x108..=0x10B => {
-                let block_size_as_u8: [u8; 4] = self.block_size.to_le_bytes();
-                block_size_as_u8[offset as usize & 3]
-            }
-            // Topology configuration
-            0x10C..=0x113 => {
-                // Optimal I/O alignment in sectors
-                let alignment: u64 = 1; // Default to 1 sector alignment
-                let alignment_as_u8: [u8; 8] = alignment.to_le_bytes();
-                alignment_as_u8[offset as usize & 7]
-            }
-            // Writeback configuration
-            0x114 => u8::from(self.writeback),
+            0x108..=0x10b => 0, // size_max  (not advertised)
+            0x10c..=0x10f => 0, // seg_max   (not advertised)
+            0x110..=0x113 => 0, // geometry  (not advertised)
+            0x114..=0x117 => (self.block_size >> ((offset - 0x114) * 8)) as u8,
+            0x118..=0x11f => 0, // topology fields: default zeros (1-sector alignment)
+            0x120 => u8::from(self.writeback),
             _ => 0,
         }
     }
 
-    /// Stores register content
-    ///
-    /// # Arguments
-    /// * `offset` offset from the `VirtIO` device base address
-    /// * `value`
-    /// # Panics
-    /// Will panic if multi queue are attempted enabled (XXX should probably
-    /// just ignore)
+    /// Writes a MMIO register byte (offset from `VIRTIO_BASE`).
     #[allow(clippy::cast_lossless, clippy::too_many_lines)]
-    pub fn store(&mut self, offset: u64, value: u8) {
+    pub const fn store(&mut self, offset: u64, value: u8) {
         match offset {
-            0x014 => {
-                self.device_features_sel = (self.device_features_sel & !0xff) | (value as u32);
-            }
-            0x015 => {
+            // 0x014: DeviceFeaturesSel (W)
+            0x014..=0x017 => {
+                let shift = (offset - 0x014) * 8;
                 self.device_features_sel =
-                    (self.device_features_sel & !(0xff << 8)) | ((value as u32) << 8);
+                    (self.device_features_sel & !(0xff << shift)) | ((value as u32) << shift);
             }
-            0x016 => {
-                self.device_features_sel =
-                    (self.device_features_sel & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x017 => {
-                self.device_features_sel =
-                    (self.device_features_sel & !(0xff << 24)) | ((value as u32) << 24);
-            }
-            0x020 => {
-                self.driver_features = (self.driver_features & !0xff) | (value as u64);
-            }
-            0x021 => {
+            // 0x020: DriverFeatures (W) — 32-bit page selected by DriverFeaturesSel
+            0x020..=0x023 => {
+                let shift = self.driver_features_sel as u64 * 32 + (offset - 0x020) * 8;
                 self.driver_features =
-                    (self.driver_features & !(0xff << 8)) | ((value as u64) << 8);
+                    (self.driver_features & !(0xff_u64 << shift)) | ((value as u64) << shift);
             }
-            0x022 => {
-                self.driver_features =
-                    (self.driver_features & !(0xff << 16)) | ((value as u64) << 16);
+            // 0x024: DriverFeaturesSel (W)
+            0x024..=0x027 => {
+                let shift = (offset - 0x024) * 8;
+                self.driver_features_sel =
+                    (self.driver_features_sel & !(0xff << shift)) | ((value as u32) << shift);
             }
-            0x023 => {
-                self.driver_features =
-                    (self.driver_features & !(0xff << 24)) | ((value as u64) << 24);
+            // 0x030: QueueSel (W) — only queue 0 supported
+            0x030..=0x033 => {
+                let shift = (offset - 0x030) * 8;
+                self.queue_select =
+                    (self.queue_select & !(0xff << shift)) | ((value as u32) << shift);
             }
-            0x024 => {
-                self.driver_features =
-                    (self.driver_features & !(0xff << 32)) | ((value as u64) << 32);
+            // 0x038: QueueNum (W)
+            0x038..=0x03b => {
+                let shift = (offset - 0x038) * 8;
+                self.queue_size = (self.queue_size & !(0xff << shift)) | ((value as u32) << shift);
             }
-            0x025 => {
-                self.driver_features =
-                    (self.driver_features & !(0xff << 40)) | ((value as u64) << 40);
-            }
-            0x026 => {
-                self.driver_features =
-                    (self.driver_features & !(0xff << 48)) | ((value as u64) << 48);
-            }
-            0x027 => {
-                self.driver_features =
-                    (self.driver_features & !(0xff << 56)) | ((value as u64) << 56);
-            }
-            0x028 => {
-                self.guest_page_size = (self.guest_page_size & !0xff) | (value as u32);
-            }
-            0x029 => {
-                self.guest_page_size =
-                    (self.guest_page_size & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x02a => {
-                self.guest_page_size =
-                    (self.guest_page_size & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x02b => {
-                self.guest_page_size =
-                    (self.guest_page_size & !(0xff << 24)) | ((value as u32) << 24);
-            }
-            0x030 => {
-                self.queue_select = (self.queue_select & !0xff) | (value as u32);
-            }
-            0x031 => {
-                self.queue_select = (self.queue_select & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x032 => {
-                self.queue_select = (self.queue_select & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x033 => {
-                self.queue_select = (self.queue_select & !(0xff << 24)) | ((value as u32) << 24);
-                assert!(
-                    self.queue_select == 0,
-                    "Virtio: No multi queue support yet."
-                );
-            }
-            0x038 => {
-                self.queue_size = (self.queue_size & !0xff) | (value as u32);
-            }
-            0x039 => {
-                self.queue_size = (self.queue_size & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x03a => {
-                self.queue_size = (self.queue_size & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x03b => {
-                self.queue_size = (self.queue_size & !(0xff << 24)) | ((value as u32) << 24);
-            }
-            0x03c => {
-                self.queue_align = (self.queue_align & !0xff) | (value as u32);
-            }
-            0x03d => {
-                self.queue_align = (self.queue_align & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x03e => {
-                self.queue_align = (self.queue_align & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x03f => {
-                self.queue_align = (self.queue_align & !(0xff << 24)) | ((value as u32) << 24);
-            }
-            0x040 => {
-                self.queue_pfn = (self.queue_pfn & !0xff) | (value as u32);
-            }
-            0x041 => {
-                self.queue_pfn = (self.queue_pfn & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x042 => {
-                self.queue_pfn = (self.queue_pfn & !(0xff << 16)) | ((value as u32) << 16);
-            }
-            0x043 => {
-                self.queue_pfn = (self.queue_pfn & !(0xff << 24)) | ((value as u32) << 24);
-            }
-            // @TODO: Queue request support
-            0x050 => {
-                self.queue_notify = (self.queue_notify & !0xff) | (value as u32);
-            }
-            0x051 => {
-                self.queue_notify = (self.queue_notify & !(0xff << 8)) | ((value as u32) << 8);
-            }
-            0x052 => {
-                self.queue_notify = (self.queue_notify & !(0xff << 16)) | ((value as u32) << 16);
+            // 0x044: QueueReady (W) — driver sets 1 when queue is configured
+            0x044 => self.queue_ready = value != 0,
+            // 0x050: QueueNotify (W) — writing triggers a request
+            0x050..=0x052 => {
+                let shift = (offset - 0x050) * 8;
+                self.queue_notify =
+                    (self.queue_notify & !(0xff << shift)) | ((value as u32) << shift);
             }
             0x053 => {
                 self.queue_notify = (self.queue_notify & !(0xff << 24)) | ((value as u32) << 24);
-                self.pending_requests += 1;
+                if self.queue_ready {
+                    self.pending_requests += 1;
+                }
             }
-            0x064 => self.interrupt_status &= !(value as u32), // interrupt ack
-            0x070 => {
-                self.status = (self.status & !0xff) | (value as u32);
+            // 0x064: InterruptACK (W) — driver clears asserted interrupt bits
+            0x064 => self.interrupt_status &= !(value as u32),
+            // 0x070: Status (R/W) — writing 0 resets the device
+            0x070..=0x073 => {
+                let shift = (offset - 0x070) * 8;
+                self.status = (self.status & !(0xff << shift)) | ((value as u32) << shift);
+                if self.status == 0 {
+                    self.reset();
+                }
             }
-            0x071 => {
-                self.status = (self.status & !(0xff << 8)) | ((value as u32) << 8);
+            // 0x080: QueueDescLow/High (W)
+            0x080..=0x087 => {
+                let shift = (offset - 0x080) * 8;
+                self.queue_desc_addr =
+                    (self.queue_desc_addr & !(0xff_u64 << shift)) | ((value as u64) << shift);
             }
-            0x072 => {
-                self.status = (self.status & !(0xff << 16)) | ((value as u32) << 16);
+            // 0x090: QueueDriverLow/High (W)
+            0x090..=0x097 => {
+                let shift = (offset - 0x090) * 8;
+                self.queue_driver_addr =
+                    (self.queue_driver_addr & !(0xff_u64 << shift)) | ((value as u64) << shift);
             }
-            0x073 => {
-                self.status = (self.status & !(0xff << 24)) | ((value as u32) << 24);
+            // 0x0a0: QueueDeviceLow/High (W)
+            0x0a0..=0x0a7 => {
+                let shift = (offset - 0x0a0) * 8;
+                self.queue_device_addr =
+                    (self.queue_device_addr & !(0xff_u64 << shift)) | ((value as u64) << shift);
             }
-            0x114 if self.driver_features & (1 << VIRTIO_BLK_F_CONFIG_WCE) != 0 => {
+            // 0x120: writeback (W) — CONFIG_WCE feature
+            0x120 if self.driver_features & (1_u64 << VIRTIO_BLK_F_CONFIG_WCE) != 0 => {
                 self.writeback = value != 0;
             }
             _ => {}
         }
     }
 
-    /// Fast path of transferring the data from disk to memory.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::expect_used,
-        clippy::cast_possible_wrap
-    )]
+    // ── Disk transfer helpers ──────────────────────────────────────────────
+
+    #[allow(clippy::expect_used)]
     fn transfer_from_disk(
         &self,
         memory: &mut [(Range<u64>, Vec<u8>)],
@@ -383,16 +336,11 @@ impl VirtioBlockDisk {
         length: usize,
     ) {
         dma_slice(memory, pa, length)
-            .expect("transfer_from_disk() reaches outside memory")
+            .expect("transfer_from_disk: address outside RAM")
             .copy_from_slice(&self.contents[disk_address..disk_address + length]);
     }
 
-    /// Fast path of transferring the data from memory to disk.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::expect_used,
-        clippy::cast_possible_wrap
-    )]
+    #[allow(clippy::expect_used)]
     fn transfer_to_disk(
         &mut self,
         memory: &mut [(Range<u64>, Vec<u8>)],
@@ -401,71 +349,71 @@ impl VirtioBlockDisk {
         length: usize,
     ) {
         self.contents[disk_address..disk_address + length].copy_from_slice(
-            dma_slice(memory, pa, length).expect("transfer_to_disk() reaches outside memory"),
+            dma_slice(memory, pa, length).expect("transfer_to_disk: address outside RAM"),
         );
     }
 
-    const fn get_page_address(&self) -> u64 { self.queue_pfn as u64 * self.guest_page_size as u64 }
-
-    const fn get_base_desc_address(&self) -> u64 { self.get_page_address() }
-
-    fn get_base_avail_address(&self) -> u64 {
-        self.get_base_desc_address() + u64::from(self.queue_size) * 16
-    }
-
-    fn get_base_used_address(&self) -> u64 {
-        let align = u64::from(self.queue_align);
-        let queue_size = u64::from(self.queue_size);
-        (self.get_base_avail_address() + 4 + queue_size * 2).div_ceil(align) * align
-    }
-
-    // @TODO: Follow the virtio block specification more propertly.
+    // ── Virtqueue processing ───────────────────────────────────────────────
+    //
+    // Virtqueue layout (§2.7, same for legacy and modern):
+    //
+    //   Descriptor table  @ queue_desc_addr   — queue_size × 16 B entries
+    //   Available ring    @ queue_driver_addr — driver → device notifications
+    //   Used ring         @ queue_device_addr — device → driver completions
+    //
+    // struct virtq_desc   { addr:u64, len:u32, flags:u16, next:u16 }
+    // struct virtq_avail  { flags:u16, idx:u16, ring[queue_size]:u16, … }
+    // struct virtq_used   { flags:u16, idx:u16, ring[queue_size]:virtq_used_elem, …
+    // } struct virtq_used_elem { id:u32, len:u32 }
+    //
+    // Block request descriptor chain (§5.2.6):
+    //   desc[0]  header  { type:u32, reserved:u32, sector:u64 }  RO
+    //   desc[1]  data    buffer                                   RO or WO
+    //   desc[2]  status  { status:u8 }                           WO
     #[allow(clippy::cast_possible_truncation)]
     fn handle_disk_access(&mut self, memory: &mut [(Range<u64>, Vec<u8>)]) {
-        let base_desc_address = self.get_base_desc_address();
-        let base_avail_address = self.get_base_avail_address();
-        let base_used_address = self.get_base_used_address();
+        let base_desc_addr = self.queue_desc_addr;
+        let base_avail_addr = self.queue_driver_addr;
+        let base_used_addr = self.queue_device_addr;
         let queue_size = u64::from(self.queue_size);
 
-        let _avail_flag = u64::from(dma_read_u16(memory, base_avail_address));
-        let _avail_index = u64::from(dma_read_u16(memory, base_avail_address.wrapping_add(2)));
-        let desc_index_address = base_avail_address
+        // Read the next available ring entry.
+        let avail_ring_idx = u64::from(self.used_ring_index) % queue_size;
+        let desc_index_addr = base_avail_addr
             .wrapping_add(4)
-            .wrapping_add((u64::from(self.used_ring_index) % queue_size) * 2);
-        let desc_head_index = u64::from(dma_read_u16(memory, desc_index_address)) % queue_size;
+            .wrapping_add(avail_ring_idx * 2);
+        let desc_head_index = u64::from(dma_read_u16(memory, desc_index_addr)) % queue_size;
 
-        let mut _blk_type = 0;
-        let mut _blk_reserved = 0;
-        let mut blk_sector = 0;
-        let mut desc_num = 0;
+        // Walk the descriptor chain (expected length: 3).
+        let mut blk_sector: usize = 0;
+        let mut desc_num = 0u32;
         let mut desc_next = desc_head_index;
+
         loop {
-            let desc_element_address = base_desc_address + 16 * desc_next;
-            let desc_addr = dma_read_u64(memory, desc_element_address);
-            let desc_len = dma_read_u32(memory, desc_element_address.wrapping_add(8));
-            let desc_flags = dma_read_u16(memory, desc_element_address.wrapping_add(12));
+            let desc_elem_addr = base_desc_addr.wrapping_add(16 * desc_next);
+            let desc_addr = dma_read_u64(memory, desc_elem_addr);
+            let desc_len = dma_read_u32(memory, desc_elem_addr.wrapping_add(8));
+            let desc_flags = dma_read_u16(memory, desc_elem_addr.wrapping_add(12));
             desc_next =
-                u64::from(dma_read_u16(memory, desc_element_address.wrapping_add(14))) % queue_size;
+                u64::from(dma_read_u16(memory, desc_elem_addr.wrapping_add(14))) % queue_size;
 
             match desc_num {
                 0 => {
-                    _blk_type = dma_read_u32(memory, desc_addr);
-                    _blk_reserved = dma_read_u32(memory, desc_addr.wrapping_add(4));
+                    // Request header: type(u32) + reserved(u32) + sector(u64)
+                    let _blk_type = dma_read_u32(memory, desc_addr);
                     blk_sector = dma_read_u64(memory, desc_addr.wrapping_add(8)) as usize;
                 }
                 1 => {
-                    // Second descriptor: Read/Write disk
-                    if desc_flags & VIRTQ_DESC_F_WRITE == 0 {
-                        // write to disk
-                        self.transfer_to_disk(
+                    // Data buffer: WRITE flag means device writes here (read from disk).
+                    if desc_flags & VIRTQ_DESC_F_WRITE != 0 {
+                        self.transfer_from_disk(
                             memory,
                             desc_addr,
                             blk_sector * SECTOR_SIZE,
                             desc_len as usize,
                         );
                     } else {
-                        // read from disk
-                        self.transfer_from_disk(
+                        self.transfer_to_disk(
                             memory,
                             desc_addr,
                             blk_sector * SECTOR_SIZE,
@@ -474,45 +422,47 @@ impl VirtioBlockDisk {
                     }
                 }
                 2 => {
-                    // Third descriptor: Result status
+                    // Status byte: 0 = VIRTIO_BLK_S_OK
                     assert!(
                         desc_flags & VIRTQ_DESC_F_WRITE != 0,
-                        "Third descriptor should be write."
+                        "VirtIO: status descriptor must be device-writable"
                     );
-                    assert!(desc_len == 1, "Third descriptor length should be one.");
+                    assert!(desc_len == 1, "VirtIO: status descriptor length must be 1");
                     if !dma_write_u8(memory, desc_addr, 0) {
-                        println!(
-                            "VirtioBlockDisk tries to write outside memory, trying to continue"
-                        );
+                        log::warn!("VirtIO: status write outside RAM — continuing");
                     }
                 }
                 _ => {}
             }
 
             desc_num += 1;
-
             if desc_flags & VIRTQ_DESC_F_NEXT == 0 {
                 break;
             }
         }
 
-        assert!(desc_num == 3, "Descript chain length should be three.");
+        assert!(
+            desc_num == 3,
+            "VirtIO: expected 3-descriptor chain, got {desc_num}"
+        );
 
-        let used_elem_addr = base_used_address
+        // Update the used ring.
+        let used_elem_addr = base_used_addr
             .wrapping_add(4)
             .wrapping_add((u64::from(self.used_ring_index) % queue_size) * 8);
         if let Some(s) = dma_slice(memory, used_elem_addr, 4) {
             s.copy_from_slice(&(desc_head_index as u32).to_le_bytes());
         } else {
-            println!("VirtioBlockDisk tries to write outside memory, trying to continue");
+            log::warn!("VirtIO: used-ring write outside RAM — continuing");
         }
 
         self.used_ring_index = self.used_ring_index.wrapping_add(1);
-        let used_idx_addr = base_used_address.wrapping_add(2);
+
+        let used_idx_addr = base_used_addr.wrapping_add(2);
         if let Some(s) = dma_slice(memory, used_idx_addr, 2) {
             s.copy_from_slice(&self.used_ring_index.to_le_bytes());
         } else {
-            println!("VirtioBlockDisk tries to write outside memory, trying to continue");
+            log::warn!("VirtIO: used-idx write outside RAM — continuing");
         }
     }
 }
@@ -549,11 +499,13 @@ impl MemoryMapped for VirtioBlockDisk {
         w.u64(self.device_features);
         w.u32(self.device_features_sel);
         w.u64(self.driver_features);
+        w.u32(self.driver_features_sel);
         w.u32(self.queue_select);
         w.u32(self.queue_size);
-        w.u32(self.queue_align);
-        w.u32(self.queue_pfn);
-        w.u32(self.guest_page_size);
+        w.bool(self.queue_ready);
+        w.u64(self.queue_desc_addr);
+        w.u64(self.queue_driver_addr);
+        w.u64(self.queue_device_addr);
         w.u32(self.queue_notify);
         w.u32(self.interrupt_status);
         w.u32(self.status);
@@ -569,11 +521,13 @@ impl MemoryMapped for VirtioBlockDisk {
         self.device_features = r.u64()?;
         self.device_features_sel = r.u32()?;
         self.driver_features = r.u64()?;
+        self.driver_features_sel = r.u32()?;
         self.queue_select = r.u32()?;
         self.queue_size = r.u32()?;
-        self.queue_align = r.u32()?;
-        self.queue_pfn = r.u32()?;
-        self.guest_page_size = r.u32()?;
+        self.queue_ready = r.bool()?;
+        self.queue_desc_addr = r.u64()?;
+        self.queue_driver_addr = r.u64()?;
+        self.queue_device_addr = r.u64()?;
         self.queue_notify = r.u32()?;
         self.interrupt_status = r.u32()?;
         self.status = r.u32()?;
