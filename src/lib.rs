@@ -17,7 +17,6 @@ pub mod serial_backend;
 pub mod speedometer;
 
 use crate::cpu::Cpu;
-use crate::device::Dtb;
 use crate::device::virtio_block_disk::VirtioBlockDisk;
 use crate::mmu::Mmu;
 use crate::serial_backend::SerialBackend;
@@ -79,11 +78,8 @@ impl Emulator {
         mmu.attach_uart(backend);
 
         #[allow(clippy::cast_possible_truncation)]
-        let dtb_size = (Mmu::DTB_END - Mmu::DTB_BASE) as usize;
-        let mut dtb_data = vec![0u8; dtb_size];
-        let dtb_content = include_bytes!("./device/dtb.dtb");
-        dtb_data[..dtb_content.len()].copy_from_slice(dtb_content);
-        mmu.add_device(Mmu::DTB_BASE..Mmu::DTB_END, Box::new(Dtb::new(dtb_data)));
+        mmu.add_memory(Mmu::DTB_BASE, (Mmu::DTB_END - Mmu::DTB_BASE) as usize);
+        mmu.write_memory_at(Mmu::DTB_BASE, include_bytes!("./device/dtb.dtb"));
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
             Box::new(VirtioBlockDisk::new(Vec::new(), Mmu::VIRTIO_IRQ)),
@@ -198,19 +194,13 @@ impl Emulator {
 
         self.uop_cache.clear();
         self.cpu
-            .read_state(&state, |name, range| {
-                use crate::device::Dtb;
+            .read_state(&state, |name, _range| {
                 use crate::device::uart::Uart;
                 use crate::device::virtio_block_disk::VirtioBlockDisk;
                 match name {
                     "NS16550A" => uart_backend
                         .take()
                         .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
-                    #[allow(clippy::cast_possible_truncation)]
-                    "DTB" => Some(
-                        Box::new(Dtb::new(vec![0u8; (range.end - range.start) as usize]))
-                            as Box<dyn crate::device::MemoryMapped>,
-                    ),
                     "VirtIO Block" => Some(Box::new(VirtioBlockDisk::new(Vec::new(), 1))
                         as Box<dyn crate::device::MemoryMapped>),
                     _ => None,
@@ -460,13 +450,9 @@ impl Emulator {
     /// # Arguments
     /// * `content` DTB content binary
     pub fn setup_dtb(&mut self, content: &[u8]) {
-        #[allow(clippy::cast_possible_truncation)]
-        let dtb_size = (Mmu::DTB_END - Mmu::DTB_BASE) as usize;
-        let mut dtb = Dtb::new(vec![0u8; dtb_size]);
-        dtb.load(content);
         self.cpu
             .get_mut_mmu()
-            .replace_device(Mmu::DTB_BASE..Mmu::DTB_END, Box::new(dtb));
+            .write_memory_at(Mmu::DTB_BASE, content);
     }
 
     /// Enables or disables page cache optimization.

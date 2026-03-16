@@ -274,76 +274,6 @@ pub fn dma_write_u8(memory: &mut [(Range<u64>, Vec<u8>)], pa: u64, value: u8) ->
 }
 
 // ---------------------------------------------------------------------------
-// DTB — read-only device-tree blob
-// ---------------------------------------------------------------------------
-
-pub struct Dtb {
-    data: Vec<u8>,
-}
-
-impl Dtb {
-    /// Create a DTB device with the given blob content.
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(data: Vec<u8>) -> Self { Self { data } }
-
-    /// Overwrite the blob (zero-pads the remainder).
-    pub fn load(&mut self, src: &[u8]) {
-        let len = src.len().min(self.data.len());
-        self.data[..len].copy_from_slice(&src[..len]);
-        self.data[len..].fill(0);
-    }
-
-    /// Read `size` bytes at `offset` from the DTB blob.
-    pub fn read(&self, offset: u64, size: u64, data: &mut [u8]) {
-        let start = offset as usize;
-        data[..size as usize].copy_from_slice(&self.data[start..start + size as usize]);
-    }
-}
-
-impl MemoryMapped for Dtb {
-    fn read(
-        &mut self,
-        _ctx: &mut Context,
-        _base: u64,
-        offset: usize,
-        size: usize,
-        data: &mut [u8],
-    ) {
-        data[..size].copy_from_slice(&self.data[offset..offset + size]);
-    }
-
-    fn write(
-        &mut self,
-        _ctx: &mut Context,
-        _base: u64,
-        _offset: usize,
-        _size: usize,
-        _data: &[u8],
-    ) {
-        log::warn!("DTB is read-only, write ignored");
-    }
-
-    fn service(&mut self, _ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {
-        // No-op: DTB does not need periodic service
-    }
-
-    fn save_state(&self, w: &mut Pack) { w.raw(&self.data); }
-
-    fn restore_state(&mut self, r: &mut Unpack) -> Result<(), ()> {
-        let len = self.data.len();
-        self.data.copy_from_slice(r.raw(len)?);
-        Ok(())
-    }
-
-    fn info(&self) -> MemoryMappedInfo {
-        MemoryMappedInfo {
-            name: "DTB".to_string(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -490,30 +420,5 @@ mod tests {
         assert_eq!(disk.queue_device_addr, disk2.queue_device_addr);
         assert_eq!(disk.queue_ready, disk2.queue_ready);
         assert_eq!(disk.contents, disk2.contents);
-    }
-
-    #[test]
-    fn dtb_round_trip() {
-        let mut content = vec![0u8; 64];
-        content[0..4].copy_from_slice(b"\xd0\x0d\xfe\xed"); // FDT magic
-        content[8] = 0x42;
-        let dtb = Dtb::new(content.clone());
-
-        let mut buf = Vec::new();
-        {
-            let mut w = Pack::new(&mut buf);
-            dtb.save_state(&mut w);
-        }
-        let mut dtb2 = Dtb::new(vec![0u8; 64]);
-        {
-            let mut r = Unpack::new(&buf);
-            dtb2.restore_state(&mut r).unwrap();
-        }
-
-        let mut read_buf1 = [0u8; 4];
-        let mut read_buf2 = [0u8; 4];
-        dtb.read(0, 4, &mut read_buf1);
-        dtb2.read(0, 4, &mut read_buf2);
-        assert_eq!(read_buf1, read_buf2);
     }
 }

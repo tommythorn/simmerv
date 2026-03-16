@@ -245,7 +245,7 @@ impl Cpu {
             speedometer_flag: Arc::new(AtomicBool::new(false)),
         };
         cpu.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
-        cpu.write_x(x(11), 0x1020); // start of DTB (XXX could put that elsewhere);
+        cpu.write_x(x(11), Mmu::DTB_BASE); // start of DTB
         cpu
     }
 

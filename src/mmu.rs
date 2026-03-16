@@ -58,7 +58,7 @@ pub struct Mmu {
     /// PLIC — always present, receives asserted IRQs after each service round.
     plic: (Range<u64>, Plic),
 
-    /// All memory-mapped I/O devices (DTB, `VirtIO`, UART, …).
+    /// All memory-mapped I/O devices (`VirtIO`, UART, …).
     devices: Vec<(Range<u64>, Box<dyn MemoryMapped>)>,
 
     /// Min-heap event queue: `(next_cycle, device_index)` pairs.
@@ -87,14 +87,14 @@ impl Mmu {
     pub const CLINT_END: u64 = 0x0201_0000;
     pub const PLIC_BASE: u64 = 0x0c00_0000;
     pub const PLIC_END: u64 = 0x1000_0000;
-    pub const DTB_BASE: u64 = 0x0000_1020;
-    pub const DTB_END: u64 = 0x0000_2000;
+    pub const DTB_BASE: u64 = 0x1_0000_0000;
+    pub const DTB_END: u64 = 0x1_0004_0000; // 256 KiB
     pub const VIRTIO_BASE: u64 = 0x1000_1000;
     pub const VIRTIO_END: u64 = 0x1000_2000;
     pub const VIRTIO_IRQ: u32 = 1;
 
-    /// Creates a new `Mmu` with CLINT and PLIC; no RAM, DTB, or `VirtIO`.
-    /// Call `add_memory`, `add_device` (for DTB/VirtIO), and `attach_uart`
+    /// Creates a new `Mmu` with CLINT and PLIC; no RAM or `VirtIO`.
+    /// Call `add_memory` and `add_device` (for `VirtIO`), and `attach_uart`
     /// before use.
     #[must_use]
     pub fn new() -> Self {
@@ -120,6 +120,20 @@ impl Mmu {
     pub fn add_memory(&mut self, base: u64, size: usize) {
         self.memory
             .push((base..base + size as u64, vec![0u8; size]));
+    }
+
+    /// Writes `data` into the memory region containing `addr`.
+    /// Silently truncates if `data` extends past the region end.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn write_memory_at(&mut self, addr: u64, data: &[u8]) {
+        for (range, mem) in &mut self.memory {
+            if addr >= range.start && addr < range.end {
+                let offset = (addr - range.start) as usize;
+                let len = data.len().min(mem.len() - offset);
+                mem[offset..offset + len].copy_from_slice(&data[..len]);
+                return;
+            }
+        }
     }
 
     /// Attaches a pluggable memory-mapped device at the given address range and
