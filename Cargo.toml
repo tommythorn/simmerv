@@ -42,6 +42,9 @@ anyhow = "1.0.98"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libc = "0.2"
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies.cargo-husky]
 version = "1"
 default-features = false # Disable features which are enabled by default

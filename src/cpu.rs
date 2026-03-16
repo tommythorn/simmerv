@@ -341,7 +341,7 @@ impl Cpu {
         }
 
         if self.flush_icache {
-            log::debug!("uop cache flush");
+            log::trace!("uop cache flush");
             uop_cache.clear();
             self.flush_icache = false;
         }

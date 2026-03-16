@@ -92,6 +92,9 @@ impl Mmu {
     pub const VIRTIO_BASE: u64 = 0x1000_1000;
     pub const VIRTIO_END: u64 = 0x1000_2000;
     pub const VIRTIO_IRQ: u32 = 1;
+    pub const NET_BASE: u64 = 0x1000_2000;
+    pub const NET_END: u64 = 0x1000_3000;
+    pub const NET_IRQ: u32 = 2;
 
     /// Creates a new `Mmu` with CLINT and PLIC; no RAM or `VirtIO`.
     /// Call `add_memory` and `add_device` (for `VirtIO`), and `attach_uart`
@@ -974,6 +977,13 @@ impl Mmu {
 
         self.clear_page_cache();
         Ok(())
+    }
+
+    /// Extracts the network backend from whichever device owns it.
+    pub fn take_net_backend(&mut self) -> Option<Box<dyn crate::network_backend::NetworkBackend>> {
+        self.devices
+            .iter_mut()
+            .find_map(|(_, dev)| dev.take_net_backend())
     }
 
     /// Extracts the serial backend from whichever device owns it.

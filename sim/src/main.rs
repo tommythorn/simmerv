@@ -54,6 +54,14 @@ struct Args {
     #[argh(option, short = 'w')]
     write_snapshot: Option<String>,
 
+    /// TAP interface name for networking (Linux only)
+    #[argh(option, short = 'T')]
+    tap: Option<String>,
+
+    /// enable vmnet shared (NAT) networking (macOS only, requires root)
+    #[argh(switch)]
+    vmnet: bool,
+
     /// take periodic snapshots: format "N:base_name" where N is tick interval
     #[argh(option, short = 'S')]
     snapshot_interval: Option<String>,
@@ -126,6 +134,32 @@ fn main() -> anyhow::Result<()> {
     emulator.exit_flag = Arc::clone(&exit_flag);
     emulator.verbose = Arc::clone(&verbose_flag);
     emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
+
+    if let Some(ref iface) = args.tap {
+        #[cfg(target_os = "linux")]
+        {
+            use simmerv::network_backend::TapBackend;
+            emulator.setup_network(Box::new(
+                TapBackend::open(iface).with_context(|| format!("opening TAP {iface}"))?,
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = iface;
+            bail!("--tap is only supported on Linux");
+        }
+    }
+
+    if args.vmnet {
+        #[cfg(target_os = "macos")]
+        {
+            use simmerv::network_backend::VmnetBackend;
+            emulator.setup_network(Box::new(VmnetBackend::open()?));
+        }
+        #[cfg(not(target_os = "macos"))]
+        bail!("--vmnet is only supported on macOS");
+    }
+
     let mut img_contents = vec![];
     let mut load_addr = None;
     let mut emu_start = None;

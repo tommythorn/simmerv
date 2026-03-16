@@ -1,5 +1,6 @@
 #![allow(unused_variables, dead_code, clippy::cast_possible_truncation)]
 
+use crate::network_backend::NetworkBackend;
 use crate::serial_backend::SerialBackend;
 use std::ops::Range;
 
@@ -7,6 +8,7 @@ pub mod clint;
 pub mod plic;
 pub mod uart;
 pub mod virtio_block_disk;
+pub mod virtio_net;
 
 // ---------------------------------------------------------------------------
 // Serialization helpers: Pack (write) and Unpack (read)
@@ -91,6 +93,9 @@ pub trait MemoryMapped {
 
     /// Extract and return the device's serial backend, leaving it unconnected.
     fn take_backend(&mut self) -> Option<Box<dyn SerialBackend>> { None }
+
+    /// Extract and return the device's network backend, leaving it unconnected.
+    fn take_net_backend(&mut self) -> Option<Box<dyn NetworkBackend>> { None }
 
     /// Serialize device-specific state into `w`.
     fn save_state(&self, w: &mut Pack);

@@ -9,6 +9,7 @@ pub mod fp;
 pub mod generated_riscv_decoder;
 pub mod mmu;
 pub mod native_fp;
+pub mod network_backend;
 pub mod new_decoder;
 pub mod riscv;
 pub mod riscv_decoding;
@@ -18,7 +19,10 @@ pub mod speedometer;
 
 use crate::cpu::Cpu;
 use crate::device::virtio_block_disk::VirtioBlockDisk;
+use crate::device::virtio_net::VirtioNet;
 use crate::mmu::Mmu;
+use crate::network_backend::DummyNetworkBackend;
+use crate::network_backend::NetworkBackend;
 use crate::serial_backend::SerialBackend;
 use anyhow::anyhow;
 use anyhow::bail;
@@ -83,6 +87,10 @@ impl Emulator {
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
             Box::new(VirtioBlockDisk::new(Vec::new(), Mmu::VIRTIO_IRQ)),
+        );
+        mmu.add_device(
+            Mmu::NET_BASE..Mmu::NET_END,
+            Box::new(VirtioNet::new(Box::new(DummyNetworkBackend), Mmu::NET_IRQ)),
         );
         Self {
             cpu: Cpu::new(mmu),
@@ -188,9 +196,10 @@ impl Emulator {
         brotli::BrotliDecompress(&mut &data[9..], &mut state)
             .map_err(|e| anyhow!("brotli decompress: {e}"))?;
 
-        // Reclaim the serial backend before clearing the device list so we can
-        // hand it to the freshly-constructed UART during restore.
+        // Reclaim backends before clearing the device list so we can hand them
+        // to the freshly-constructed devices during restore.
         let mut uart_backend = self.cpu.mmu.take_uart_backend();
+        let mut net_backend = self.cpu.mmu.take_net_backend();
 
         self.uop_cache.clear();
         self.cpu
@@ -203,6 +212,13 @@ impl Emulator {
                         .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
                     "VirtIO Block" => Some(Box::new(VirtioBlockDisk::new(Vec::new(), 1))
                         as Box<dyn crate::device::MemoryMapped>),
+                    "VirtIO Net" => {
+                        let backend = net_backend
+                            .take()
+                            .unwrap_or_else(|| Box::new(DummyNetworkBackend));
+                        Some(Box::new(VirtioNet::new(backend, Mmu::NET_IRQ))
+                            as Box<dyn crate::device::MemoryMapped>)
+                    }
                     _ => None,
                 }
             })
@@ -440,6 +456,15 @@ impl Emulator {
         self.cpu.get_mut_mmu().replace_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
             Box::new(VirtioBlockDisk::new(content, Mmu::VIRTIO_IRQ)),
+        );
+    }
+
+    /// Replaces the network backend.  Call after `new()` to attach a TAP
+    /// interface or other backend.
+    pub fn setup_network(&mut self, backend: Box<dyn NetworkBackend>) {
+        self.cpu.get_mut_mmu().replace_device(
+            Mmu::NET_BASE..Mmu::NET_END,
+            Box::new(VirtioNet::new(backend, Mmu::NET_IRQ)),
         );
     }
 
