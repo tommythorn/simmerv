@@ -685,6 +685,9 @@ impl Cpu {
         }
 
         self.write_csr_raw(csr, value);
+        if matches!(csr, Csr::Sstatus | Csr::Sie | Csr::Mstatus | Csr::Mie) {
+            self.handle_interrupt();
+        }
         Ok(())
     }
 
@@ -1909,6 +1912,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
+            cpu.handle_interrupt();
             Ok((0, 0))
         }
         Op::Sret => {
@@ -1934,6 +1938,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
+            cpu.handle_interrupt();
             Ok((0, 0))
         }
         Op::SfenceVma => {

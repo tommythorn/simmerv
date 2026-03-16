@@ -116,7 +116,7 @@ impl Emulator {
     /// Runs program set by `load_image()`. The emulator will run forever.
     pub fn run_program(&mut self) {
         loop {
-            self.tick(6);
+            self.tick(600); // 600 is an arbitrary number
             if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
                 break;
             }
