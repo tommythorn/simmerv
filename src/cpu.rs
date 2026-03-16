@@ -22,6 +22,7 @@ use crate::new_decoder::ZEROREG;
 use crate::new_decoder::x;
 use crate::riscv;
 use crate::serial_backend::SerialBackend;
+use crate::speedometer::Speedometer;
 pub use csr::*;
 use fp::RoundingMode;
 use fp::Sf;
@@ -42,6 +43,9 @@ use riscv::PrivMode;
 use riscv::Trap;
 use riscv::priv_mode_from;
 use std::fmt::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Exception {
@@ -194,6 +198,9 @@ pub struct Cpu {
 
     // HACK to allow instructions to communicate this to the fetch engine
     pub flush_icache: bool,
+
+    pub speedometer: Speedometer,
+    pub speedometer_flag: Arc<AtomicBool>,
 }
 
 pub const CONFIG_SW_MANAGED_A_AND_D: bool = false;
@@ -234,6 +241,8 @@ impl Cpu {
             mmu,
             reservation: None,
             flush_icache: false,
+            speedometer: Speedometer::new(),
+            speedometer_flag: Arc::new(AtomicBool::new(false)),
         };
         cpu.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
         cpu.write_x(x(11), 0x1020); // start of DTB (XXX could put that elsewhere);
@@ -296,6 +305,13 @@ impl Cpu {
     /// cycle so far.
     #[allow(clippy::cast_sign_loss)]
     pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut IntMap<u64, Uop>) -> bool {
+        if self.speedometer_flag.load(Ordering::Relaxed)
+            && self.speedometer.last_time.elapsed().as_secs() >= 1
+        {
+            // XXX Using cycle as instret is misleading in the presence of wfi
+            let _ = self.speedometer.update(self.cycle);
+        }
+
         for _ in 0..cpu_steps {
             let insn_addr = self.pc;
             if let Err(exc) = self.step_cpu(uop_cache) {

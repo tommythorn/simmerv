@@ -11,6 +11,7 @@ pub struct NonblockNoEcho {
     reader: Stdin,
     exit_flag: Arc<AtomicBool>,
     verbose_flag: Arc<AtomicBool>,
+    speedometer_flag: Arc<AtomicBool>,
 }
 
 impl NonblockNoEcho {
@@ -19,6 +20,7 @@ impl NonblockNoEcho {
         ctrlc_breaks: bool,
         exit_flag: Arc<AtomicBool>,
         verbose_flag: Arc<AtomicBool>,
+        speedometer_flag: Arc<AtomicBool>,
     ) -> Self {
         use std::os::unix::io::AsRawFd;
         use termios::ECHO;
@@ -67,6 +69,7 @@ impl NonblockNoEcho {
             reader: io::stdin(),
             exit_flag,
             verbose_flag,
+            speedometer_flag,
         }
     }
 
@@ -79,8 +82,9 @@ impl NonblockNoEcho {
 
         if got == 3 {
             let verbose = self.verbose_flag.load(Ordering::Relaxed);
+            let speedometer = self.speedometer_flag.load(Ordering::Relaxed);
             eprintln!(
-                "[[v - Verbose({verbose}), x - eXit, t - tracing ON, p - panic, else, pass on to guest]]"
+                "[[v - Verbose({verbose}), s - Speedometer({speedometer}), x - eXit, t - tracing ON, p - panic, else, pass on to guest]]"
             );
             // XXX Should turn on blocking
             loop {
@@ -98,6 +102,10 @@ impl NonblockNoEcho {
                     'v' => {
                         let was = self.verbose_flag.fetch_xor(true, Ordering::Relaxed);
                         eprintln!("Verbose {}", if was { "OFF" } else { "ON" });
+                    }
+                    's' => {
+                        let was = self.speedometer_flag.fetch_xor(true, Ordering::Relaxed);
+                        eprintln!("Speedometer {}", if was { "OFF" } else { "ON" });
                     }
                     'x' => {
                         self.exit_flag.store(true, Ordering::Relaxed);

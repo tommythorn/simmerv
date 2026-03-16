@@ -14,6 +14,7 @@ pub mod riscv;
 pub mod riscv_decoding;
 pub mod riscv_insns;
 pub mod serial_backend;
+pub mod speedometer;
 
 use crate::cpu::Cpu;
 use crate::device::Dtb;

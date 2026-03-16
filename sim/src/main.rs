@@ -75,11 +75,15 @@ fn get_terminal(
     ctrlc_breaks: bool,
     exit_flag: Arc<AtomicBool>,
     verbose_flag: Arc<AtomicBool>,
+    speedometer_flag: Arc<AtomicBool>,
 ) -> Box<dyn SerialBackend> {
     match terminal_type {
-        TerminalType::PopupTerminal => {
-            Box::new(PopupTerminal::new(ctrlc_breaks, exit_flag, verbose_flag))
-        }
+        TerminalType::PopupTerminal => Box::new(PopupTerminal::new(
+            ctrlc_breaks,
+            exit_flag,
+            verbose_flag,
+            speedometer_flag,
+        )),
         TerminalType::DummyTerminal => Box::new(DummyTerminal::new()),
     }
 }
@@ -106,6 +110,7 @@ fn main() -> anyhow::Result<()> {
     };
     let exit_flag = Arc::new(AtomicBool::new(false));
     let verbose_flag = Arc::new(AtomicBool::new(false));
+    let speedometer_flag = Arc::new(AtomicBool::new(false));
     let mut symbols = BTreeMap::new();
     let memory_megs = args.memory_megs.unwrap_or(2048);
     let mut emulator = Emulator::new(
@@ -114,11 +119,13 @@ fn main() -> anyhow::Result<()> {
             args.ctrlc_breaks,
             Arc::clone(&exit_flag),
             Arc::clone(&verbose_flag),
+            Arc::clone(&speedometer_flag),
         ),
         memory_megs * 1024 * 1024,
     );
     emulator.exit_flag = Arc::clone(&exit_flag);
     emulator.verbose = Arc::clone(&verbose_flag);
+    emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
     let mut img_contents = vec![];
     let mut load_addr = None;
     let mut emu_start = None;
