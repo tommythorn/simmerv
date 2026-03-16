@@ -23,8 +23,10 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 ## Features
 
 - Emulates RISC-V `RV64GC_Zba_Zicond` processor and peripheral devices
-  (PLIC, CLINT, virtio block device and a UART)
+  (CLINT, PLIC, NS16550A UART, and virtio block device)
 - Targets native and WASM
+- Snapshots
+- Speedometer
 
 ## Instructions/Features support status
 
@@ -45,22 +47,8 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 The emulator supports all instructions listed above but some (like
 many FP instructions) are not 100% to the spec.
 
-- Boots Buildroot and Debian Trixie
+- Boots Buildroot, Debian Trixie, Ubuntu
 - Linux OpenSBI and legacy BBL boot support
-
-### Current Issues Being Worked
-
-- Newer Linux kernel have issues with VirtIO block devices (initramfs works)
-- U-boot loads but hangs before hand-off; might be an issue with ELF loading
-
-### High Priority Work Post Issues
-
-- Snapshot and resume
-
-- Disk support without an in-memory copy (can WASM support this?)
-
-- Improve the disassembler to recognize pseudo ops like li, mv, ret,
-  etc. (This requires a structural change).
 
 ## How to run Linux with VirtIO Block Device (/dev/vda)
 

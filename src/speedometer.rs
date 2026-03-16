@@ -11,6 +11,7 @@ const TIOCGWINSZ: libc::c_ulong = 0x40087468;
 const TIOCGWINSZ: libc::c_ulong = 0x5413;
 
 /// Speedometer for tracking and displaying event rates
+#[allow(dead_code)]
 pub struct Speedometer {
     pub last_time: Instant,
     last_count: u64,
