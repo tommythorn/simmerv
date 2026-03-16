@@ -296,11 +296,6 @@ impl Cpu {
     /// cycle so far.
     #[allow(clippy::cast_sign_loss)]
     pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut IntMap<u64, Uop>) -> bool {
-        log::info!(
-            "struct Uop is {} bytes, with alignment {}",
-            size_of::<Uop>(),
-            align_of::<Uop>()
-        );
         for _ in 0..cpu_steps {
             let insn_addr = self.pc;
             if let Err(exc) = self.step_cpu(uop_cache) {

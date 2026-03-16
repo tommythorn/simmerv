@@ -44,9 +44,8 @@ impl Plic {
         }
     }
 
-    /// Tick: set IPs for the given asserted IRQs and run `update_irq` if
-    /// needed.
-    pub fn tick(&mut self, asserted_irqs: &[u32], mip: &mut u64) {
+    /// Set IPs for the given asserted IRQs and run `update_irq` if needed.
+    pub fn process_irqs(&mut self, asserted_irqs: &[u32], mip: &mut u64) {
         for &irq in asserted_irqs {
             if irq > 0 && irq < 64 {
                 self.set_ip(irq);
@@ -137,8 +136,6 @@ impl MemoryMapped for Plic {
     }
 
     fn service(&mut self, _ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {}
-
-    fn process_irqs(&mut self, irqs: &[u32], mip: &mut u64) { self.tick(irqs, mip); }
 
     fn save_state(&self, w: &mut Pack) {
         w.u32(self.irq);

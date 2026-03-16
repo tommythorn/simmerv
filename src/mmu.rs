@@ -55,7 +55,10 @@ pub struct Mmu {
     /// CLINT — always present, serviced every cycle outside the device queue.
     clint: (Range<u64>, Clint),
 
-    /// All memory-mapped I/O devices (PLIC, DTB, `VirtIO`, UART, …).
+    /// PLIC — always present, receives asserted IRQs after each service round.
+    plic: (Range<u64>, Plic),
+
+    /// All memory-mapped I/O devices (DTB, `VirtIO`, UART, …).
     devices: Vec<(Range<u64>, Box<dyn MemoryMapped>)>,
 
     /// Min-heap event queue: `(next_cycle, device_index)` pairs.
@@ -82,6 +85,8 @@ impl Default for Mmu {
 impl Mmu {
     pub const CLINT_BASE: u64 = 0x0200_0000;
     pub const CLINT_END: u64 = 0x0201_0000;
+    pub const PLIC_BASE: u64 = 0x0c00_0000;
+    pub const PLIC_END: u64 = 0x1000_0000;
     pub const DTB_BASE: u64 = 0x0000_1020;
     pub const DTB_END: u64 = 0x0000_2000;
     pub const VIRTIO_BASE: u64 = 0x1000_1000;
@@ -93,16 +98,14 @@ impl Mmu {
     /// before use.
     #[must_use]
     pub fn new() -> Self {
-        const PLIC_BASE: u64 = 0x0c00_0000;
-        const PLIC_END: u64 = 0x1000_0000;
-
-        let mut mmu = Self {
+        Self {
             prv: PrivMode::M,
             mstatus: 0,
             mip: 0,
             satp: 0,
             memory: Vec::new(),
             clint: (Self::CLINT_BASE..Self::CLINT_END, Clint::new()),
+            plic: (Self::PLIC_BASE..Self::PLIC_END, Plic::new()),
             devices: Vec::new(),
             service_queue: BinaryHeap::new(),
             cycle: 0,
@@ -110,10 +113,7 @@ impl Mmu {
             fetch_page_cache: FnvHashMap::default(),
             load_page_cache: FnvHashMap::default(),
             store_page_cache: FnvHashMap::default(),
-        };
-
-        mmu.add_device(PLIC_BASE..PLIC_END, Box::new(Plic::new()));
-        mmu
+        }
     }
 
     /// Appends a zeroed RAM region covering `base..base+size`.
@@ -203,10 +203,7 @@ impl Mmu {
             }
         }
 
-        // PLIC runs after all other devices via process_irqs
-        for (_, dev) in &mut self.devices {
-            dev.process_irqs(&all_irqs, &mut self.mip);
-        }
+        self.plic.1.process_irqs(&all_irqs, &mut self.mip);
     }
 
     /// Updates privilege mode
@@ -385,7 +382,11 @@ impl Mmu {
     ///
     /// # Errors
     /// Returns `Err(())` if no device covers `pa`.
-    #[allow(clippy::result_unit_err, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::result_unit_err,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
     fn load_mmio(&mut self, pa: u64, size: u64) -> Result<u64, ()> {
         // RAM fast path
         for (range, mem) in &self.memory {
@@ -427,6 +428,36 @@ impl Mmu {
                 cycle: self.cycle,
             };
             self.clint.1.read(
+                &mut ctx,
+                base,
+                offset,
+                size as usize,
+                &mut buf[..size as usize],
+            );
+            self.mip = ctx.mip;
+            return Ok(u64::from_le_bytes(buf));
+        }
+        // PLIC (named field, not in devices vec)
+        if self.plic.0.contains(&pa) {
+            let end = pa + size;
+            if end > self.plic.0.end {
+                let mut val = 0u64;
+                for j in 0..size {
+                    let b = u64::from(self.load_mmio_u8(pa + j)?);
+                    val |= b << (j * 8);
+                }
+                return Ok(val);
+            }
+            let base = self.plic.0.start;
+            let offset = (pa - base) as usize;
+            let mut buf = [0u8; 8];
+            let mut ctx = Context {
+                mip: self.mip,
+                asserted_irq: None,
+                next_service_in: None,
+                cycle: self.cycle,
+            };
+            self.plic.1.read(
                 &mut ctx,
                 base,
                 offset,
@@ -538,6 +569,30 @@ impl Mmu {
                 cycle: self.cycle,
             };
             self.clint
+                .1
+                .write(&mut ctx, base, offset, size as usize, &buf[..size as usize]);
+            self.mip = ctx.mip;
+            return Ok(());
+        }
+        // PLIC (named field, not in devices vec)
+        if self.plic.0.contains(&pa) {
+            let end = pa + size;
+            if end > self.plic.0.end {
+                for j in 0..size {
+                    self.store_mmio_u8(pa + j, ((value >> (j * 8)) & 0xff) as u8)?;
+                }
+                return Ok(());
+            }
+            let base = self.plic.0.start;
+            let offset = (pa - base) as usize;
+            let buf = value.to_le_bytes();
+            let mut ctx = Context {
+                mip: self.mip,
+                asserted_irq: None,
+                next_service_in: None,
+                cycle: self.cycle,
+            };
+            self.plic
                 .1
                 .write(&mut ctx, base, offset, size as usize, &buf[..size as usize]);
             self.mip = ctx.mip;
@@ -790,13 +845,14 @@ impl Mmu {
             w.u64(range.end);
             w.bytes(mem);
         }
-        // Save CLINT separately (always first, not counted in device_count)
+        // Save CLINT and PLIC separately (not counted in device_count)
         self.clint.1.save(self.clint.0.start, self.clint.0.end, out);
+        self.plic.1.save(self.plic.0.start, self.plic.0.end, out);
         {
             let mut w = Pack::new(out);
             w.u64(self.devices.len() as u64);
         }
-        // Save remaining devices (PLIC, DTB, VirtIO, UART, …)
+        // Save remaining devices (DTB, VirtIO, UART, …)
         for (range, device) in &self.devices {
             device.save(range.start, range.end, out);
         }
@@ -843,7 +899,7 @@ impl Mmu {
             self.memory.push((base..end, bytes));
         }
 
-        // Restore CLINT (always the leading device record, not counted in device_count)
+        // Restore CLINT (leading record, not counted in device_count)
         {
             let name_raw = r.raw(32)?;
             let _base = r.u64()?;
@@ -856,6 +912,21 @@ impl Mmu {
                 return Err(());
             }
             self.clint.1.restore_state(&mut Unpack::new(state))?;
+        }
+
+        // Restore PLIC (second leading record, not counted in device_count)
+        {
+            let name_raw = r.raw(32)?;
+            let _base = r.u64()?;
+            let _end = r.u64()?;
+            let state_size = r.u64()? as usize;
+            let state = r.raw(state_size)?;
+            let name_len = name_raw.iter().position(|&b| b == 0).unwrap_or(32);
+            let name = std::str::from_utf8(&name_raw[..name_len]).map_err(|_| ())?;
+            if name != "SiFive PLIC" {
+                return Err(());
+            }
+            self.plic.1.restore_state(&mut Unpack::new(state))?;
         }
 
         // Restore remaining devices

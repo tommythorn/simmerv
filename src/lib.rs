@@ -199,16 +199,12 @@ impl Emulator {
         self.cpu
             .read_state(&state, |name, range| {
                 use crate::device::Dtb;
-                use crate::device::plic::Plic;
                 use crate::device::uart::Uart;
                 use crate::device::virtio_block_disk::VirtioBlockDisk;
                 match name {
                     "NS16550A" => uart_backend
                         .take()
                         .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
-                    "SiFive PLIC" => {
-                        Some(Box::new(Plic::new()) as Box<dyn crate::device::MemoryMapped>)
-                    }
                     #[allow(clippy::cast_possible_truncation)]
                     "DTB" => Some(
                         Box::new(Dtb::new(vec![0u8; (range.end - range.start) as usize]))

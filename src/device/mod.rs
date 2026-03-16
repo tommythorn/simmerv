@@ -173,9 +173,6 @@ pub trait MemoryMapped {
     /// asserts an interrupt.
     fn service(&mut self, ctx: &mut Context, memory: &mut [(Range<u64>, Vec<u8>)]);
 
-    /// Process asserted IRQs (e.g. PLIC calls tick).
-    fn process_irqs(&mut self, _irqs: &[u32], _mip: &mut u64) {}
-
     fn info(&self) -> MemoryMappedInfo;
 }
 
