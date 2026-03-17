@@ -86,7 +86,7 @@ impl Emulator {
         mmu.write_memory_at(Mmu::DTB_BASE, include_bytes!("./device/dtb.dtb"));
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
-            Box::new(VirtioBlockDisk::new(Vec::new(), Mmu::VIRTIO_IRQ)),
+            Box::new(VirtioBlockDisk::new(Mmu::VIRTIO_IRQ)),
         );
         mmu.add_device(
             Mmu::NET_BASE..Mmu::NET_END,
@@ -210,8 +210,10 @@ impl Emulator {
                     "NS16550A" => uart_backend
                         .take()
                         .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
-                    "VirtIO Block" => Some(Box::new(VirtioBlockDisk::new(Vec::new(), 1))
-                        as Box<dyn crate::device::MemoryMapped>),
+                    "VirtIO Block" => {
+                        Some(Box::new(VirtioBlockDisk::new(1))
+                            as Box<dyn crate::device::MemoryMapped>)
+                    }
                     "VirtIO Net" => {
                         let backend = net_backend
                             .take()
@@ -455,7 +457,20 @@ impl Emulator {
     pub fn setup_filesystem(&mut self, content: Vec<u8>) {
         self.cpu.get_mut_mmu().replace_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
-            Box::new(VirtioBlockDisk::new(content, Mmu::VIRTIO_IRQ)),
+            Box::new(VirtioBlockDisk::new_with_contents(content, Mmu::VIRTIO_IRQ)),
+        );
+    }
+
+    /// Attaches a file-backed block device.  Reads and writes go directly to
+    /// `file`; the image is never copied into the emulator's heap.
+    ///
+    /// Prefer this over `setup_filesystem` on native builds.  The file must
+    /// be opened with both read and write access.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn setup_filesystem_file(&mut self, file: std::fs::File) {
+        self.cpu.get_mut_mmu().replace_device(
+            Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
+            Box::new(VirtioBlockDisk::new_with_file(file, Mmu::VIRTIO_IRQ)),
         );
     }
 

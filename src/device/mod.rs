@@ -355,10 +355,11 @@ mod tests {
 
     #[test]
     fn virtio_round_trip() {
-        let mut disk = virtio_block_disk::VirtioBlockDisk::new(Vec::new(), 1);
-        disk.init(vec![0xABu8; 1024]);
-        // Simulate driver setup: set STATUS = DRIVER_OK (0x04), queue addresses.
-        disk.store(0x070, 0x0f); // STATUS = ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK
+        let base = 0x1000_1000u64;
+        let end = 0x1000_2000u64;
+        let mut disk = virtio_block_disk::VirtioBlockDisk::new_with_contents(vec![0xABu8; 1024], 1);
+        // Simulate driver setup: STATUS = ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK
+        disk.store(0x070, 0x0f);
         disk.store(0x080, 0x00); // QueueDescLow  = 0x8000_1000
         disk.store(0x081, 0x10);
         disk.store(0x082, 0x00);
@@ -372,58 +373,8 @@ mod tests {
         disk.store(0x0a2, 0x00);
         disk.store(0x0a3, 0x80);
         disk.store(0x044, 1); // QueueReady = 1
-
-        let mut buf = Vec::new();
-        {
-            let mut w = Pack::new(&mut buf);
-            w.u16(disk.used_ring_index);
-            w.u64(disk.device_features);
-            w.u32(disk.device_features_sel);
-            w.u64(disk.driver_features);
-            w.u32(disk.driver_features_sel);
-            w.u32(disk.queue_select);
-            w.u32(disk.queue_size);
-            w.bool(disk.queue_ready);
-            w.u64(disk.queue_desc_addr);
-            w.u64(disk.queue_driver_addr);
-            w.u64(disk.queue_device_addr);
-            w.u32(disk.queue_notify);
-            w.u32(disk.interrupt_status);
-            w.u32(disk.status);
-            w.u32(disk.block_size);
-            w.bool(disk.writeback);
-            w.bytes(&disk.contents);
-            w.u32(disk.pending_requests);
-            w.u32(disk.irq);
-        }
-        let mut disk2 = virtio_block_disk::VirtioBlockDisk::new(Vec::new(), 1);
-        {
-            let mut r = Unpack::new(&buf);
-            disk2.used_ring_index = r.u16().unwrap();
-            disk2.device_features = r.u64().unwrap();
-            disk2.device_features_sel = r.u32().unwrap();
-            disk2.driver_features = r.u64().unwrap();
-            disk2.driver_features_sel = r.u32().unwrap();
-            disk2.queue_select = r.u32().unwrap();
-            disk2.queue_size = r.u32().unwrap();
-            disk2.queue_ready = r.bool().unwrap();
-            disk2.queue_desc_addr = r.u64().unwrap();
-            disk2.queue_driver_addr = r.u64().unwrap();
-            disk2.queue_device_addr = r.u64().unwrap();
-            disk2.queue_notify = r.u32().unwrap();
-            disk2.interrupt_status = r.u32().unwrap();
-            disk2.status = r.u32().unwrap();
-            disk2.block_size = r.u32().unwrap();
-            disk2.writeback = r.bool().unwrap();
-            disk2.contents = r.bytes().unwrap();
-            disk2.pending_requests = r.u32().unwrap();
-            disk2.irq = r.u32().unwrap();
-        }
-        assert_eq!(disk.status, disk2.status);
-        assert_eq!(disk.queue_desc_addr, disk2.queue_desc_addr);
-        assert_eq!(disk.queue_driver_addr, disk2.queue_driver_addr);
-        assert_eq!(disk.queue_device_addr, disk2.queue_device_addr);
-        assert_eq!(disk.queue_ready, disk2.queue_ready);
-        assert_eq!(disk.contents, disk2.contents);
+        round_trip(base, end, &mut disk, || {
+            virtio_block_disk::VirtioBlockDisk::new(1)
+        });
     }
 }

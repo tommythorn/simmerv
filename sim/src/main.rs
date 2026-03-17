@@ -220,15 +220,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     for path in args.fs {
-        emulator.setup_filesystem(if path.ends_with(".zst") {
+        if path.ends_with(".zst") {
             let file = File::open(&path).with_context(|| path.to_string())?;
-            zstd::stream::decode_all(file)?
+            emulator.setup_filesystem(zstd::stream::decode_all(file)?);
         } else {
-            let mut file = File::open(&path).with_context(|| path.to_string())?;
-            let mut contents = vec![];
-            file.read_to_end(&mut contents)?;
-            contents
-        });
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .with_context(|| path.to_string())?;
+            emulator.setup_filesystem_file(file);
+        }
     }
 
     emulator.enable_page_cache(args.page_cache);

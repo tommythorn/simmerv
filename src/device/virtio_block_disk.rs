@@ -12,6 +12,57 @@ use crate::device::dma_slice;
 use crate::device::dma_write_u8;
 use std::ops::Range;
 
+// ── Backing storage abstraction ──────────────────────────────────────────────
+
+enum DiskStorage {
+    Memory(Vec<u8>),
+    /// Direct file I/O — reads and writes go straight to the backing file.
+    /// The `File` variant is unavailable on WASM where there is no filesystem.
+    #[cfg(not(target_arch = "wasm32"))]
+    File(std::fs::File),
+}
+
+#[allow(clippy::use_self)]
+impl DiskStorage {
+    fn sector_count(&self) -> u64 {
+        match self {
+            DiskStorage::Memory(v) => v.len() as u64 / SECTOR_SIZE as u64,
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::File(f) => f.metadata().map_or(0, |m| m.len()) / SECTOR_SIZE as u64,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn read_at(&self, offset: u64, buf: &mut [u8]) {
+        match self {
+            DiskStorage::Memory(v) => {
+                let o = offset as usize;
+                buf.copy_from_slice(&v[o..o + buf.len()]);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::File(f) => {
+                use std::os::unix::fs::FileExt;
+                f.read_exact_at(buf, offset).expect("disk read failed");
+            }
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn write_at(&mut self, offset: u64, data: &[u8]) {
+        match self {
+            DiskStorage::Memory(v) => {
+                let o = offset as usize;
+                v[o..o + data.len()].copy_from_slice(data);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::File(f) => {
+                use std::os::unix::fs::FileExt;
+                f.write_all_at(data, offset).expect("disk write failed");
+            }
+        }
+    }
+}
+
 // Based on Virtual I/O Device (VIRTIO) Version 1.2
 // https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
 // Section 4.2: Virtio Over MMIO (modern, Version=2)
@@ -69,7 +120,7 @@ pub struct VirtioBlockDisk {
     pub status: u32,
     /// Number of pending disk requests.
     pub pending_requests: u32,
-    pub contents: Vec<u8>,
+    storage: DiskStorage,
     pub block_size: u32,
     pub writeback: bool,
     /// IRQ number asserted on the PLIC when interrupting.
@@ -77,12 +128,13 @@ pub struct VirtioBlockDisk {
 }
 
 impl Default for VirtioBlockDisk {
-    fn default() -> Self { Self::new(Vec::new(), 1) }
+    fn default() -> Self { Self::new(1) }
 }
 
 impl VirtioBlockDisk {
+    /// Creates a new disk with empty in-memory storage.
     #[must_use]
-    pub const fn new(contents: Vec<u8>, irq: u32) -> Self {
+    pub const fn new(irq: u32) -> Self {
         Self {
             used_ring_index: 0,
             device_features: DEVICE_FEATURES,
@@ -99,15 +151,34 @@ impl VirtioBlockDisk {
             interrupt_status: 0,
             status: 0,
             pending_requests: 0,
-            contents,
+            storage: DiskStorage::Memory(Vec::new()),
             block_size: DEFAULT_BLOCK_SIZE,
             writeback: false,
             irq,
         }
     }
 
-    /// Initializes filesystem content. Expected to be called at most once.
-    #[allow(clippy::cast_lossless)]
+    /// Creates a new disk backed by the given in-memory image.
+    #[must_use]
+    pub fn new_with_contents(contents: Vec<u8>, irq: u32) -> Self {
+        let mut d = Self::new(irq);
+        d.storage = DiskStorage::Memory(contents);
+        d
+    }
+
+    /// Creates a new disk backed by the given file.
+    ///
+    /// Reads and writes go directly to the file; the image is never copied
+    /// into the emulator's heap.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn new_with_file(file: std::fs::File, irq: u32) -> Self {
+        let mut d = Self::new(irq);
+        d.storage = DiskStorage::File(file);
+        d
+    }
+
+    /// Replaces the in-memory image. Expected to be called at most once.
     pub fn init(&mut self, contents: Vec<u8>) {
         if !contents.len().is_multiple_of(SECTOR_SIZE) {
             log::warn!(
@@ -115,7 +186,7 @@ impl VirtioBlockDisk {
                 contents.len() % SECTOR_SIZE
             );
         }
-        self.contents = contents;
+        self.storage = DiskStorage::Memory(contents);
     }
 
     /// Returns `true` when the device has an asserted interrupt pending.
@@ -229,7 +300,7 @@ impl VirtioBlockDisk {
             // 0x01c      4  opt_io_size        TOPOLOGY
             // 0x020      1  writeback          CONFIG_WCE
             0x100..=0x107 => {
-                let n_secs = self.contents.len() as u64 / 512;
+                let n_secs = self.storage.sector_count();
                 (n_secs >> ((offset - 0x100) * 8)) as u8
             }
             0x108..=0x10b => 0, // size_max  (not advertised)
@@ -335,9 +406,8 @@ impl VirtioBlockDisk {
         disk_address: usize,
         length: usize,
     ) {
-        dma_slice(memory, pa, length)
-            .expect("transfer_from_disk: address outside RAM")
-            .copy_from_slice(&self.contents[disk_address..disk_address + length]);
+        let buf = dma_slice(memory, pa, length).expect("transfer_from_disk: address outside RAM");
+        self.storage.read_at(disk_address as u64, buf);
     }
 
     #[allow(clippy::expect_used)]
@@ -348,9 +418,13 @@ impl VirtioBlockDisk {
         disk_address: usize,
         length: usize,
     ) {
-        self.contents[disk_address..disk_address + length].copy_from_slice(
-            dma_slice(memory, pa, length).expect("transfer_to_disk: address outside RAM"),
-        );
+        let data = dma_slice(memory, pa, length).expect("transfer_to_disk: address outside RAM");
+        // SAFETY: we need to read from `data` (RAM slice) and write to storage.
+        // We can't hold a RAM borrow and a storage borrow simultaneously when
+        // storage is Memory(Vec) backed by the same allocation, but in practice
+        // disk sectors and guest RAM are always different regions.
+        let data: Vec<u8> = data.to_vec();
+        self.storage.write_at(disk_address as u64, &data);
     }
 
     // ── Virtqueue processing ───────────────────────────────────────────────
@@ -511,7 +585,14 @@ impl MemoryMapped for VirtioBlockDisk {
         w.u32(self.status);
         w.u32(self.block_size);
         w.bool(self.writeback);
-        w.bytes(&self.contents);
+        // File-backed storage writes a zero-length sentinel; the disk image is
+        // already persisted in the backing file and need not be embedded in the
+        // snapshot.
+        match &self.storage {
+            DiskStorage::Memory(v) => w.bytes(v),
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::File(_) => w.u64(0),
+        }
         w.u32(self.pending_requests);
         w.u32(self.irq);
     }
@@ -533,7 +614,11 @@ impl MemoryMapped for VirtioBlockDisk {
         self.status = r.u32()?;
         self.block_size = r.u32()?;
         self.writeback = r.bool()?;
-        self.contents = r.bytes()?;
+        let n = r.u64()? as usize;
+        if n > 0 {
+            self.storage = DiskStorage::Memory(r.raw(n)?.to_vec());
+        }
+        // else: zero sentinel — leave existing storage (file-backed or empty) in place.
         self.pending_requests = r.u32()?;
         self.irq = r.u32()?;
         Ok(())
