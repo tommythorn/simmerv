@@ -18,6 +18,7 @@ impl PopupTerminal {
         snapshot_flag: Arc<AtomicBool>,
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
+        tracing_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             input: NonblockNoEcho::new(
@@ -26,6 +27,7 @@ impl PopupTerminal {
                 snapshot_flag,
                 verbose_flag,
                 speedometer_flag,
+                tracing_flag,
             ),
         }
     }

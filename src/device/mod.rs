@@ -6,6 +6,7 @@ use std::ops::Range;
 
 pub mod clint;
 pub mod plic;
+pub mod syscon;
 pub mod uart;
 pub mod virtio_block_disk;
 pub mod virtio_net;

@@ -85,6 +85,7 @@ fn get_terminal(
     snapshot_flag: Arc<AtomicBool>,
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
+    tracing_flag: Arc<AtomicBool>,
 ) -> Box<dyn SerialBackend> {
     match terminal_type {
         TerminalType::PopupTerminal => Box::new(PopupTerminal::new(
@@ -93,6 +94,7 @@ fn get_terminal(
             snapshot_flag,
             verbose_flag,
             speedometer_flag,
+            tracing_flag,
         )),
         TerminalType::DummyTerminal => Box::new(DummyTerminal::new()),
     }
@@ -122,6 +124,7 @@ fn main() -> anyhow::Result<()> {
     let snapshot_flag = Arc::new(AtomicBool::new(false));
     let verbose_flag = Arc::new(AtomicBool::new(false));
     let speedometer_flag = Arc::new(AtomicBool::new(false));
+    let tracing_flag = Arc::new(AtomicBool::new(args.tracing));
     let mut symbols = BTreeMap::new();
     let memory_megs = args.memory_megs.unwrap_or(2048);
     let mut emulator = Emulator::new(
@@ -132,12 +135,14 @@ fn main() -> anyhow::Result<()> {
             Arc::clone(&snapshot_flag),
             Arc::clone(&verbose_flag),
             Arc::clone(&speedometer_flag),
+            Arc::clone(&tracing_flag),
         ),
         memory_megs * 1024 * 1024,
     );
     emulator.exit_flag = Arc::clone(&exit_flag);
     emulator.verbose = Arc::clone(&verbose_flag);
     emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
+    emulator.tracing_flag = Arc::clone(&tracing_flag);
 
     if let Some(ref iface) = args.tap {
         #[cfg(target_os = "linux")]
@@ -262,7 +267,7 @@ fn main() -> anyhow::Result<()> {
             .with_context(|| format!("invalid snapshot interval: {interval_str}"))?;
         emulator.run_with_periodic_snapshots(interval, base);
     } else {
-        emulator.run(args.tracing);
+        emulator.run_program();
     }
 
     // --write-snapshot always wins; fall back to the auto path on Ctrl-C exit.

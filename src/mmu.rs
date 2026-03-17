@@ -95,6 +95,8 @@ impl Mmu {
     pub const NET_BASE: u64 = 0x1000_2000;
     pub const NET_END: u64 = 0x1000_3000;
     pub const NET_IRQ: u32 = 2;
+    pub const SYSCON_BASE: u64 = 0x0010_0000;
+    pub const SYSCON_END: u64 = 0x0010_1000;
 
     /// Creates a new `Mmu` with CLINT and PLIC; no RAM or `VirtIO`.
     /// Call `add_memory` and `add_device` (for `VirtIO`), and `attach_uart`

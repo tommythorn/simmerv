@@ -26,12 +26,37 @@
                 compatible = "virtio,mmio";
         };
 
-        virtio_mmio@10002000 {                                                                                                   interrupts = <0x02>;                                                                                                interrupt-parent = <0x03>;                                                                                          reg = <0x00 0x10002000 0x00 0x1000>;                                                                                compatible = "virtio,mmio";                                                                                   };
+        virtio_mmio@10002000 {
+                interrupts = <0x02>;
+                interrupt-parent = <0x03>;
+                reg = <0x00 0x10002000 0x00 0x1000>;
+                compatible = "virtio,mmio";
+        };
+
+        syscon@100000 {
+                phandle = <0x12>;
+                reg = <0x0 0x100000 0x0 0x1000>;
+                compatible = "syscon";
+        };
+
+        poweroff {
+                value = <0x5555>;
+                offset = <0x00>;
+                regmap = <0x12>;
+                compatible = "syscon-poweroff";
+        };
+
+        reboot {
+                value = <0x7777>;
+                offset = <0x00>;
+                regmap = <0x12>;
+                compatible = "syscon-reboot";
+        };
 
         cpus {
                 #address-cells = <0x1>;
                 #size-cells = <0x0>;
-                timebase-frequency = <1000000>; // 1 MHz
+                timebase-frequency = <1000000>; // 1 MHz
 
                 cpu-map {
                         cluster0 {

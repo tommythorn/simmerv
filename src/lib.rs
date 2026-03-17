@@ -18,6 +18,7 @@ pub mod serial_backend;
 pub mod speedometer;
 
 use crate::cpu::Cpu;
+use crate::device::syscon::Syscon;
 use crate::device::virtio_block_disk::VirtioBlockDisk;
 use crate::device::virtio_net::VirtioNet;
 use crate::mmu::Mmu;
@@ -62,6 +63,15 @@ pub struct Emulator {
     /// Set to `true` to break out of the run loop (e.g. from the exit menu).
     pub exit_flag: Arc<AtomicBool>,
 
+    /// Set by the syscon device when the guest writes the poweroff magic value.
+    pub poweroff_flag: Arc<AtomicBool>,
+
+    /// Set by the syscon device when the guest writes the reboot magic value.
+    pub reset_flag: Arc<AtomicBool>,
+
+    /// When `true`, print an execution trace line for every instruction.
+    pub tracing_flag: Arc<AtomicBool>,
+
     /// When `true`, log a message to stderr each time a snapshot is written.
     pub verbose: Arc<AtomicBool>,
 }
@@ -92,6 +102,15 @@ impl Emulator {
             Mmu::NET_BASE..Mmu::NET_END,
             Box::new(VirtioNet::new(Box::new(DummyNetworkBackend), Mmu::NET_IRQ)),
         );
+        let poweroff_flag = Arc::new(AtomicBool::new(false));
+        let reset_flag = Arc::new(AtomicBool::new(false));
+        mmu.add_device(
+            Mmu::SYSCON_BASE..Mmu::SYSCON_END,
+            Box::new(Syscon::new(
+                Arc::clone(&poweroff_flag),
+                Arc::clone(&reset_flag),
+            )),
+        );
         Self {
             cpu: Cpu::new(mmu),
 
@@ -103,6 +122,9 @@ impl Emulator {
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists
 
             exit_flag: Arc::new(AtomicBool::new(false)),
+            poweroff_flag,
+            reset_flag,
+            tracing_flag: Arc::new(AtomicBool::new(false)),
             verbose: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -118,12 +140,58 @@ impl Emulator {
         }
     }
 
+    fn machine_reset(&mut self) { self.cpu.soft_reset(); }
+
     /// Runs program set by `load_image()`. The emulator will run forever.
+    /// When `tracing_flag` is set, prints a disassembly line for every
+    /// instruction.
     pub fn run_program(&mut self) {
+        let mut s = String::new();
         loop {
-            self.tick(600); // 600 is an arbitrary number
-            if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
+            if self.tracing_flag.load(Ordering::Relaxed) {
+                let cycle = self.cpu.cycle;
+                let insn_addr = self.cpu.pc;
+                let insn_word = self.cpu.memop_disass(insn_addr);
+                let fflags = self.cpu.fflags;
+                s.clear();
+                self.cpu.disassemble(&mut s);
+                let exceptional = self.tick(1);
+                print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
+                if let Ok(insn) = insn_word {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    let uop = cpu::decode(insn_addr, insn as u32);
+                    if !uop.rd.is_x0_dest() && !exceptional {
+                        print!("{:16x}", self.cpu.read_register(uop.rd));
+                        if self.cpu.fflags != fflags {
+                            const FLAG_NAMES: [char; 5] = ['x', 'u', 'o', 'i', 'v'];
+                            print!(" ");
+                            for i in (0..5).rev() {
+                                print!(
+                                    "{}",
+                                    if self.cpu.fflags >> i & 1 == 0 {
+                                        '.'
+                                    } else {
+                                        FLAG_NAMES[i]
+                                    }
+                                );
+                            }
+                        }
+                    }
+                    println!();
+                } else {
+                    println!("--can't fetch from {insn_addr:08x}--");
+                }
+            } else {
+                self.tick(600); // 600 is an arbitrary number
+            }
+            if self.handle_htif()
+                || self.exit_flag.load(Ordering::Relaxed)
+                || self.poweroff_flag.load(Ordering::Relaxed)
+            {
                 break;
+            }
+            if self.reset_flag.swap(false, Ordering::Relaxed) {
+                self.machine_reset();
             }
         }
     }
@@ -138,8 +206,14 @@ impl Emulator {
         let mut snap_num: usize = 0;
         loop {
             self.tick(6);
-            if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
+            if self.handle_htif()
+                || self.exit_flag.load(Ordering::Relaxed)
+                || self.poweroff_flag.load(Ordering::Relaxed)
+            {
                 break;
+            }
+            if self.reset_flag.swap(false, Ordering::Relaxed) {
+                self.machine_reset();
             }
             snap_counter += 6;
             if snap_counter >= interval {
@@ -221,6 +295,11 @@ impl Emulator {
                         Some(Box::new(VirtioNet::new(backend, Mmu::NET_IRQ))
                             as Box<dyn crate::device::MemoryMapped>)
                     }
+                    "Syscon" => Some(Box::new(Syscon::new(
+                        Arc::clone(&self.poweroff_flag),
+                        Arc::clone(&self.reset_flag),
+                    ))
+                        as Box<dyn crate::device::MemoryMapped>),
                     _ => None,
                 }
             })
@@ -283,8 +362,14 @@ impl Emulator {
                 println!("--can't fetch from {insn_addr:08x}--");
             }
 
-            if self.handle_htif() || self.exit_flag.load(Ordering::Relaxed) {
+            if self.handle_htif()
+                || self.exit_flag.load(Ordering::Relaxed)
+                || self.poweroff_flag.load(Ordering::Relaxed)
+            {
                 break;
+            }
+            if self.reset_flag.swap(false, Ordering::Relaxed) {
+                self.machine_reset();
             }
         }
     }

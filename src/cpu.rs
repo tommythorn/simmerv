@@ -249,6 +249,26 @@ impl Cpu {
         cpu
     }
 
+    /// Resets CPU architectural state as if the machine were rebooted.
+    /// Memory contents are preserved (warm reset); the firmware re-initialises
+    /// them on its own.
+    pub fn soft_reset(&mut self) {
+        self.rf = [0; 65];
+        self.fflags = 0;
+        self.fs = 1;
+        self.wfi = false;
+        self.pc = 0x8000_0000;
+        self.csr = CsrFile::new();
+        self.reservation = None;
+        self.flush_icache = true;
+        self.mmu.prv = PrivMode::M;
+        self.mmu.mip = 0;
+        self.mmu.satp = 0;
+        self.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
+        self.mmu.clear_page_cache();
+        self.write_x(x(11), Mmu::DTB_BASE);
+    }
+
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn read_x(&self, r: Reg) -> u64 { self.rf[r] }
