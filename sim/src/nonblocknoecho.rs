@@ -84,7 +84,7 @@ impl NonblockNoEcho {
             let verbose = self.verbose_flag.load(Ordering::Relaxed);
             let speedometer = self.speedometer_flag.load(Ordering::Relaxed);
             eprintln!(
-                "[[v - Verbose({verbose}), s - Speedometer({speedometer}), x - eXit, t - tracing ON, p - panic, else, pass on to guest]]"
+                "[[v - Verbose({verbose}), s - Speedometer({speedometer}), x - eXit, t - tracing ON, else, pass on to guest]]"
             );
             // XXX Should turn on blocking
             loop {
@@ -97,7 +97,6 @@ impl NonblockNoEcho {
 
                 // XXX sleep
                 match snd as char {
-                    'p' => panic!("Well, you asked for it!"),
                     't' => eprintln!("Visualize tracing turned on"),
                     'v' => {
                         let was = self.verbose_flag.fetch_xor(true, Ordering::Relaxed);
