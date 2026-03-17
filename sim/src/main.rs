@@ -82,6 +82,7 @@ fn get_terminal(
     terminal_type: &TerminalType,
     ctrlc_breaks: bool,
     exit_flag: Arc<AtomicBool>,
+    snapshot_flag: Arc<AtomicBool>,
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
 ) -> Box<dyn SerialBackend> {
@@ -89,6 +90,7 @@ fn get_terminal(
         TerminalType::PopupTerminal => Box::new(PopupTerminal::new(
             ctrlc_breaks,
             exit_flag,
+            snapshot_flag,
             verbose_flag,
             speedometer_flag,
         )),
@@ -117,6 +119,7 @@ fn main() -> anyhow::Result<()> {
         TerminalType::PopupTerminal
     };
     let exit_flag = Arc::new(AtomicBool::new(false));
+    let snapshot_flag = Arc::new(AtomicBool::new(false));
     let verbose_flag = Arc::new(AtomicBool::new(false));
     let speedometer_flag = Arc::new(AtomicBool::new(false));
     let mut symbols = BTreeMap::new();
@@ -126,6 +129,7 @@ fn main() -> anyhow::Result<()> {
             &terminal_type,
             args.ctrlc_breaks,
             Arc::clone(&exit_flag),
+            Arc::clone(&snapshot_flag),
             Arc::clone(&verbose_flag),
             Arc::clone(&speedometer_flag),
         ),
@@ -165,6 +169,8 @@ fn main() -> anyhow::Result<()> {
     let mut emu_start = None;
     let mut images = 0;
     let mut loaded_snapshot = false;
+    // Path to auto-save on Ctrl-C exit: the loaded snapshot name, or "snapshot".
+    let mut auto_snapshot_path = "snapshot".to_string();
 
     for img_path in args.images {
         img_contents.clear();
@@ -189,6 +195,7 @@ fn main() -> anyhow::Result<()> {
                 .load_snapshot(&img_contents)
                 .with_context(|| filename.to_string())?;
             loaded_snapshot = true;
+            auto_snapshot_path = filename.to_string();
             images += 1;
             load_addr = None;
             continue;
@@ -258,8 +265,12 @@ fn main() -> anyhow::Result<()> {
         emulator.run(args.tracing);
     }
 
+    // --write-snapshot always wins; fall back to the auto path on Ctrl-C exit.
     if let Some(path) = args.write_snapshot {
         write_snap(&mut emulator, &path).with_context(|| format!("writing snapshot to {path}"))?;
+    } else if snapshot_flag.load(Ordering::Relaxed) {
+        write_snap(&mut emulator, &auto_snapshot_path)
+            .with_context(|| format!("writing snapshot to {auto_snapshot_path}"))?;
     }
 
     Ok(())

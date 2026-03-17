@@ -10,6 +10,7 @@ pub struct NonblockNoEcho {
     orig_termios: termios::Termios,
     reader: Stdin,
     exit_flag: Arc<AtomicBool>,
+    snapshot_flag: Arc<AtomicBool>,
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
 }
@@ -19,6 +20,7 @@ impl NonblockNoEcho {
     pub fn new(
         ctrlc_breaks: bool,
         exit_flag: Arc<AtomicBool>,
+        snapshot_flag: Arc<AtomicBool>,
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -68,6 +70,7 @@ impl NonblockNoEcho {
             orig_termios,
             reader: io::stdin(),
             exit_flag,
+            snapshot_flag,
             verbose_flag,
             speedometer_flag,
         }
@@ -84,7 +87,7 @@ impl NonblockNoEcho {
             let verbose = self.verbose_flag.load(Ordering::Relaxed);
             let speedometer = self.speedometer_flag.load(Ordering::Relaxed);
             eprintln!(
-                "[[v - Verbose({verbose}), s - Speedometer({speedometer}), x - eXit, t - tracing ON, else, pass on to guest]]"
+                "[[v - Verbose({verbose}), s - Speedometer({speedometer}), x - eXit+snapshot, t - tracing ON, else, pass on to guest]]"
             );
             // XXX Should turn on blocking
             loop {
@@ -107,6 +110,7 @@ impl NonblockNoEcho {
                         eprintln!("Speedometer {}", if was { "OFF" } else { "ON" });
                     }
                     'x' => {
+                        self.snapshot_flag.store(true, Ordering::Relaxed);
                         self.exit_flag.store(true, Ordering::Relaxed);
                         return None;
                     }

@@ -15,11 +15,18 @@ impl PopupTerminal {
     pub fn new(
         ctrlc_breaks: bool,
         exit_flag: Arc<AtomicBool>,
+        snapshot_flag: Arc<AtomicBool>,
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            input: NonblockNoEcho::new(ctrlc_breaks, exit_flag, verbose_flag, speedometer_flag),
+            input: NonblockNoEcho::new(
+                ctrlc_breaks,
+                exit_flag,
+                snapshot_flag,
+                verbose_flag,
+                speedometer_flag,
+            ),
         }
     }
 }
