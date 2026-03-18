@@ -203,7 +203,7 @@ pub struct Cpu {
     pub speedometer_flag: Arc<AtomicBool>,
 }
 
-pub const CONFIG_SW_MANAGED_A_AND_D: bool = false;
+pub const CONFIG_SW_MANAGED_A_AND_D: bool = true;
 pub const PG_SHIFT: usize = 12; // 4K page size
 
 impl Default for Uop {
