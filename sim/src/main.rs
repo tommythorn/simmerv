@@ -66,6 +66,20 @@ struct Args {
     #[argh(option, short = 'S')]
     snapshot_interval: Option<String>,
 
+    /// write riscof signature to this file after run
+    #[argh(option)]
+    riscof_sigfile: Option<String>,
+
+    /// memory region hint for riscof (accepted but unused)
+    #[argh(option)]
+    #[allow(dead_code)]
+    mem_region: Vec<String>,
+
+    /// signature region start hint for riscof (accepted but unused)
+    #[argh(option)]
+    #[allow(dead_code)]
+    sig_region_start: Option<String>,
+
     /// memory images, elf or binary blobs, optionally follow by a comma and the
     /// the "0x"-prefixed load address in hex (this is required for binary
     /// blobs)
@@ -268,6 +282,27 @@ fn main() -> anyhow::Result<()> {
         emulator.run_with_periodic_snapshots(interval, base);
     } else {
         emulator.run_program();
+    }
+
+    // Write riscof signature: dump physical memory [begin_signature, end_signature)
+    // as 32-bit hex.
+    if let Some(ref sigfile) = args.riscof_sigfile {
+        let begin = symbols
+            .get("begin_signature")
+            .copied()
+            .ok_or_else(|| anyhow!("begin_signature symbol not found"))?;
+        let end = symbols
+            .get("end_signature")
+            .copied()
+            .ok_or_else(|| anyhow!("end_signature symbol not found"))?;
+        use std::io::Write as _;
+        let mut out = File::create(sigfile).with_context(|| sigfile.to_string())?;
+        let mut addr = begin;
+        while addr < end {
+            let word = simmerv::device::dma_read_u32(&mut emulator.cpu.mmu.memory, addr);
+            writeln!(out, "{word:08x}")?;
+            addr += 4;
+        }
     }
 
     // --write-snapshot always wins; fall back to the auto path on Ctrl-C exit.

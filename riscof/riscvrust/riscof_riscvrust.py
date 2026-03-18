@@ -76,7 +76,7 @@ class riscvrust(pluginTemplate):
        # Note the march is not hardwired here, because it will change for each
        # test. Similarly the output elf name and compile macros will be assigned later in the
        # runTests function
-       self.compile_cmd = 'riscv{1}-unknown-elf-gcc -march={0} \
+       self.compile_cmd = 'riscv{1}-elf-gcc -march={0} \
          -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -g -w\
          -T '+self.pluginpath+'/env/link.ld\
          -I '+self.pluginpath+'/env/\
@@ -150,7 +150,7 @@ class riscvrust(pluginTemplate):
 
         if self.target_run:
           # set up the simulation command with arguments for the custom signature region.
-          simcmd = (f'{self.dut_exe} --riscof-sigfile {sig_file} '
+          simcmd = (f'{self.dut_exe} -n --riscof-sigfile {sig_file} '
                     f'--mem-region 0x{self.signature_base:x}:0x{self.signature_size:x} '
                     f'--sig-region-start 0x{self.signature_base:x} {elf}')
         else:
@@ -160,7 +160,9 @@ class riscvrust(pluginTemplate):
         execute = f'@cd {test_dir}; {cmd}; {simcmd}'
 
         # The signature file is the final target of the rule.
-        make.add_target(sig_file, deps=[test], command=execute)
+        make.add_target(execute)
+
+      make.execute_all(self.work_dir)
 
     def extract_signature(self, sig_file, mem_dump):
         '''
