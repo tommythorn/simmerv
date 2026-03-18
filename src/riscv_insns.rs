@@ -1,10 +1,10 @@
-/// RISC-V `RV64GC_Zba_Zicond` (RVA20+) instruction definitions
+/// RISC-V `RV64GC_Zba_Zbb_Zicond` (RVA20+) instruction definitions
 ///
 /// This is a dependency-free module that just gives the same and
-/// encoding of the `RV64GC_Zba_Zicond` instructions, useful for
+/// encoding of the `RV64GC_Zba_Zbb_Zicond` instructions, useful for
 /// deriving decoders etc.  There is simple utility function that
 /// generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 210] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 234] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -215,6 +215,31 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 210] = [
     (0xfe00707f, 0x0800101b, "slli.uw"),
     (0xfe00707f, 0x0e005033, "czero.eqz"),
     (0xfe00707f, 0x0e007033, "czero.nez"),
+    // Zbb — base integer bit manipulation (RV64)
+    (0xfe00707f, 0x40007033, "andn"),
+    (0xfe00707f, 0x40006033, "orn"),
+    (0xfe00707f, 0x40004033, "xnor"),
+    (0xfff0707f, 0x60001013, "clz"),
+    (0xfff0707f, 0x6000101b, "clzw"),
+    (0xfff0707f, 0x60101013, "ctz"),
+    (0xfff0707f, 0x6010101b, "ctzw"),
+    (0xfff0707f, 0x60201013, "cpop"),
+    (0xfff0707f, 0x6020101b, "cpopw"),
+    (0xfe00707f, 0x0a006033, "max"),
+    (0xfe00707f, 0x0a007033, "maxu"),
+    (0xfe00707f, 0x0a004033, "min"),
+    (0xfe00707f, 0x0a005033, "minu"),
+    (0xfff0707f, 0x28705013, "orc.b"),
+    (0xfff0707f, 0x6b805013, "rev8"),
+    (0xfe00707f, 0x60001033, "rol"),
+    (0xfe00707f, 0x6000103b, "rolw"),
+    (0xfe00707f, 0x60005033, "ror"),
+    (0xfc00707f, 0x60005013, "rori"),
+    (0xfe00707f, 0x6000501b, "roriw"),
+    (0xfe00707f, 0x6000503b, "rorw"),
+    (0xfff0707f, 0x60401013, "sext.b"),
+    (0xfff0707f, 0x60501013, "sext.h"),
+    (0xfff0707f, 0x0800403b, "zext.h"),
 ];
 
 fn to_pascal_case(s: &str) -> String {
@@ -1211,6 +1236,102 @@ mod test {
         }
         fn czero_nez(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "czero_nez";
+            0
+        }
+        fn andn(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "andn";
+            0
+        }
+        fn orn(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "orn";
+            0
+        }
+        fn xnor(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "xnor";
+            0
+        }
+        fn clz(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "clz";
+            0
+        }
+        fn clzw(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "clzw";
+            0
+        }
+        fn ctz(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "ctz";
+            0
+        }
+        fn ctzw(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "ctzw";
+            0
+        }
+        fn cpop(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "cpop";
+            0
+        }
+        fn cpopw(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "cpopw";
+            0
+        }
+        fn max(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "max";
+            0
+        }
+        fn maxu(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "maxu";
+            0
+        }
+        fn min(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "min";
+            0
+        }
+        fn minu(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "minu";
+            0
+        }
+        fn orc_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "orc_b";
+            0
+        }
+        fn rev8(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "rev8";
+            0
+        }
+        fn rol(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "rol";
+            0
+        }
+        fn rolw(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "rolw";
+            0
+        }
+        fn ror(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "ror";
+            0
+        }
+        fn rori(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "rori";
+            0
+        }
+        fn roriw(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "roriw";
+            0
+        }
+        fn rorw(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "rorw";
+            0
+        }
+        fn sext_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "sext_b";
+            0
+        }
+        fn sext_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "sext_h";
+            0
+        }
+        fn zext_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "zext_h";
             0
         }
         fn unimp(_a: u64, _w: u32, s: &mut Self::Context) -> usize {

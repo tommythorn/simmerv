@@ -313,6 +313,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sll(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::mulh(a, w, c)
+            } else if (w >> 25) == 0x30 {
+                C::rol(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -342,8 +344,12 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::xor(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::div(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::min(a, w, c)
             } else if (w >> 25) == 0x10 {
                 C::sh2add(a, w, c)
+            } else if (w >> 25) == 0x20 {
+                C::xnor(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -353,10 +359,14 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::srl(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::divu(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::minu(a, w, c)
             } else if (w >> 25) == 0x7 {
                 C::czero_eqz(a, w, c)
             } else if (w >> 25) == 0x20 {
                 C::sra(a, w, c)
+            } else if (w >> 25) == 0x30 {
+                C::ror(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -366,8 +376,12 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::or(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::rem(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::max(a, w, c)
             } else if (w >> 25) == 0x10 {
                 C::sh3add(a, w, c)
+            } else if (w >> 25) == 0x20 {
+                C::orn(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -377,8 +391,12 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::and(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::remu(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::maxu(a, w, c)
             } else if (w >> 25) == 0x7 {
                 C::czero_nez(a, w, c)
+            } else if (w >> 25) == 0x20 {
+                C::andn(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -415,26 +433,48 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         387 | 1411 => C::ld(a, w, c),
         419 | 1443 => C::sd(a, w, c),
         147 | 1171 => {
-            if (w >> 26) == 0x0 {
+            if (w >> 20) == 0x600 {
+                C::clz(a, w, c)
+            } else if (w >> 20) == 0x601 {
+                C::ctz(a, w, c)
+            } else if (w >> 20) == 0x602 {
+                C::cpop(a, w, c)
+            } else if (w >> 20) == 0x604 {
+                C::sext_b(a, w, c)
+            } else if (w >> 20) == 0x605 {
+                C::sext_h(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x0 {
                 C::slli(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
         }
         659 | 1683 => {
-            if (w >> 26) == 0x0 {
+            if (w >> 20) == 0x287 {
+                C::orc_b(a, w, c)
+            } else if (w >> 20) == 0x6b8 {
+                C::rev8(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x0 {
                 C::srli(a, w, c)
-            } else if (w >> 26) == 0x10 {
+            } else if (w >> 20) & 0xffffffc0 == 0x400 {
                 C::srai(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x600 {
+                C::rori(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
         }
         27 | 1051 => C::addiw(a, w, c),
         155 | 1179 => {
-            if (w >> 25) == 0x0 {
+            if (w >> 20) == 0x600 {
+                C::clzw(a, w, c)
+            } else if (w >> 20) == 0x601 {
+                C::ctzw(a, w, c)
+            } else if (w >> 20) == 0x602 {
+                C::cpopw(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x0 {
                 C::slliw(a, w, c)
-            } else if (w >> 25) == 0x4 {
+            } else if (w >> 20) & 0xffffffe0 == 0x80 {
                 C::slli_uw(a, w, c)
             } else {
                 C::unimp(a, w, c)
@@ -445,6 +485,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::srliw(a, w, c)
             } else if (w >> 25) == 0x20 {
                 C::sraiw(a, w, c)
+            } else if (w >> 25) == 0x30 {
+                C::roriw(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -465,6 +507,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         187 | 1211 => {
             if (w >> 25) == 0x0 {
                 C::sllw(a, w, c)
+            } else if (w >> 25) == 0x30 {
+                C::rolw(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -476,6 +520,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::divuw(a, w, c)
             } else if (w >> 25) == 0x20 {
                 C::sraw(a, w, c)
+            } else if (w >> 25) == 0x30 {
+                C::rorw(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -494,9 +540,11 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         883 | 1907 => C::csrrsi(a, w, c),
         1011 | 2035 => C::csrrci(a, w, c),
         571 | 1595 => {
-            if (w >> 25) == 0x1 {
+            if (w >> 20) == 0x80 {
+                C::zext_h(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x20 {
                 C::divw(a, w, c)
-            } else if (w >> 25) == 0x10 {
+            } else if (w >> 20) & 0xffffffe0 == 0x200 {
                 C::sh2add_uw(a, w, c)
             } else {
                 C::unimp(a, w, c)
@@ -1135,5 +1183,29 @@ pub enum Op {
     SlliUw,
     CzeroEqz,
     CzeroNez,
+    Andn,
+    Orn,
+    Xnor,
+    Clz,
+    Clzw,
+    Ctz,
+    Ctzw,
+    Cpop,
+    Cpopw,
+    Max,
+    Maxu,
+    Min,
+    Minu,
+    OrcB,
+    Rev8,
+    Rol,
+    Rolw,
+    Ror,
+    Rori,
+    Roriw,
+    Rorw,
+    SextB,
+    SextH,
+    ZextH,
     Unimp,
 }

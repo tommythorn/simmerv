@@ -2025,6 +2025,48 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         // Zicond extension
         Op::CzeroEqz => Ok((if ops.s2 == 0 { 0 } else { ops.s1 }, 0)),
         Op::CzeroNez => Ok((if ops.s2 != 0 { 0 } else { ops.s1 }, 0)),
+        // Zbb — base integer bit manipulation
+        Op::Andn => Ok((ops.s1 & !ops.s2, 0)),
+        Op::Orn => Ok((ops.s1 | !ops.s2, 0)),
+        Op::Xnor => Ok((!ops.s1 ^ ops.s2, 0)),
+        Op::Clz => Ok((ops.s1.leading_zeros() as u64, 0)),
+        Op::Clzw => Ok(((ops.s1 as u32).leading_zeros() as u64, 0)),
+        Op::Ctz => Ok((ops.s1.trailing_zeros() as u64, 0)),
+        Op::Ctzw => Ok(((ops.s1 as u32).trailing_zeros() as u64, 0)),
+        Op::Cpop => Ok((ops.s1.count_ones() as u64, 0)),
+        Op::Cpopw => Ok(((ops.s1 as u32).count_ones() as u64, 0)),
+        Op::Max => Ok(((ops.s1 as i64).max(ops.s2 as i64) as u64, 0)),
+        Op::Maxu => Ok((ops.s1.max(ops.s2), 0)),
+        Op::Min => Ok(((ops.s1 as i64).min(ops.s2 as i64) as u64, 0)),
+        Op::Minu => Ok((ops.s1.min(ops.s2), 0)),
+        Op::OrcB => {
+            let mut r = 0;
+            for i in 0..8 {
+                if ops.s1 >> (i * 8) & 0xff != 0 {
+                    r |= 0xff << (i * 8);
+                }
+            }
+            Ok((r, 0))
+        }
+        Op::Rev8 => Ok((ops.s1.swap_bytes(), 0)),
+        Op::Rol => Ok((ops.s1.rotate_left((ops.s2 & 63) as u32), 0)),
+        Op::Rolw => Ok((
+            (ops.s1 as u32).rotate_left((ops.s2 & 31) as u32) as i32 as u64,
+            0,
+        )),
+        Op::Ror => Ok((ops.s1.rotate_right((ops.s2 & 63) as u32), 0)),
+        Op::Rori => Ok((ops.s1.rotate_right((uop.imm & 63) as u32), 0)),
+        Op::Roriw => Ok((
+            (ops.s1 as u32).rotate_right((uop.imm & 31) as u32) as i32 as u64,
+            0,
+        )),
+        Op::Rorw => Ok((
+            (ops.s1 as u32).rotate_right((ops.s2 & 31) as u32) as i32 as u64,
+            0,
+        )),
+        Op::SextB => Ok((ops.s1 as i8 as i64 as u64, 0)),
+        Op::SextH => Ok((ops.s1 as i16 as i64 as u64, 0)),
+        Op::ZextH => Ok((ops.s1 & 0xffff, 0)),
         // Last one is a sentiel and must always be this illegal instruction
         Op::Unimp | Op::CUnimp => Err(Exception {
             trap: Trap::IllegalInstruction,

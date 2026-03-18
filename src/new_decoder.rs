@@ -772,6 +772,32 @@ impl RiscvDecoder for Decoder {
     fn czero_nez(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_r(a, insn, Op::CzeroNez)
     }
+    fn andn(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Andn) }
+    fn orn(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Orn) }
+    fn xnor(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Xnor) }
+    fn clz(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Clz) }
+    fn clzw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Clzw) }
+    fn ctz(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Ctz) }
+    fn ctzw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Ctzw) }
+    fn cpop(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Cpop) }
+    fn cpopw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Cpopw) }
+    fn max(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Max) }
+    fn maxu(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Maxu) }
+    fn min(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Min) }
+    fn minu(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Minu) }
+    fn orc_b(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::OrcB) }
+    fn rev8(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::Rev8) }
+    fn rol(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Rol) }
+    fn rolw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Rolw) }
+    fn ror(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Ror) }
+    fn rori(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r_shift(a, insn, Op::Rori) }
+    fn roriw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_shift(a, insn, Op::Roriw)
+    }
+    fn rorw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Rorw) }
+    fn sext_b(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::SextB) }
+    fn sext_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::SextH) }
+    fn zext_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::ZextH) }
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_exceptional(a, insn, Op::Unimp)
     }
