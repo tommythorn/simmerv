@@ -669,6 +669,15 @@ impl Cpu {
             tval: 0,
         });
 
+        // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode only,
+        // hardwired to zero (0 PMP entries implemented).
+        if matches!(csrno, 0x3A0..=0x3EF) {
+            if u64::from(self.mmu.prv) < 3 {
+                return illegal;
+            }
+            return Ok(0);
+        }
+
         // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
         // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode) — all return 0.
         if matches!(csrno, 0xC03..=0xC1F) {
@@ -726,6 +735,16 @@ impl Cpu {
             trap: Trap::IllegalInstruction,
             tval: 0,
         });
+
+        // PMP: pmpcfg0-15 and pmpaddr0-63 — M-mode only, writes silently ignored
+        // (0 PMP entries implemented; all accesses permitted).
+        if matches!(csrno, 0x3A0..=0x3EF) {
+            return if u64::from(self.mmu.prv) < 3 {
+                illegal
+            } else {
+                Ok(())
+            };
+        }
 
         // Zihpm: hpmcounter3-31 are read-only; mhpmcounter/mhpmevent writes are
         // silently ignored.
@@ -840,6 +859,7 @@ impl Cpu {
             Csr::Stimecmp => self.csr.stimecmp,
             Csr::Mcounteren => u64::from(self.csr.mcounteren),
             Csr::Scounteren => u64::from(self.csr.scounteren),
+            Csr::Senvcfg => self.csr.senvcfg,
             Csr::Menvcfg => self.csr.menvcfg,
             Csr::Time => self.mmu.read_mtime_csr(),
             Csr::Ustatus => self.csr.ustatus,
@@ -892,7 +912,8 @@ impl Cpu {
             Csr::Mcounteren => self.csr.mcounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Scounteren => self.csr.scounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Menvcfg => self.csr.menvcfg = value,
-            Csr::Senvcfg => {} // U-mode env config; no Sstc-relevant bits for now
+            Csr::Senvcfg => self.csr.senvcfg = value,
+            Csr::Misa => {} // read-only WARL; extension set is fixed
             Csr::Time => self.mmu.write_mtime_csr(value), // XXX SHOULD trap
             Csr::Ustatus => self.csr.ustatus = value,
             _ => log::warn!("We are ignoring writes to {csr:?}"),
@@ -992,6 +1013,7 @@ impl Cpu {
                 c.stimecmp,
                 u64::from(c.mcounteren),
                 u64::from(c.scounteren),
+                c.senvcfg,
             ] {
                 w.u64(v);
             }
@@ -1069,6 +1091,7 @@ impl Cpu {
         }
         c.mcounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
+        c.senvcfg = r.u64()?;
         self.flush_icache = true;
         self.mmu.read_state(r.remaining(), make_device)
     }
