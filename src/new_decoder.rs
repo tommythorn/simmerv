@@ -826,6 +826,25 @@ impl RiscvDecoder for Decoder {
     fn clmul(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmul) }
     fn clmulh(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmulh) }
     fn clmulr(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmulr) }
+    fn cbo_inval(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_serialized(a, insn, Op::CboInval)
+    }
+    fn cbo_clean(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_serialized(a, insn, Op::CboClean)
+    }
+    fn cbo_flush(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_serialized(a, insn, Op::CboFlush)
+    }
+    fn cbo_zero(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::CboZero) }
+    fn prefetch_i(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_serialized(a, insn, Op::PrefetchI)
+    }
+    fn prefetch_r(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_serialized(a, insn, Op::PrefetchR)
+    }
+    fn prefetch_w(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_serialized(a, insn, Op::PrefetchW)
+    }
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_exceptional(a, insn, Op::Unimp)
     }

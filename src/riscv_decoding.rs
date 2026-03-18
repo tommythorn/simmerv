@@ -255,5 +255,12 @@ pub trait RiscvDecoder {
     fn clmul(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn clmulh(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn clmulr(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn cbo_inval(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn cbo_clean(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn cbo_flush(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn cbo_zero(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn prefetch_i(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn prefetch_r(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn prefetch_w(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn unimp(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
 }

@@ -1217,7 +1217,15 @@ fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
 )]
 fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
     match uop.op {
-        Op::CNop | Op::SfenceWInval | Op::SfenceInvalIr => Ok((0, 0)),
+        Op::CNop
+        | Op::SfenceWInval
+        | Op::SfenceInvalIr
+        | Op::CboInval
+        | Op::CboClean
+        | Op::CboFlush
+        | Op::PrefetchI
+        | Op::PrefetchR
+        | Op::PrefetchW => Ok((0, 0)),
         Op::CEbreak => Err(Exception {
             trap: Trap::Breakpoint,
             tval: 0x9002,
@@ -2142,6 +2150,14 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
                 }
             }
             Ok((r, 0))
+        }
+        // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
+        Op::CboZero => {
+            let base = ops.s1 & !63;
+            for i in 0..8u64 {
+                cpu.memop(Write, base, i * 8, 0, 8)?;
+            }
+            Ok((0, 0))
         }
         // Last one is a sentiel and must always be this illegal instruction
         Op::Unimp | Op::CUnimp => Err(Exception {
