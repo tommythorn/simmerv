@@ -22,27 +22,32 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
 ## Features
 
-- Emulates RISC-V `RV64GC_Zba_Zicond` processor and peripheral devices
-  (CLINT, PLIC, NS16550A UART, and virtio block device)
+- Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
+  (CLINT, PLIC, NS16550A UART, virtio block device, and VirtIO ethernet)
 - Targets native and WASM
 - Snapshots
 - Speedometer
 
 ## Instructions/Features support status
 
+### RVA22 profile (complete)
+
 - [x] RV64IMAC
 - [x] RV64FD (*PARTIALLY*: flags/rounding modes not complete for all insns)
 - [x] RV64Zifencei
 - [x] RV64Zicsr
-- [ ] Svnapot
-- [x] Zba (part of "B", RVA22)
-- [ ] Zbb (part of "B", RVA22)
-- [ ] Zbs (part of "B", RVA22)
+- [x] Zba, Zbb, Zbc, Zbs ("B" extension)
 - [x] Zicond
-- [x] CSR (nearly complete)
+- [x] Zfhmin (half-precision float conversions)
+- [x] Zihpm (hardware performance counters)
+- [x] Zicbom, Zicbop, Zicboz (cache block operations)
+- [x] Svinval (fine-grained TLB invalidation)
+- [x] Svade (hardware A/D fault-on-access)
+- [x] Sstc (stimecmp/menvcfg timer compare)
 - [x] Sv39, Sv48, Sv57
 - [x] Privileged instructions
-- [-] PMP (this is deliberately not implemented as it will negatively affect performance)
+- [ ] Svnapot
+- [-] PMP (deliberately not implemented: would hurt performance)
 
 The emulator supports all instructions listed above but some (like
 many FP instructions) are not 100% to the spec.

@@ -31,9 +31,8 @@ For an up-to-date view, look at the current issues on github*.
 
 ## Features
 
-- Implement the B set (Zba and Zicond done)
 - Implement Svnapot support
-- RVA23
+- RVA23 (RVA22 is complete)
 - Maybe: implement the Bytedance 64K page proposal?
 
 ## Misc
