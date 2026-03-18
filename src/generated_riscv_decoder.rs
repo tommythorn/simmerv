@@ -315,8 +315,14 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::mulh(a, w, c)
             } else if (w >> 25) == 0x5 {
                 C::clmul(a, w, c)
+            } else if (w >> 25) == 0x14 {
+                C::bset(a, w, c)
+            } else if (w >> 25) == 0x24 {
+                C::bclr(a, w, c)
             } else if (w >> 25) == 0x30 {
                 C::rol(a, w, c)
+            } else if (w >> 25) == 0x34 {
+                C::binv(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -371,6 +377,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::czero_eqz(a, w, c)
             } else if (w >> 25) == 0x20 {
                 C::sra(a, w, c)
+            } else if (w >> 25) == 0x24 {
+                C::bext(a, w, c)
             } else if (w >> 25) == 0x30 {
                 C::ror(a, w, c)
             } else {
@@ -451,6 +459,12 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sext_h(a, w, c)
             } else if (w >> 20) & 0xffffffc0 == 0x0 {
                 C::slli(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x280 {
+                C::bseti(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x480 {
+                C::bclri(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x680 {
+                C::binvi(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -464,6 +478,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::srli(a, w, c)
             } else if (w >> 20) & 0xffffffc0 == 0x400 {
                 C::srai(a, w, c)
+            } else if (w >> 20) & 0xffffffc0 == 0x480 {
+                C::bexti(a, w, c)
             } else if (w >> 20) & 0xffffffc0 == 0x600 {
                 C::rori(a, w, c)
             } else {
@@ -1213,6 +1229,14 @@ pub enum Op {
     SextB,
     SextH,
     ZextH,
+    Bclr,
+    Bclri,
+    Bext,
+    Bexti,
+    Binv,
+    Binvi,
+    Bset,
+    Bseti,
     Clmul,
     Clmulh,
     Clmulr,

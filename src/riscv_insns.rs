@@ -1,10 +1,10 @@
-/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zicond` (RVA20+) instruction definitions
+/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond` (RVA20+) instruction definitions
 ///
 /// This is a dependency-free module that just gives the same and
-/// encoding of the `RV64GC_Zba_Zbb_Zbc_Zicond` instructions, useful for
+/// encoding of the `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond` instructions, useful for
 /// deriving decoders etc.  There is simple utility function that
 /// generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 237] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 245] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -240,6 +240,15 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 237] = [
     (0xfff0707f, 0x60401013, "sext.b"),
     (0xfff0707f, 0x60501013, "sext.h"),
     (0xfff0707f, 0x0800403b, "zext.h"),
+    // Zbs — single-bit instructions
+    (0xfe00707f, 0x48001033, "bclr"),
+    (0xfc00707f, 0x48001013, "bclri"),
+    (0xfe00707f, 0x48005033, "bext"),
+    (0xfc00707f, 0x48005013, "bexti"),
+    (0xfe00707f, 0x68001033, "binv"),
+    (0xfc00707f, 0x68001013, "binvi"),
+    (0xfe00707f, 0x28001033, "bset"),
+    (0xfc00707f, 0x28001013, "bseti"),
     // Zbc — carry-less multiplication
     (0xfe00707f, 0x0a001033, "clmul"),
     (0xfe00707f, 0x0a003033, "clmulh"),
@@ -1336,6 +1345,38 @@ mod test {
         }
         fn zext_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "zext_h";
+            0
+        }
+        fn bclr(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "bclr";
+            0
+        }
+        fn bclri(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "bclri";
+            0
+        }
+        fn bext(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "bext";
+            0
+        }
+        fn bexti(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "bexti";
+            0
+        }
+        fn binv(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "binv";
+            0
+        }
+        fn binvi(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "binvi";
+            0
+        }
+        fn bset(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "bset";
+            0
+        }
+        fn bseti(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "bseti";
             0
         }
         fn clmul(_a: u64, _w: u32, s: &mut Self::Context) -> usize {

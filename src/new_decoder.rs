@@ -798,6 +798,22 @@ impl RiscvDecoder for Decoder {
     fn sext_b(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::SextB) }
     fn sext_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::SextH) }
     fn zext_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::ZextH) }
+    fn bclr(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Bclr) }
+    fn bclri(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_shift(a, insn, Op::Bclri)
+    }
+    fn bext(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Bext) }
+    fn bexti(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_shift(a, insn, Op::Bexti)
+    }
+    fn binv(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Binv) }
+    fn binvi(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_shift(a, insn, Op::Binvi)
+    }
+    fn bset(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Bset) }
+    fn bseti(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_shift(a, insn, Op::Bseti)
+    }
     fn clmul(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmul) }
     fn clmulh(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmulh) }
     fn clmulr(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmulr) }

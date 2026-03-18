@@ -2067,6 +2067,15 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::SextB => Ok((ops.s1 as i8 as i64 as u64, 0)),
         Op::SextH => Ok((ops.s1 as i16 as i64 as u64, 0)),
         Op::ZextH => Ok((ops.s1 & 0xffff, 0)),
+        // Zbs — single-bit instructions
+        Op::Bclr => Ok((ops.s1 & !(1 << (ops.s2 & 63)), 0)),
+        Op::Bclri => Ok((ops.s1 & !(1 << (uop.imm & 63)), 0)),
+        Op::Bext => Ok(((ops.s1 >> (ops.s2 & 63)) & 1, 0)),
+        Op::Bexti => Ok(((ops.s1 >> (uop.imm & 63)) & 1, 0)),
+        Op::Binv => Ok((ops.s1 ^ (1 << (ops.s2 & 63)), 0)),
+        Op::Binvi => Ok((ops.s1 ^ (1 << (uop.imm & 63)), 0)),
+        Op::Bset => Ok((ops.s1 | (1 << (ops.s2 & 63)), 0)),
+        Op::Bseti => Ok((ops.s1 | (1 << (uop.imm & 63)), 0)),
         Op::Clmul => {
             let mut r = 0;
             for i in 0..64 {

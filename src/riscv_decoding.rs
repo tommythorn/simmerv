@@ -241,6 +241,14 @@ pub trait RiscvDecoder {
     fn sext_b(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn sext_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn zext_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn bclr(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn bclri(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn bext(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn bexti(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn binv(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn binvi(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn bset(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn bseti(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn clmul(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn clmulh(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn clmulr(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
