@@ -26,6 +26,7 @@ const IIR_NO_INTERRUPT: u8 = 0x07;
 
 const LSR_DATA_AVAILABLE: u8 = 0x01;
 const LSR_THR_EMPTY: u8 = 0x20;
+const LSR_TEMT: u8 = 0x40; // Transmitter Empty (shift register also empty)
 
 /// NS16550A-compatible UART.
 pub struct Uart {
@@ -42,7 +43,7 @@ impl Uart {
     #[must_use]
     pub fn new(backend: Box<dyn SerialBackend>, irq: u32) -> Self {
         let mut regs = [0; 8];
-        regs[LSR] = LSR_THR_EMPTY;
+        regs[LSR] = LSR_THR_EMPTY | LSR_TEMT;
         Self {
             regs,
             rbr: 0,
@@ -124,6 +125,8 @@ impl MemoryMapped for Uart {
                         b.put_byte(self.regs[RBR_THR]);
                     }
                     self.regs[RBR_THR] = self.rbr;
+                    // We transmit instantly so both THRE and TEMT stay set
+                    self.regs[LSR] |= LSR_THR_EMPTY | LSR_TEMT;
                 }
                 (1, false) => {
                     // IER write: rising edge of THREINT_BIT fires THRE interrupt
