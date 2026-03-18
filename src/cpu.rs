@@ -660,6 +660,18 @@ impl Cpu {
             tval: 0,
         });
 
+        // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
+        // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode) — all return 0.
+        if matches!(csrno, 0xC03..=0xC1F) {
+            return Ok(0);
+        }
+        if matches!(csrno, 0xB03..=0xB1F | 0x323..=0x33F) {
+            if u64::from(self.mmu.prv) < 3 {
+                return illegal;
+            }
+            return Ok(0);
+        }
+
         let Some(csr) = self.has_csr_access_privilege(csrno) else {
             return illegal;
         };
@@ -683,6 +695,19 @@ impl Cpu {
             trap: Trap::IllegalInstruction,
             tval: 0,
         });
+
+        // Zihpm: hpmcounter3-31 are read-only; mhpmcounter/mhpmevent writes are
+        // silently ignored.
+        if matches!(csrno, 0xC03..=0xC1F) {
+            return illegal; // read-only
+        }
+        if matches!(csrno, 0xB03..=0xB1F | 0x323..=0x33F) {
+            return if u64::from(self.mmu.prv) < 3 {
+                illegal
+            } else {
+                Ok(())
+            };
+        }
 
         let Some(csr) = self.has_csr_access_privilege(csrno) else {
             return illegal;
