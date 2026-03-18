@@ -298,6 +298,7 @@ impl Cpu {
     /// * `reg` Register number. Must be 0-31
     #[must_use]
     pub fn read_register(&self, reg: Reg) -> u64 { self.rf[reg] }
+    pub fn write_register(&mut self, reg: Reg, value: u64) { self.write_x(reg, value); }
 
     /// Checks that float instructions are enabled and
     /// that the rounding mode is legal; do not dirty the FP state

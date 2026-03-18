@@ -80,6 +80,11 @@ struct Args {
     #[allow(dead_code)]
     sig_region_start: Option<String>,
 
+    /// set up fw_dynamic_info for OpenSBI fw_dynamic firmware; argument is the
+    /// kernel entry address (e.g. 0x80200000)
+    #[argh(option)]
+    fw_dynamic: Option<String>,
+
     /// memory images, elf or binary blobs, optionally follow by a comma and the
     /// the "0x"-prefixed load address in hex (this is required for binary
     /// blobs)
@@ -268,6 +273,15 @@ fn main() -> anyhow::Result<()> {
     // Only set the PC if we didn't load a snapshot (snapshot already has PC).
     if !loaded_snapshot {
         emulator.cpu.update_pc(emu_start.unwrap_or(0x8000_0000));
+    }
+
+    // fw_dynamic: write the fw_dynamic_info struct and set a2.
+    // The struct is placed 512 KiB after the firmware base (0x80080000),
+    // safely past the firmware image and well before the kernel at 0x80200000.
+    if let Some(ref addr_str) = args.fw_dynamic {
+        let kernel_addr = u64::from_str_radix(addr_str.trim_start_matches("0x"), 16)
+            .with_context(|| format!("invalid --fw-dynamic address: {addr_str}"))?;
+        emulator.setup_fw_dynamic(kernel_addr, 0x8008_0000);
     }
 
     // Run with optional periodic snapshots, or plain run.

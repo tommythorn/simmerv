@@ -484,6 +484,19 @@ impl Emulator {
                 log::info!("Relocating it to {load_addr:#x}");
                 load_addr
             }
+            (xmas_elf::header::Type::Executable, Some(load_addr)) => {
+                // Kernel ELFs (e.g. vmlinux) are linked with paddr=0; apply
+                // an offset so segments land at the intended physical address.
+                let base_paddr = elf_file
+                    .program_iter()
+                    .filter(|s| matches!(s.get_type(), Ok(xmas_elf::program::Type::Load)))
+                    .map(|s| s.physical_addr())
+                    .next()
+                    .unwrap_or(0);
+                let offset = load_addr.wrapping_sub(base_paddr);
+                log::info!("Relocating EXEC ELF (paddr base {base_paddr:#x}) to {load_addr:#x}");
+                offset
+            }
             _ => 0,
         };
         let ph_iter = elf_file.program_iter();
@@ -578,6 +591,33 @@ impl Emulator {
         self.cpu
             .get_mut_mmu()
             .write_memory_at(Mmu::DTB_BASE, content);
+    }
+
+    /// Set up the `fw_dynamic_info` struct for `OpenSBI` `fw_dynamic` firmware
+    /// and place a pointer to it in a2, as required by the `fw_dynamic`
+    /// ABI.
+    ///
+    /// * `kernel_addr` — physical address of the next-stage image (the kernel)
+    /// * `info_addr`   — physical address where the struct will be written
+    pub fn setup_fw_dynamic(&mut self, kernel_addr: u64, info_addr: u64) {
+        // FW_DYNAMIC_INFO_MAGIC_VALUE = 0x4942534f ("OSBI" little-endian)
+        const MAGIC: u64 = 0x4942_534f;
+        const VERSION: u64 = 2;
+        const NEXT_MODE_S: u64 = 1;
+        // options: FLAG_NEXT_ADDR_VALID | FLAG_NEXT_MODE_VALID | FLAG_NEXT_ARG1_VALID
+        const OPTIONS: u64 = 7;
+        let boot_hart: u64 = 0;
+
+        let mut buf = [0u8; 48];
+        for (i, &v) in [MAGIC, VERSION, kernel_addr, NEXT_MODE_S, OPTIONS, boot_hart]
+            .iter()
+            .enumerate()
+        {
+            buf[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        self.cpu.get_mut_mmu().write_memory_at(info_addr, &buf);
+        self.cpu
+            .write_register(crate::new_decoder::x(12), info_addr); // a2
     }
 
     /// Enables or disables page cache optimization.
