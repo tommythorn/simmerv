@@ -1192,7 +1192,7 @@ fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
 )]
 fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
     match uop.op {
-        Op::CNop => Ok((0, 0)),
+        Op::CNop | Op::SfenceWInval | Op::SfenceInvalIr => Ok((0, 0)),
         Op::CEbreak => Err(Exception {
             trap: Trap::Breakpoint,
             tval: 0x9002,
@@ -1993,6 +1993,21 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             // HACK
             cpu.flush_icache = true;
 
+            Ok((0, 0))
+        }
+        // Svinval — sinval.vma is ordered like sfence.vma; the fence ops are no-ops in emulation
+        Op::SinvalVma => {
+            if cpu.mmu.prv == PrivMode::U
+                || cpu.mmu.prv == PrivMode::S && cpu.mmu.mstatus & MSTATUS_TVM != 0
+            {
+                return Err(Exception {
+                    trap: Trap::IllegalInstruction,
+                    tval: 0,
+                });
+            }
+            cpu.mmu.clear_page_cache();
+            cpu.reservation = None;
+            cpu.flush_icache = true;
             Ok((0, 0))
         }
         Op::Wfi => {

@@ -433,12 +433,18 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sret(a, w, c)
             } else if (w >> 7) & 0xfffffe1f == 0x20a000 {
                 C::wfi(a, w, c)
+            } else if (w >> 7) & 0xfffffe1f == 0x300000 {
+                C::sfence_w_inval(a, w, c)
+            } else if (w >> 7) & 0xfffffe1f == 0x302000 {
+                C::sfence_inval_ir(a, w, c)
             } else if (w >> 7) & 0xfffffe1f == 0x604000 {
                 C::mret(a, w, c)
             } else if (w >> 7) & 0xfffffe1f == 0xf64000 {
                 C::dret(a, w, c)
             } else if (w >> 7) & 0xfffc001f == 0x240000 {
                 C::sfence_vma(a, w, c)
+            } else if (w >> 7) & 0xfffc001f == 0x2c0000 {
+                C::sinval_vma(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -977,6 +983,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         1139 => {
             if (w >> 7) & 0xfffc001f == 0x240000 {
                 C::sfence_vma(a, w, c)
+            } else if (w >> 7) & 0xfffc001f == 0x2c0000 {
+                C::sinval_vma(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -1194,6 +1202,9 @@ pub enum Op {
     Mret,
     Sret,
     SfenceVma,
+    SinvalVma,
+    SfenceWInval,
+    SfenceInvalIr,
     Wfi,
     AddUw,
     Sh1add,

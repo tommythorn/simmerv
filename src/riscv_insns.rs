@@ -1,10 +1,11 @@
-/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond` (RVA20+) instruction definitions
+/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval` (RVA20+) instruction
+/// definitions
 ///
 /// This is a dependency-free module that just gives the same and
-/// encoding of the `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond` instructions, useful for
-/// deriving decoders etc.  There is simple utility function that
+/// encoding of the `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval` instructions, useful
+/// for deriving decoders etc.  There is simple utility function that
 /// generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 245] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 248] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -204,6 +205,10 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 245] = [
     (0xffffffff, 0x30200073, "mret"),
     (0xffffffff, 0x10200073, "sret"),
     (0xfe007fff, 0x12000073, "sfence.vma"),
+    // Svinval — fine-grained address-translation cache invalidation
+    (0xfe007fff, 0x16000073, "sinval.vma"),
+    (0xffffffff, 0x18000073, "sfence.w.inval"),
+    (0xffffffff, 0x18100073, "sfence.inval.ir"),
     (0xffffffff, 0x10500073, "wfi"),
     (0xfe00707f, 0x0800003b, "add.uw"),
     (0xfe00707f, 0x20002033, "sh1add"),
@@ -1205,6 +1210,18 @@ mod test {
         }
         fn sfence_vma(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "sfence_vma";
+            0
+        }
+        fn sinval_vma(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "sinval_vma";
+            0
+        }
+        fn sfence_w_inval(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "sfence_w_inval";
+            0
+        }
+        fn sfence_inval_ir(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "sfence_inval_ir";
             0
         }
         fn wfi(_a: u64, _w: u32, s: &mut Self::Context) -> usize {

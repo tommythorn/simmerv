@@ -206,6 +206,9 @@ pub trait RiscvDecoder {
     fn mret(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn sret(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn sfence_vma(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn sinval_vma(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn sfence_w_inval(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn sfence_inval_ir(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn wfi(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn add_uw(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn sh1add(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
