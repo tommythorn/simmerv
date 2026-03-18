@@ -283,18 +283,17 @@ impl VirtioNet {
             let buf_cap = crate::device::dma_read_u32(memory, desc_elem.wrapping_add(8)) as usize;
 
             let total = NET_HDR_LEN + packet.len();
-            if buf_cap >= total {
-                // Zero the net header
-                if let Some(s) = dma_slice(memory, buf_addr, NET_HDR_LEN) {
-                    s.fill(0);
-                }
-                // Copy frame
-                if let Some(s) = dma_slice(memory, buf_addr + NET_HDR_LEN as u64, packet.len()) {
-                    s.copy_from_slice(&packet);
-                }
-            } else {
-                // Buffer too small — drop packet
-                break;
+            if buf_cap < total {
+                // Buffer too small — drop packet and try the next one
+                continue;
+            }
+            // Zero the net header
+            if let Some(s) = dma_slice(memory, buf_addr, NET_HDR_LEN) {
+                s.fill(0);
+            }
+            // Copy frame
+            if let Some(s) = dma_slice(memory, buf_addr + NET_HDR_LEN as u64, packet.len()) {
+                s.copy_from_slice(&packet);
             }
 
             // Update used ring with bytes written
@@ -473,6 +472,12 @@ impl MemoryMapped for VirtioNet {
         let rx = self.service_rx(memory);
         if tx || rx {
             self.interrupt_status |= 1;
+        }
+        // IRQ is level-triggered: hold it high while interrupt_status is set,
+        // not just on the cycle when new work was done.  The PLIC IP bit gets
+        // cleared when the driver claims the interrupt; without re-asserting
+        // here, subsequent TX/RX completions would never be seen by the CPU.
+        if self.interrupt_status != 0 {
             ctx.asserted_irq = Some(self.irq);
         }
         ctx.next_service_in = Some(1);
