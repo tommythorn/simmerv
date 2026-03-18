@@ -45,13 +45,14 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 - [x] Svade (hardware A/D fault-on-access)
 - [x] Sstc (stimecmp/menvcfg timer compare)
 - [x] Sv39, Sv48, Sv57
-- [x] Privileged instructions
+- [x] Privileged Spec 1.12 (mcounteren/scounteren, senvcfg, PMP stub with 0 entries)
 - [ ] Svnapot
-- [-] PMP (deliberately not implemented: would hurt performance)
+- [-] PMP enforcement (0 entries implemented; all accesses permitted)
 
 The emulator supports all instructions listed above but some (like
 many FP instructions) are not 100% to the spec.
 
+- Passes all riscof (RISC-V Architectural Tests) for RV64IMC
 - Boots Buildroot, Debian Trixie, Ubuntu
 - Linux OpenSBI and legacy BBL boot support
 

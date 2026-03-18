@@ -8,7 +8,11 @@ For an up-to-date view, look at the current issues on github*.
 - Pass all of riscv-test (status: debug, svnapot, and lots of FP.
   Might punt on debug and svnapot for now)
 
-- Pass all of riscof
+- ~~Pass all of riscof~~ Done (107/107 RV64IMC tests pass)
+
+- Priv Spec 1.12 compliance (mcounteren/scounteren, senvcfg, misa WARL,
+  PMP stub with 0 entries — all done; remaining gaps are hardwired-zero
+  items the spec explicitly permits omitting)
 
 - Fix U-boot boot (still unclear why it crashes)
 
