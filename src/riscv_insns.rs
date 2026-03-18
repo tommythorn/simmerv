@@ -1,11 +1,12 @@
-/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz` (RVA22)
-/// instruction definitions
+/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz_Zfhmin`
+/// (RVA22) instruction definitions
 ///
 /// This is a dependency-free module that just gives the same and
-/// encoding of the `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz`
+/// encoding of the
+/// `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz_Zfhmin`
 /// instructions, useful for deriving decoders etc.  There is simple utility
 /// function that generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 255] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 263] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -268,6 +269,15 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 255] = [
     (0x01f07fff, 0x00006013, "prefetch.i"),
     (0x01f07fff, 0x00106013, "prefetch.r"),
     (0x01f07fff, 0x00306013, "prefetch.w"),
+    // Zfhmin — half-precision float (load/store/move/convert)
+    (0x0000707f, 0x00001007, "flh"),
+    (0x0000707f, 0x00001027, "fsh"),
+    (0xfff0707f, 0xe4000053, "fmv.x.h"),
+    (0xfff0707f, 0xf4000053, "fmv.h.x"),
+    (0xfff0007f, 0x40200053, "fcvt.s.h"),
+    (0xfff0007f, 0x44000053, "fcvt.h.s"),
+    (0xfff0007f, 0x42200053, "fcvt.d.h"),
+    (0xfff0007f, 0x44100053, "fcvt.h.d"),
 ];
 
 fn to_pascal_case(s: &str) -> String {
@@ -1446,6 +1456,38 @@ mod test {
         }
         fn prefetch_w(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "prefetch_w";
+            0
+        }
+        fn flh(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "flh";
+            0
+        }
+        fn fsh(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fsh";
+            0
+        }
+        fn fmv_x_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fmv_x_h";
+            0
+        }
+        fn fmv_h_x(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fmv_h_x";
+            0
+        }
+        fn fcvt_s_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fcvt_s_h";
+            0
+        }
+        fn fcvt_h_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fcvt_h_s";
+            0
+        }
+        fn fcvt_d_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fcvt_d_h";
+            0
+        }
+        fn fcvt_h_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fcvt_h_d";
             0
         }
         fn unimp(_a: u64, _w: u32, s: &mut Self::Context) -> usize {

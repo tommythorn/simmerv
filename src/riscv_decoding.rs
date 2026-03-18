@@ -262,5 +262,13 @@ pub trait RiscvDecoder {
     fn prefetch_i(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn prefetch_r(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn prefetch_w(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn flh(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fsh(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fmv_x_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fmv_h_x(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fcvt_s_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fcvt_h_s(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fcvt_d_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn fcvt_h_d(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn unimp(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
 }

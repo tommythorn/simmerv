@@ -26,6 +26,7 @@ use crate::speedometer::Speedometer;
 pub use csr::*;
 use fp::RoundingMode;
 use fp::Sf;
+use fp::Sf16;
 use fp::Sf32;
 use fp::Sf64;
 use fp::cvt_i32_sf32;
@@ -1706,6 +1707,16 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 4)?;
             Ok((0, 0))
         }
+        Op::Flh => {
+            cpu.check_float_access_and_dirty(0)?;
+            Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 2)? | fp::NAN_BOX_F16, 0))
+        }
+        Op::Fsh => {
+            cpu.check_float_access_and_dirty(0)?;
+            cpu.reservation = None;
+            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 2)?;
+            Ok((0, 0))
+        }
         Op::FmaddS => {
             cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
@@ -1798,6 +1809,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             cpu.check_float_access_and_dirty(0)?;
             Ok((ops.s1 as i32 as u64, 0))
         }
+        Op::FmvXH => {
+            cpu.check_float_access_and_dirty(0)?;
+            Ok((Sf16::unbox(ops.s1) as i16 as u64, 0))
+        }
         Op::FeqS => {
             cpu.check_float_access_and_dirty(0)?;
             Ok(Sf32::feq(ops.s1, ops.s2))
@@ -1825,6 +1840,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::FmvWX => {
             cpu.check_float_access_and_dirty(uop.rm)?;
             Ok((fp::NAN_BOX_F32 | ops.s1, 0))
+        }
+        Op::FmvHX => {
+            cpu.check_float_access_and_dirty(0)?;
+            Ok((fp::NAN_BOX_F16 | (ops.s1 & 0xFFFF), 0))
         }
         // RV64F
         Op::FcvtLS => {
@@ -1940,6 +1959,22 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::FcvtDS => {
             cpu.check_float_access_and_dirty(uop.rm)?;
             Ok(fp::fcvt_d_s(ops.s1))
+        }
+        Op::FcvtSH => {
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(fp::fcvt_s_h(ops.s1))
+        }
+        Op::FcvtHS => {
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(fp::fcvt_h_s(ops.s1, cpu.get_rm(uop.rm)))
+        }
+        Op::FcvtDH => {
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(fp::fcvt_d_h(ops.s1))
+        }
+        Op::FcvtHD => {
+            cpu.check_float_access_and_dirty(uop.rm)?;
+            Ok(fp::fcvt_h_d(ops.s1, cpu.get_rm(uop.rm)))
         }
         Op::FeqD => {
             cpu.check_float_access_and_dirty(0)?;

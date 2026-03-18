@@ -845,6 +845,22 @@ impl RiscvDecoder for Decoder {
     fn prefetch_w(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_serialized(a, insn, Op::PrefetchW)
     }
+    fn flh(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i_fx(a, insn, Op::Flh) }
+    fn fsh(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_s_xf(a, insn, Op::Fsh) }
+    fn fmv_x_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r_xf(a, insn, Op::FmvXH) }
+    fn fmv_h_x(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r_fx(a, insn, Op::FmvHX) }
+    fn fcvt_s_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_fff(a, insn, Op::FcvtSH)
+    }
+    fn fcvt_h_s(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_fff(a, insn, Op::FcvtHS)
+    }
+    fn fcvt_d_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_fff(a, insn, Op::FcvtDH)
+    }
+    fn fcvt_h_d(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_r_fff(a, insn, Op::FcvtHD)
+    }
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_exceptional(a, insn, Op::Unimp)
     }

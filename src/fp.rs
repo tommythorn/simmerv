@@ -10,6 +10,7 @@ use crate::native_fp;
 use num_derive::FromPrimitive;
 
 pub const NAN_BOX_F32: u64 = 0xFFFF_FFFF_0000_0000;
+pub const NAN_BOX_F16: u64 = 0xFFFF_FFFF_FFFF_0000;
 
 pub mod fflag {
     pub const INEXACT: u8 = 1;
@@ -45,6 +46,7 @@ pub enum Fclass {
     Qnan,
 }
 
+pub struct Sf16;
 pub struct Sf32;
 pub struct Sf64;
 
@@ -499,6 +501,181 @@ impl Sf for Sf64 {
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn to_float(v: u64) -> f64 { f64::from_bits(v) }
+}
+
+impl Sf for Sf16 {
+    type F = u16; // raw bits — no native f16 in stable Rust
+
+    const N: usize = 16;
+    const MANT_SIZE: usize = 10;
+    const EXP_SIZE: usize = 5;
+    const QNAN: u64 = 0x7E00;
+    // Override defaults that assume N is 32 or 64
+    const MASK: u64 = 0xFFFF;
+    const MASKSIGN: u64 = 0x7FFF;
+
+    fn from_float(x: u16) -> u64 { NAN_BOX_F16 | u64::from(x) }
+    #[allow(clippy::cast_possible_truncation)]
+    fn to_float(x: u64) -> u16 { Self::unbox(x) as u16 }
+
+    fn unbox(r: u64) -> u64 {
+        if (r & NAN_BOX_F16) == NAN_BOX_F16 {
+            r & 0xFFFF
+        } else {
+            Self::QNAN
+        }
+    }
+
+    fn nanbox(r: u64) -> u64 { r | NAN_BOX_F16 }
+}
+
+// f16 → f32 (widening, always exact)
+#[must_use]
+pub fn fcvt_s_h(a: u64) -> (u64, u8) {
+    let a = Sf16::unbox(a);
+    let sign = Sf16::sign(a);
+    let exp16 = Sf16::exp(a);
+    let mant16 = Sf16::mant(a);
+
+    if exp16 == Sf16::EXP_MASK {
+        if mant16 != 0 {
+            let fflags = if Sf16::is_signan(a) {
+                fflag::INVALIDOP
+            } else {
+                0
+            };
+            return (
+                Sf32::pack(sign, Sf32::EXP_MASK, Sf32::QNAN_MASK | (mant16 << 13)),
+                fflags,
+            );
+        }
+        return (Sf32::pack(sign, Sf32::EXP_MASK, 0), 0);
+    }
+    if exp16 == 0 {
+        if mant16 == 0 {
+            return (Sf32::pack(sign, 0, 0), 0);
+        }
+        // subnormal f16 → normal f32
+        let (exp_adj, norm_mant) = Sf16::normalize_subnormal(mant16);
+        let exp32 = (exp_adj - 15 + 127) as u64;
+        let mant32 = norm_mant << (Sf32::MANT_SIZE - Sf16::MANT_SIZE);
+        return (Sf32::pack(sign, exp32, mant32), 0);
+    }
+    let exp32 = exp16 - 15 + 127;
+    let mant32 = mant16 << (Sf32::MANT_SIZE - Sf16::MANT_SIZE);
+    (Sf32::pack(sign, exp32, mant32), 0)
+}
+
+// f32 → f16 (narrowing, may lose precision)
+#[must_use]
+pub fn fcvt_h_s(a: u64, rm: RoundingMode) -> (u64, u8) {
+    let a = Sf32::unbox(a);
+    let sign = Sf32::sign(a);
+    let exp32 = Sf32::exp(a);
+    let mant32 = Sf32::mant(a);
+
+    if Sf32::is_nan(a) {
+        let fflags = if Sf32::is_signan(a) {
+            fflag::INVALIDOP
+        } else {
+            0
+        };
+        return (Sf16::nanbox(Sf16::QNAN), fflags);
+    }
+    if exp32 == Sf32::EXP_MASK {
+        return (Sf16::pack(sign, Sf16::EXP_MASK, 0), 0);
+    }
+    if exp32 == 0 && mant32 == 0 {
+        return (Sf16::pack(sign, 0, 0), 0);
+    }
+
+    let (a_exp, a_mant_full) = if exp32 == 0 {
+        let (adj_exp, norm_mant) = Sf32::normalize_subnormal(mant32);
+        (adj_exp - 127 + 15, (1u64 << Sf32::MANT_SIZE) | norm_mant)
+    } else {
+        (exp32 as i64 - 127 + 15, (1u64 << Sf32::MANT_SIZE) | mant32)
+    };
+
+    // Shift 24-bit f32 mantissa (MSB at bit 23) right to 15-bit Sf16 form (MSB at
+    // bit 14). shift = 23 - 14 = 9; lower 9 bits collapse into sticky LSB.
+    let shift = Sf32::MANT_SIZE - Sf16::IMANT_SIZE;
+    let mask = (1u64 << shift) - 1;
+    let a_mant = (a_mant_full >> shift) | u64::from((a_mant_full & mask) != 0);
+    Sf16::normalize(sign, a_exp, a_mant, rm)
+}
+
+// f16 → f64 (widening, always exact)
+#[must_use]
+pub fn fcvt_d_h(a: u64) -> (u64, u8) {
+    let a = Sf16::unbox(a);
+    let sign = Sf16::sign(a);
+    let exp16 = Sf16::exp(a);
+    let mant16 = Sf16::mant(a);
+
+    if exp16 == Sf16::EXP_MASK {
+        if mant16 != 0 {
+            let fflags = if Sf16::is_signan(a) {
+                fflag::INVALIDOP
+            } else {
+                0
+            };
+            return (
+                Sf64::pack(sign, Sf64::EXP_MASK, Sf64::QNAN_MASK | (mant16 << 42)),
+                fflags,
+            );
+        }
+        return (Sf64::pack(sign, Sf64::EXP_MASK, 0), 0);
+    }
+    if exp16 == 0 {
+        if mant16 == 0 {
+            return (Sf64::pack(sign, 0, 0), 0);
+        }
+        let (exp_adj, norm_mant) = Sf16::normalize_subnormal(mant16);
+        let exp64 = (exp_adj - 15 + 1023) as u64;
+        let mant64 = norm_mant << (Sf64::MANT_SIZE - Sf16::MANT_SIZE);
+        return (Sf64::pack(sign, exp64, mant64), 0);
+    }
+    let exp64 = exp16 - 15 + 1023;
+    let mant64 = mant16 << (Sf64::MANT_SIZE - Sf16::MANT_SIZE);
+    (Sf64::pack(sign, exp64, mant64), 0)
+}
+
+// f64 → f16 (narrowing, may lose precision)
+#[must_use]
+pub fn fcvt_h_d(a: u64, rm: RoundingMode) -> (u64, u8) {
+    let a = Sf64::unbox(a);
+    let sign = Sf64::sign(a);
+    let exp64 = Sf64::exp(a);
+    let mant64 = Sf64::mant(a);
+
+    if Sf64::is_nan(a) {
+        let fflags = if Sf64::is_signan(a) {
+            fflag::INVALIDOP
+        } else {
+            0
+        };
+        return (Sf16::nanbox(Sf16::QNAN), fflags);
+    }
+    if exp64 == Sf64::EXP_MASK {
+        return (Sf16::pack(sign, Sf16::EXP_MASK, 0), 0);
+    }
+    if exp64 == 0 && mant64 == 0 {
+        return (Sf16::pack(sign, 0, 0), 0);
+    }
+
+    let (a_exp, a_mant_full) = if exp64 == 0 {
+        let (adj_exp, norm_mant) = Sf64::normalize_subnormal(mant64);
+        (adj_exp - 1023 + 15, (1u64 << Sf64::MANT_SIZE) | norm_mant)
+    } else {
+        (exp64 as i64 - 1023 + 15, (1u64 << Sf64::MANT_SIZE) | mant64)
+    };
+
+    // Shift 53-bit f64 mantissa (MSB at bit 52) right to 15-bit Sf16 form (MSB at
+    // bit 14). shift = 52 - 14 = 38; lower 38 bits collapse into sticky LSB.
+    let shift = Sf64::MANT_SIZE - Sf16::IMANT_SIZE;
+    let mask = (1u64 << shift) - 1;
+    let a_mant = (a_mant_full >> shift) | u64::from((a_mant_full & mask) != 0);
+    Sf16::normalize(sign, a_exp, a_mant, rm)
 }
 
 #[must_use]
