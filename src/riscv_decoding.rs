@@ -241,5 +241,8 @@ pub trait RiscvDecoder {
     fn sext_b(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn sext_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn zext_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn clmul(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn clmulh(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn clmulr(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn unimp(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
 }

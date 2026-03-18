@@ -798,6 +798,9 @@ impl RiscvDecoder for Decoder {
     fn sext_b(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::SextB) }
     fn sext_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_i(a, insn, Op::SextH) }
     fn zext_h(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::ZextH) }
+    fn clmul(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmul) }
+    fn clmulh(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmulh) }
+    fn clmulr(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_r(a, insn, Op::Clmulr) }
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_exceptional(a, insn, Op::Unimp)
     }

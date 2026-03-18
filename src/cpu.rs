@@ -2067,6 +2067,33 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::SextB => Ok((ops.s1 as i8 as i64 as u64, 0)),
         Op::SextH => Ok((ops.s1 as i16 as i64 as u64, 0)),
         Op::ZextH => Ok((ops.s1 & 0xffff, 0)),
+        Op::Clmul => {
+            let mut r = 0;
+            for i in 0..64 {
+                if (ops.s2 >> i) & 1 == 1 {
+                    r ^= ops.s1 << i;
+                }
+            }
+            Ok((r, 0))
+        }
+        Op::Clmulh => {
+            let mut r = 0;
+            for i in 1..64 {
+                if (ops.s2 >> i) & 1 == 1 {
+                    r ^= ops.s1 >> (64 - i);
+                }
+            }
+            Ok((r, 0))
+        }
+        Op::Clmulr => {
+            let mut r = 0;
+            for i in 0..64 {
+                if (ops.s2 >> i) & 1 == 1 {
+                    r ^= ops.s1 >> (63 - i);
+                }
+            }
+            Ok((r, 0))
+        }
         // Last one is a sentiel and must always be this illegal instruction
         Op::Unimp | Op::CUnimp => Err(Exception {
             trap: Trap::IllegalInstruction,

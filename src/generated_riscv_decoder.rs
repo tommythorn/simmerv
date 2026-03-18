@@ -313,6 +313,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sll(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::mulh(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::clmul(a, w, c)
             } else if (w >> 25) == 0x30 {
                 C::rol(a, w, c)
             } else {
@@ -324,6 +326,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::slt(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::mulhsu(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::clmulr(a, w, c)
             } else if (w >> 25) == 0x10 {
                 C::sh1add(a, w, c)
             } else {
@@ -335,6 +339,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sltu(a, w, c)
             } else if (w >> 25) == 0x1 {
                 C::mulhu(a, w, c)
+            } else if (w >> 25) == 0x5 {
+                C::clmulh(a, w, c)
             } else {
                 C::unimp(a, w, c)
             }
@@ -1207,5 +1213,8 @@ pub enum Op {
     SextB,
     SextH,
     ZextH,
+    Clmul,
+    Clmulh,
+    Clmulr,
     Unimp,
 }

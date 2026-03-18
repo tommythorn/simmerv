@@ -1,10 +1,10 @@
-/// RISC-V `RV64GC_Zba_Zbb_Zicond` (RVA20+) instruction definitions
+/// RISC-V `RV64GC_Zba_Zbb_Zbc_Zicond` (RVA20+) instruction definitions
 ///
 /// This is a dependency-free module that just gives the same and
-/// encoding of the `RV64GC_Zba_Zbb_Zicond` instructions, useful for
+/// encoding of the `RV64GC_Zba_Zbb_Zbc_Zicond` instructions, useful for
 /// deriving decoders etc.  There is simple utility function that
 /// generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 234] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 237] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -240,6 +240,10 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 234] = [
     (0xfff0707f, 0x60401013, "sext.b"),
     (0xfff0707f, 0x60501013, "sext.h"),
     (0xfff0707f, 0x0800403b, "zext.h"),
+    // Zbc — carry-less multiplication
+    (0xfe00707f, 0x0a001033, "clmul"),
+    (0xfe00707f, 0x0a003033, "clmulh"),
+    (0xfe00707f, 0x0a002033, "clmulr"),
 ];
 
 fn to_pascal_case(s: &str) -> String {
@@ -1332,6 +1336,18 @@ mod test {
         }
         fn zext_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "zext_h";
+            0
+        }
+        fn clmul(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "clmul";
+            0
+        }
+        fn clmulh(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "clmulh";
+            0
+        }
+        fn clmulr(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "clmulr";
             0
         }
         fn unimp(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
