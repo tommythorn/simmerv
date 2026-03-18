@@ -122,7 +122,7 @@ fn write_snap(emulator: &mut Emulator, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn is_snapshot(data: &[u8]) -> bool { data.len() >= 9 && data[..9] == *b"SIMMERVC4" }
+fn is_snapshot(data: &[u8]) -> bool { data.len() >= 9 && data[..9] == *b"SIMMERVC5" }
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() -> anyhow::Result<()> {

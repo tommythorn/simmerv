@@ -672,6 +672,15 @@ impl Cpu {
         // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
         // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode) — all return 0.
         if matches!(csrno, 0xC03..=0xC1F) {
+            if self.mmu.prv != PrivMode::M {
+                let bit = 1u32 << (csrno - 0xC00);
+                if self.csr.mcounteren & bit == 0 {
+                    return illegal;
+                }
+                if self.mmu.prv == PrivMode::U && self.csr.scounteren & bit == 0 {
+                    return illegal;
+                }
+            }
             return Ok(0);
         }
         if matches!(csrno, 0xB03..=0xB1F | 0x323..=0x33F) {
@@ -687,6 +696,15 @@ impl Cpu {
 
         match csr {
             Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access_ro(0)?,
+            Csr::Cycle | Csr::Time | Csr::Instret if self.mmu.prv != PrivMode::M => {
+                let bit = 1u32 << (csrno & 0x1f);
+                if self.csr.mcounteren & bit == 0 {
+                    return illegal;
+                }
+                if self.mmu.prv == PrivMode::U && self.csr.scounteren & bit == 0 {
+                    return illegal;
+                }
+            }
             Csr::Satp => {
                 if self.mmu.prv == S && self.mmu.mstatus & MSTATUS_TVM != 0 {
                     return illegal;
@@ -820,6 +838,8 @@ impl Cpu {
             Csr::Stval => self.csr.stval,
             Csr::Stvec => self.csr.stvec,
             Csr::Stimecmp => self.csr.stimecmp,
+            Csr::Mcounteren => u64::from(self.csr.mcounteren),
+            Csr::Scounteren => u64::from(self.csr.scounteren),
             Csr::Menvcfg => self.csr.menvcfg,
             Csr::Time => self.mmu.read_mtime_csr(),
             Csr::Ustatus => self.csr.ustatus,
@@ -869,6 +889,8 @@ impl Cpu {
                 // Clear STIP immediately; service() will re-set it if needed
                 self.mmu.mip &= !MIP_STIP;
             }
+            Csr::Mcounteren => self.csr.mcounteren = (value & 0xFFFF_FFFF) as u32,
+            Csr::Scounteren => self.csr.scounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Menvcfg => self.csr.menvcfg = value,
             Csr::Senvcfg => {} // U-mode env config; no Sstc-relevant bits for now
             Csr::Time => self.mmu.write_mtime_csr(value), // XXX SHOULD trap
@@ -948,9 +970,28 @@ impl Cpu {
             }
             let c = &self.csr;
             for &v in &[
-                c.mcause, c.medeleg, c.mepc, c.mhartid, c.mideleg, c.mie, c.misa, c.mscratch,
-                c.mtval, c.mtvec, c.scause, c.sedeleg, c.sepc, c.sideleg, c.sscratch, c.stval,
-                c.stvec, c.ustatus, c.menvcfg, c.stimecmp,
+                c.mcause,
+                c.medeleg,
+                c.mepc,
+                c.mhartid,
+                c.mideleg,
+                c.mie,
+                c.misa,
+                c.mscratch,
+                c.mtval,
+                c.mtvec,
+                c.scause,
+                c.sedeleg,
+                c.sepc,
+                c.sideleg,
+                c.sscratch,
+                c.stval,
+                c.stvec,
+                c.ustatus,
+                c.menvcfg,
+                c.stimecmp,
+                u64::from(c.mcounteren),
+                u64::from(c.scounteren),
             ] {
                 w.u64(v);
             }
@@ -1026,6 +1067,8 @@ impl Cpu {
         ] {
             *field = r.u64()?;
         }
+        c.mcounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
+        c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         self.flush_icache = true;
         self.mmu.read_state(r.remaining(), make_device)
     }

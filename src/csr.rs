@@ -216,6 +216,8 @@ pub struct CsrFile {
     pub stval: u64,
     pub stvec: u64,
     pub ustatus: u64,
+    pub mcounteren: u32,
+    pub scounteren: u32,
 }
 
 impl Default for CsrFile {
@@ -251,6 +253,8 @@ impl CsrFile {
             stval: 0,
             stvec: 0,
             ustatus: 0,
+            mcounteren: 0,
+            scounteren: 0,
         }
     }
 }
