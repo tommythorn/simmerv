@@ -26,7 +26,9 @@ pub enum Csr {
     Scause = 0x142,
     Stval = 0x143,
     Sip = 0x144,
+    Stimecmp = 0x14d,
     Satp = 0x180,
+    Senvcfg = 0x10a,
 
     Mstatus = 0x300,
     Misa = 0x301,
@@ -35,7 +37,7 @@ pub enum Csr {
     Mie = 0x304,
     Mtvec = 0x305,
     Mcounteren = 0x306,
-    Menvcfg = 0x30a, // Unsupported Mostly Just Configure S Access To Timecmp
+    Menvcfg = 0x30a,
     Mscratch = 0x340,
     Mepc = 0x341,
     Mcause = 0x342,
@@ -62,6 +64,8 @@ impl Display for Csr {
         write!(f, "{self:?}")
     }
 }
+
+pub const MENVCFG_STCE: u64 = 1 << 63; // Sstc: enables stimecmp in S-mode
 
 pub const MIP_MEIP: u64 = 0x800;
 pub const MIP_MTIP: u64 = 0x080;
@@ -164,8 +168,11 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Mtval
             | Csr::Mtvec
             | Csr::Mvendorid
+            | Csr::Menvcfg
             | Csr::Satp
             | Csr::Scause
+            | Csr::Senvcfg
+            | Csr::Stimecmp
             | Csr::Sedeleg
             | Csr::Sepc
             | Csr::Sideleg
@@ -189,6 +196,8 @@ pub const fn legal(csr: Csr) -> bool {
 }
 
 pub struct CsrFile {
+    pub menvcfg: u64,
+    pub stimecmp: u64,
     pub mcause: u64,
     pub medeleg: u64,
     pub mepc: u64,
@@ -222,6 +231,8 @@ impl CsrFile {
         }
 
         Self {
+            menvcfg: 0,
+            stimecmp: u64::MAX, // no deadline until set
             mcause: 0,
             medeleg: 0,
             mepc: 0,

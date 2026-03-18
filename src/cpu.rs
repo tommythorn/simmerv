@@ -344,6 +344,14 @@ impl Cpu {
             }
         }
         self.mmu.service(self.cycle);
+        // Sstc: drive STIP from stimecmp when menvcfg.STCE is set
+        if self.csr.menvcfg & MENVCFG_STCE != 0 {
+            if self.mmu.read_mtime_csr() >= self.csr.stimecmp {
+                self.mmu.mip |= MIP_STIP;
+            } else {
+                self.mmu.mip &= !MIP_STIP;
+            }
+        }
         self.handle_interrupt();
 
         false
@@ -684,6 +692,10 @@ impl Cpu {
                 }
                 return Ok(self.mmu.satp);
             }
+            // Sstc: stimecmp is only accessible from S-mode when menvcfg.STCE=1
+            Csr::Stimecmp if self.mmu.prv == S && self.csr.menvcfg & MENVCFG_STCE == 0 => {
+                return illegal;
+            }
             _ => {}
         }
         Ok(self.read_csr_raw(csr))
@@ -722,6 +734,12 @@ impl Cpu {
             Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access_and_dirty(0)?,
             Csr::Cycle => {
                 log::info!("** deny cycle writing");
+                return illegal;
+            }
+            // Sstc: stimecmp is only accessible from S-mode when menvcfg.STCE=1
+            Csr::Stimecmp
+                if self.mmu.prv == PrivMode::S && self.csr.menvcfg & MENVCFG_STCE == 0 =>
+            {
                 return illegal;
             }
             Csr::Satp => {
@@ -800,6 +818,8 @@ impl Cpu {
             }
             Csr::Stval => self.csr.stval,
             Csr::Stvec => self.csr.stvec,
+            Csr::Stimecmp => self.csr.stimecmp,
+            Csr::Menvcfg => self.csr.menvcfg,
             Csr::Time => self.mmu.read_mtime_csr(),
             Csr::Ustatus => self.csr.ustatus,
             _ => 0,
@@ -843,6 +863,13 @@ impl Cpu {
             }
             Csr::Stval => self.csr.stval = value,
             Csr::Stvec => self.csr.stvec = value,
+            Csr::Stimecmp => {
+                self.csr.stimecmp = value;
+                // Clear STIP immediately; service() will re-set it if needed
+                self.mmu.mip &= !MIP_STIP;
+            }
+            Csr::Menvcfg => self.csr.menvcfg = value,
+            Csr::Senvcfg => {} // U-mode env config; no Sstc-relevant bits for now
             Csr::Time => self.mmu.write_mtime_csr(value), // XXX SHOULD trap
             Csr::Ustatus => self.csr.ustatus = value,
             _ => log::warn!("We are ignoring writes to {csr:?}"),
@@ -894,7 +921,7 @@ impl Cpu {
     ///   [8 B] cycle
     ///   [1 B] wfi
     ///   [1 B] reservation flag (0=None, 1=Some) + [8 B] value
-    ///   [18×8 B] CSR fields (fixed order, see `read_state`)
+    ///   [20×8 B] CSR fields (fixed order, see `read_state`)
     ///   [? B] MMU state (via `Mmu::write_state`)
     pub fn write_state(&self, out: &mut Vec<u8>) {
         {
@@ -922,7 +949,7 @@ impl Cpu {
             for &v in &[
                 c.mcause, c.medeleg, c.mepc, c.mhartid, c.mideleg, c.mie, c.misa, c.mscratch,
                 c.mtval, c.mtvec, c.scause, c.sedeleg, c.sepc, c.sideleg, c.sscratch, c.stval,
-                c.stvec, c.ustatus,
+                c.stvec, c.ustatus, c.menvcfg, c.stimecmp,
             ] {
                 w.u64(v);
             }
@@ -993,6 +1020,8 @@ impl Cpu {
             &mut c.stval,
             &mut c.stvec,
             &mut c.ustatus,
+            &mut c.menvcfg,
+            &mut c.stimecmp,
         ] {
             *field = r.u64()?;
         }
