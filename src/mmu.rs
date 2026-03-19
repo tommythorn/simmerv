@@ -406,7 +406,7 @@ impl Mmu {
         clippy::cast_possible_truncation,
         clippy::too_many_lines
     )]
-    fn load_mmio(&mut self, pa: u64, size: u64) -> Result<u64, ()> {
+    pub fn load_mmio(&mut self, pa: u64, size: u64) -> Result<u64, ()> {
         // RAM fast path
         for (range, mem) in &self.memory {
             if range.contains(&pa) {
@@ -550,7 +550,7 @@ impl Mmu {
     /// # Errors
     /// Returns `Err(())` if no device covers `pa`.
     #[allow(clippy::result_unit_err, clippy::cast_possible_truncation)]
-    fn store_mmio(&mut self, pa: u64, value: u64, size: u64) -> Result<(), ()> {
+    pub fn store_mmio(&mut self, pa: u64, value: u64, size: u64) -> Result<(), ()> {
         // RAM fast path
         for (range, mem) in &mut self.memory {
             if range.contains(&pa) {

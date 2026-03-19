@@ -1207,7 +1207,28 @@ impl Cpu {
         let pa = self.mmu.translate_address(va, access, side_effect_free)?;
 
         let Ok(slice) = self.mmu.dma_slice(pa, size as usize) else {
-            return self.memop_slow(access, va, v, size, side_effect_free);
+            // Not RAM — use word-sized MMIO access (not byte-by-byte).
+            if side_effect_free {
+                return Ok(0);
+            }
+            return match access {
+                Write => self
+                    .mmu
+                    .store_mmio(pa, v, size)
+                    .map(|()| 0)
+                    .map_err(|()| Exception {
+                        trap: Trap::StoreAccessFault,
+                        tval: va,
+                    }),
+                Read | Execute => self.mmu.load_mmio(pa, size).map_err(|()| Exception {
+                    trap: if access == Execute {
+                        Trap::InstructionAccessFault
+                    } else {
+                        Trap::LoadAccessFault
+                    },
+                    tval: va,
+                }),
+            };
         };
 
         match access {

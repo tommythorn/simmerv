@@ -405,12 +405,11 @@ impl MemoryMapped for VirtioNet {
                 write_u32(offset, size, &mut self.queue_size[q], data);
                 debug!("virtio-net: queue[{q}] size={}", self.queue_size[q]);
             }
-            0x044..=0x047 => {
-                let mut v = 0u32;
-                write_u32(offset, size, &mut v, data);
-                self.queue_ready[q] = v != 0;
-                debug!("virtio-net: queue[{q}] ready={}", v != 0);
+            0x044 => {
+                self.queue_ready[q] = data[0] != 0;
+                debug!("virtio-net: queue[{q}] ready={}", self.queue_ready[q]);
             }
+            // 0x045..=0x047: upper bytes of QueueReady — handled by wildcard
             0x050..=0x053 => {
                 write_u32(offset, size, &mut self.queue_notify, data);
                 let notified_q = self.queue_notify as usize & 1;
