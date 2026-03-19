@@ -15,3 +15,6 @@ libc = "0.2.176"
 simmerv = { version = "0.3.0", path = ".." }
 termios = "0.3.3"
 zstd = "0.13.3"
+
+[features]
+paranoid-tlb = ["simmerv/paranoid-tlb"]

@@ -16,6 +16,7 @@ pub mod riscv_decoding;
 pub mod riscv_insns;
 pub mod serial_backend;
 pub mod speedometer;
+pub mod tlb;
 
 use crate::cpu::Cpu;
 use crate::device::syscon::Syscon;
@@ -618,16 +619,6 @@ impl Emulator {
         self.cpu.get_mut_mmu().write_memory_at(info_addr, &buf);
         self.cpu
             .write_register(crate::new_decoder::x(12), info_addr); // a2
-    }
-
-    /// Enables or disables page cache optimization.
-    /// Page cache optimization is experimental feature.
-    /// See [`Mmu`](./mmu/struct.Mmu.html) for the detail.
-    ///
-    /// # Arguments
-    /// * `enabled`
-    pub fn enable_page_cache(&mut self, enabled: bool) {
-        self.cpu.get_mut_mmu().enable_page_cache(enabled);
     }
 
     /// Returns mutable reference to the serial backend, if any.

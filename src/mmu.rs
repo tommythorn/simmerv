@@ -11,6 +11,9 @@ use crate::device::plic::Plic;
 use crate::device::uart::Uart;
 use crate::riscv;
 use crate::serial_backend::SerialBackend;
+use crate::tlb::Tlb;
+use crate::tlb::check_perm;
+use crate::tlb::pack_perm;
 use cpu::CONFIG_SW_MANAGED_A_AND_D;
 use cpu::Exception;
 use cpu::MSTATUS_MPP_SHIFT;
@@ -18,12 +21,13 @@ use cpu::MSTATUS_MPRV;
 use cpu::MSTATUS_MXR;
 use cpu::MSTATUS_SUM;
 use cpu::PG_SHIFT;
+use csr::SATP_ASID_MASK;
+use csr::SATP_ASID_SHIFT;
 use csr::SATP_MODE_MASK;
 use csr::SATP_MODE_SHIFT;
 use csr::SATP_PPN_MASK;
 use csr::SATP_PPN_SHIFT;
 use csr::SatpMode;
-use fnv::FnvHashMap;
 use log::trace;
 use log::warn;
 use riscv::MemoryAccessType;
@@ -66,11 +70,9 @@ pub struct Mmu {
     /// Current cycle, updated at the start of `service()`.
     cycle: u64,
 
-    /// Address translation page cache.
-    page_cache_enabled: bool,
-    fetch_page_cache: FnvHashMap<u64, u64>,
-    load_page_cache: FnvHashMap<u64, u64>,
-    store_page_cache: FnvHashMap<u64, u64>,
+    /// Split TLBs for instruction fetch and data access.
+    pub itlb: Tlb,
+    pub dtlb: Tlb,
 }
 
 pub const PTE_V_MASK: u64 = 1 << 0;
@@ -114,10 +116,8 @@ impl Mmu {
             devices: Vec::new(),
             service_queue: BinaryHeap::new(),
             cycle: 0,
-            page_cache_enabled: false,
-            fetch_page_cache: FnvHashMap::default(),
-            load_page_cache: FnvHashMap::default(),
-            store_page_cache: FnvHashMap::default(),
+            itlb: Tlb::new(),
+            dtlb: Tlb::new(),
         }
     }
 
@@ -166,17 +166,28 @@ impl Mmu {
         }
     }
 
-    /// Enables or disables page cache optimization.
-    pub fn enable_page_cache(&mut self, enabled: bool) {
-        self.page_cache_enabled = enabled;
-        self.clear_page_cache();
+    /// Flush both I-TLB and D-TLB.
+    pub fn flush_tlb(&mut self) {
+        self.itlb.flush_all();
+        self.dtlb.flush_all();
     }
 
-    /// Clears page cache entries
-    pub fn clear_page_cache(&mut self) {
-        self.fetch_page_cache.clear();
-        self.load_page_cache.clear();
-        self.store_page_cache.clear();
+    /// Flush TLB entries matching the given ASID (skip global).
+    pub fn flush_tlb_asid(&mut self, asid: u16) {
+        self.itlb.flush_asid(asid);
+        self.dtlb.flush_asid(asid);
+    }
+
+    /// Flush TLB entries matching the given virtual page (all ASIDs).
+    pub fn flush_tlb_vpage(&mut self, vpage: u32) {
+        self.itlb.flush_vpage(vpage);
+        self.dtlb.flush_vpage(vpage);
+    }
+
+    /// Flush TLB entries matching both vpage and ASID.
+    pub fn flush_tlb_vpage_asid(&mut self, vpage: u32, asid: u16) {
+        self.itlb.flush_vpage_asid(vpage, asid);
+        self.dtlb.flush_vpage_asid(vpage, asid);
     }
 
     /// Read the mtime CSR via CLINT.
@@ -225,11 +236,9 @@ impl Mmu {
         self.plic.1.process_irqs(&all_irqs, &mut self.mip);
     }
 
-    /// Updates privilege mode
-    pub fn update_priv_mode(&mut self, mode: PrivMode) {
-        self.prv = mode;
-        self.clear_page_cache();
-    }
+    /// Updates privilege mode. With permission bits stored in TLB entries
+    /// and checked at lookup time, no flush is needed on priv changes.
+    pub const fn update_priv_mode(&mut self, mode: PrivMode) { self.prv = mode; }
 
     /// Loads an byte. This method takes virtual address and translates
     /// into physical address inside.
@@ -674,40 +683,91 @@ impl Mmu {
         self.store_mmio(pa, value, 8)
     }
 
+    /// Extract the current ASID from the SATP register.
+    #[inline]
+    const fn current_asid(&self) -> u16 { ((self.satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK) as u16 }
+
     /// # Errors
     /// If this fails then the error will have the exception that should be
     /// raised
+    #[allow(clippy::cast_possible_truncation, clippy::missing_panics_doc)]
     pub fn translate_address(
         &mut self,
         address: u64,
         access_type: MemoryAccessType,
         side_effect_free: bool,
     ) -> Result<u64, Exception> {
-        let v_page = address & !0xfff;
+        let effective_prv =
+            if self.mstatus & MSTATUS_MPRV != 0 && access_type != MemoryAccessType::Execute {
+                priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
+            } else {
+                self.prv
+            };
 
-        let cache = if self.page_cache_enabled {
-            match access_type {
-                MemoryAccessType::Execute => self.fetch_page_cache.get(&v_page),
-                MemoryAccessType::Read => self.load_page_cache.get(&v_page),
-                MemoryAccessType::Write => self.store_page_cache.get(&v_page),
-            }
-        } else {
-            None
-        };
-
-        if let Some(p_page) = cache {
-            return Ok(p_page | (address & 0xfff));
+        let satp_mode = ((self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK) as usize;
+        if effective_prv == PrivMode::M || satp_mode == SatpMode::Bare as usize {
+            return Ok(address);
         }
 
-        let pa = self.translate_address_slow(address, access_type, side_effect_free)?;
+        let vpage = (address >> PG_SHIFT) as u32;
+        let asid = self.current_asid();
+        let access_shift = match access_type {
+            MemoryAccessType::Read => 0,
+            MemoryAccessType::Write => 1,
+            MemoryAccessType::Execute => 2,
+        };
 
-        if self.page_cache_enabled && !side_effect_free {
-            let p_page = pa & !0xfff;
-            let _ = match access_type {
-                MemoryAccessType::Execute => self.fetch_page_cache.insert(v_page, p_page),
-                MemoryAccessType::Read => self.load_page_cache.insert(v_page, p_page),
-                MemoryAccessType::Write => self.store_page_cache.insert(v_page, p_page),
-            };
+        let tlb = match access_type {
+            MemoryAccessType::Execute => &self.itlb,
+            _ => &self.dtlb,
+        };
+
+        if let Some((ppage, perm)) = tlb.lookup(vpage, asid) {
+            let prv_is_user = effective_prv == PrivMode::U;
+            let sum = self.mstatus & MSTATUS_SUM != 0;
+            let mxr = self.mstatus & MSTATUS_MXR != 0;
+            if check_perm(perm, access_shift, prv_is_user, sum, mxr) {
+                let tlb_pa = (u64::from(ppage) << PG_SHIFT) | (address & 0xfff);
+                if cfg!(feature = "paranoid-tlb") {
+                    let slow = self.translate_address_slow(address, access_type, true);
+                    match slow {
+                        Ok((expected_pa, _)) => assert_eq!(
+                            tlb_pa, expected_pa,
+                            "TLB hit pa {tlb_pa:#x} != walk pa {expected_pa:#x} \
+                             for va {address:#x} access {access_type:?} \
+                             prv {effective_prv:?} asid {asid}"
+                        ),
+                        Err(e) => panic!(
+                            "TLB hit pa {tlb_pa:#x} but walk faulted {:?} \
+                             for va {address:#x} access {access_type:?} \
+                             prv {effective_prv:?} asid {asid} perm {perm:#06x}",
+                            e.trap
+                        ),
+                    }
+                }
+                return Ok(tlb_pa);
+            }
+            // Permission mismatch — fall through to slow path which generates
+            // the proper exception.
+        }
+
+        let (pa, pte) = self.translate_address_slow(address, access_type, side_effect_free)?;
+
+        if !side_effect_free && pte != 0 {
+            let ppage = (pa >> PG_SHIFT) as u32;
+            let mut xwr = ((pte >> 1) & 7) as u8;
+            // When using SW-managed A/D, mask out W if D is not set so
+            // that future writes still fault through the slow path.
+            if CONFIG_SW_MANAGED_A_AND_D && pte & PTE_D_MASK == 0 {
+                xwr &= !2; // clear W
+            }
+            let user = pte & PTE_U_MASK != 0;
+            let global = pte & (1 << 5) != 0; // PTE G bit
+            let perm = pack_perm(xwr, user, global, asid);
+            match access_type {
+                MemoryAccessType::Execute => self.itlb.insert(vpage, ppage, perm, asid),
+                _ => self.dtlb.insert(vpage, ppage, perm, asid),
+            }
         }
 
         Ok(pa)
@@ -719,12 +779,14 @@ impl Mmu {
         clippy::expect_used,
         clippy::cognitive_complexity
     )]
+    /// Slow-path page table walk.  Returns `(physical_address, leaf_pte)`.
+    /// The leaf PTE is needed by the caller to populate TLB permission bits.
     fn translate_address_slow(
         &mut self,
         va: u64,
         access: MemoryAccessType,
         side_effect_free: bool,
-    ) -> Result<u64, Exception> {
+    ) -> Result<(u64, u64), Exception> {
         let prv = self.prv;
         let effective_prv =
             if self.mstatus & MSTATUS_MPRV != 0 && access != MemoryAccessType::Execute {
@@ -736,7 +798,7 @@ impl Mmu {
 
         let satp_mode = ((self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK) as usize;
         if effective_prv == PrivMode::M || satp_mode == SatpMode::Bare as usize {
-            return Ok(va);
+            return Ok((va, 0));
         }
 
         // Sv39, Sv48, Sv57
@@ -838,7 +900,7 @@ impl Mmu {
             }
 
             let vaddr_mask = (1 << vaddr_shift) - 1;
-            return Ok(paddr & !vaddr_mask | va & vaddr_mask);
+            return Ok((paddr & !vaddr_mask | va & vaddr_mask, pte));
         }
 
         page_fault(va, access)
@@ -977,7 +1039,7 @@ impl Mmu {
             self.service_queue.push(Reverse((sched_cycle, idx)));
         }
 
-        self.clear_page_cache();
+        self.flush_tlb();
         Ok(())
     }
 

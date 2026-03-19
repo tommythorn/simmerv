@@ -747,10 +747,10 @@ impl RiscvDecoder for Decoder {
         decode_exceptional(a, insn, Op::Sret)
     }
     fn sfence_vma(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
-        decode_serialized(a, insn, Op::SfenceVma)
+        decode_r(a, insn, Op::SfenceVma)
     }
     fn sinval_vma(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
-        decode_serialized(a, insn, Op::SinvalVma)
+        decode_r(a, insn, Op::SinvalVma)
     }
     fn sfence_w_inval(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_serialized(a, insn, Op::SfenceWInval)

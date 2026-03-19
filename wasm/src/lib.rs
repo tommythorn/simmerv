@@ -209,14 +209,6 @@ impl WasmRiscv {
         }
     }
 
-    /// Enables or disables page cache optimization.
-    /// Page cache optimization is an experimental feature.
-    /// Refer to [`Mmu`](../simmerv/mmu/struct.Mmu.html) for the detail.
-    ///
-    /// # Arguments
-    /// * `enabled`
-    pub fn enable_page_cache(&mut self, enabled: bool) { self.emulator.enable_page_cache(enabled); }
-
     /// Gets virtual address corresponding to symbol strings.
     ///
     /// # Arguments

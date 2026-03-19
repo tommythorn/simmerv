@@ -67,18 +67,6 @@ export class WasmRiscv {
         wasm.wasmriscv_disassemble(this.__wbg_ptr);
     }
     /**
-     * Enables or disables page cache optimization.
-     * Page cache optimization is an experimental feature.
-     * Refer to [`Mmu`](../simmerv/mmu/struct.Mmu.html) for the detail.
-     *
-     * # Arguments
-     * * `enabled`
-     * @param {boolean} enabled
-     */
-    enable_page_cache(enabled) {
-        wasm.wasmriscv_enable_page_cache(this.__wbg_ptr, enabled);
-    }
-    /**
      * Gets virtual address corresponding to symbol strings.
      *
      * # Arguments

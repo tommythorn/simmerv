@@ -266,7 +266,7 @@ impl Cpu {
         self.mmu.mip = 0;
         self.mmu.satp = 0;
         self.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
-        self.mmu.clear_page_cache();
+        self.mmu.flush_tlb();
         self.write_x(x(11), Mmu::DTB_BASE);
     }
 
@@ -788,15 +788,20 @@ impl Cpu {
 
                 if !matches!(
                     FromPrimitive::from_u64((value >> SATP_MODE_SHIFT) & SATP_MODE_MASK),
-                    Some(SatpMode::Bare | SatpMode::Sv39 | SatpMode::Sv48 | SatpMode::Sv57)
+                    Some(SatpMode::Bare | SatpMode::Sv39)
                 ) {
-                    log::warn!("wrote illegal value {value:x} to satp");
-                    return illegal;
+                    // WARL: silently ignore writes with unsupported modes
+                    return Ok(());
                 }
 
+                let old_satp = self.mmu.satp;
                 self.mmu.satp = value;
-                self.mmu.clear_page_cache();
-                self.flush_icache = true;
+                // Only flush TLBs if MODE or PPN changed (not on ASID-only changes)
+                let mode_ppn_mask = !((SATP_ASID_MASK) << SATP_ASID_SHIFT);
+                if (old_satp & mode_ppn_mask) != (value & mode_ppn_mask) {
+                    self.mmu.flush_tlb();
+                    self.flush_icache = true;
+                }
                 return Ok(());
             }
             _ => {}
@@ -2162,7 +2167,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             cpu.handle_interrupt();
             Ok((0, 0))
         }
-        Op::SfenceVma => {
+        Op::SfenceVma | Op::SinvalVma => {
             if cpu.mmu.prv == PrivMode::U
                 || cpu.mmu.prv == PrivMode::S && cpu.mmu.mstatus & MSTATUS_TVM != 0
             {
@@ -2172,25 +2177,17 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
                 });
             }
 
-            cpu.mmu.clear_page_cache();
-            cpu.reservation = None;
-
-            // HACK
-            cpu.flush_icache = true;
-
-            Ok((0, 0))
-        }
-        // Svinval — sinval.vma is ordered like sfence.vma; the fence ops are no-ops in emulation
-        Op::SinvalVma => {
-            if cpu.mmu.prv == PrivMode::U
-                || cpu.mmu.prv == PrivMode::S && cpu.mmu.mstatus & MSTATUS_TVM != 0
-            {
-                return Err(Exception {
-                    trap: Trap::IllegalInstruction,
-                    tval: 0,
-                });
+            let rs1_val = cpu.read_x(uop.rs1);
+            let rs2_val = cpu.read_x(uop.rs2);
+            #[allow(clippy::cast_possible_truncation)]
+            match (rs1_val != 0, rs2_val != 0) {
+                (false, false) => cpu.mmu.flush_tlb(),
+                (true, false) => cpu.mmu.flush_tlb_vpage((rs1_val >> PG_SHIFT) as u32),
+                (false, true) => cpu.mmu.flush_tlb_asid(rs2_val as u16),
+                (true, true) => cpu
+                    .mmu
+                    .flush_tlb_vpage_asid((rs1_val >> PG_SHIFT) as u32, rs2_val as u16),
             }
-            cpu.mmu.clear_page_cache();
             cpu.reservation = None;
             cpu.flush_icache = true;
             Ok((0, 0))

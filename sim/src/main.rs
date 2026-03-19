@@ -42,10 +42,6 @@ struct Args {
     #[argh(switch, short = 't')]
     tracing: bool,
 
-    /// enable experimental page cache optimization
-    #[argh(switch, short = 'p')]
-    page_cache: bool,
-
     /// allow ctrl-C to terminate app
     #[argh(switch, short = 'c')]
     ctrlc_breaks: bool,
@@ -263,8 +259,6 @@ fn main() -> anyhow::Result<()> {
             emulator.setup_filesystem_file(file);
         }
     }
-
-    emulator.enable_page_cache(args.page_cache);
 
     if images == 0 {
         bail!("I have nothing to run");

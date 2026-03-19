@@ -25,6 +25,9 @@ unwrap_used = "warn"
 expect_used = "warn"
 unreadable-literal = "allow"
 
+[features]
+paranoid-tlb = []
+
 [badges]
 travis-ci = { repository = "tommythorn/simmerv" }
 

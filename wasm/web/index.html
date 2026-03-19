@@ -49,13 +49,6 @@
           riscv.load_program_for_symbols(new Uint8Array(symbolBuffer));
         }
 
-        // Enable experimental address translation page cache optimization
-        // if booting Linux. Disable this feature if you face
-        // uncertain error.
-        if (isPresetBinaries) {
-          riscv.enable_page_cache(true);
-        }
-
         const app = new App(riscv, terminal, {
           debugModeEnabled: debugMode
         });
