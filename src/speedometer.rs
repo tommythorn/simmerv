@@ -81,10 +81,19 @@ impl Speedometer {
                      vpage {flush_vpage:4.0}/Mi  vp+asid {flush_vpage_asid:4.0}/Mi"
                 ));
 
-                let cache_misses = d(cache.misses, self.prev_cache.misses);
-                let cache_flushes = d(cache.flushes, self.prev_cache.flushes);
+                let cold = d(cache.cold_misses, self.prev_cache.cold_misses);
+                let conflict = d(cache.conflict_misses, self.prev_cache.conflict_misses);
                 lines.push(format!(
-                    "uop$ miss {cache_misses:4.0}/Mi  flush {cache_flushes:4.0}/Mi"
+                    "uop$ occ {}/{} cold {cold:6.0}/Mi  conflict {conflict:6.0}/Mi",
+                    cache.occupied, cache.capacity,
+                ));
+                let f_full = d(cache.flush_full, self.prev_cache.flush_full);
+                let f_asid = d(cache.flush_asid, self.prev_cache.flush_asid);
+                let f_vp = d(cache.flush_vpage, self.prev_cache.flush_vpage);
+                let f_vpasid = d(cache.flush_vpage_asid, self.prev_cache.flush_vpage_asid);
+                lines.push(format!(
+                    "uop$ flush full {f_full:4.0}/Mi  asid {f_asid:4.0}/Mi  \
+                     vpage {f_vp:4.0}/Mi  vp+asid {f_vpasid:4.0}/Mi"
                 ));
             }
 

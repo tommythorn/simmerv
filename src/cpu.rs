@@ -147,9 +147,8 @@ pub struct Operands {
 
 /// Emulates a RISC-V CPU core
 // XXX This structure should be rethought and refactored:
-// - there is architectural state (essentially everything up-to and incl.
-//   reservation), but mmu.prv is definitely architectural (but pc and rf are
-//   special)
+// - there is architectural state (essentially everything up-to and incl. reservation), but mmu.prv
+//   is definitely architectural (but pc and rf are special)
 // - wfi, seqno, insn_addr, and, insn are artifacts of the VM
 //
 // Some instructions need no CPU state (except for registers of course)
@@ -162,10 +161,26 @@ pub struct Operands {
 // Load/Store/Atomic depends on the MMU (and ?)
 //
 // How should we model this? Some random ideas:
-// - We could partition the instruction set into classes (multisim used alu,
-//   load, store, jump, branch, compjump, atomic) along with a "system" boolean.
-//   Each class could have it's own operation
-//
+// - We could partition the instruction set into classes (multisim used alu, load, store, jump,
+//   branch, compjump, atomic) along with a "system" boolean. Each class could have it's own
+//   operation
+/// Describes the uop-cache invalidation needed after an instruction executes.
+///
+/// SFENCE.VMA can target a single ASID or a single virtual page rather than
+/// forcing a full flush, mirroring the selective flush the iTLB already does.
+/// M-mode entries (tagged with bit 0 in the key) and kernel-VA entries (whose
+/// bits [63:48] are already 0xFFFF due to the global-encoding OR trick) are
+/// never affected by the ASID-targeted variants.
+#[derive(Default, Clone, Copy)]
+pub enum IcacheFlushKind {
+    #[default]
+    None,
+    Full,
+    Asid(u16),
+    Vpage(u64),
+    VpageAsid(u64, u16),
+}
+
 // XXX rename ArchState?
 pub struct Cpu {
     // The essential CPU state
@@ -197,8 +212,8 @@ pub struct Cpu {
     // Holds all memory and devices (XXX: this public mmu suggests we need to rethink the API)
     pub mmu: Mmu,
 
-    // HACK to allow instructions to communicate this to the fetch engine
-    pub flush_icache: bool,
+    // Pending uop-cache flush requested by the last executed instruction.
+    pub icache_flush: IcacheFlushKind,
 
     pub speedometer: Speedometer,
     pub speedometer_flag: Arc<AtomicBool>,
@@ -241,7 +256,7 @@ impl Cpu {
             csr: CsrFile::new(),
             mmu,
             reservation: None,
-            flush_icache: false,
+            icache_flush: IcacheFlushKind::None,
             speedometer: Speedometer::new(),
             speedometer_flag: Arc::new(AtomicBool::new(false)),
         };
@@ -261,7 +276,7 @@ impl Cpu {
         self.pc = 0x8000_0000;
         self.csr = CsrFile::new();
         self.reservation = None;
-        self.flush_icache = true;
+        self.icache_flush = IcacheFlushKind::Full;
         self.mmu.prv = PrivMode::M;
         self.mmu.mip = 0;
         self.mmu.satp = 0;
@@ -372,11 +387,19 @@ impl Cpu {
             return Ok(());
         }
 
-        if self.flush_icache {
-            log::trace!("uop cache flush");
-            uop_cache.clear();
-            self.flush_icache = false;
+        match self.icache_flush {
+            IcacheFlushKind::None => {}
+            IcacheFlushKind::Full => {
+                log::trace!("uop cache flush");
+                uop_cache.clear();
+            }
+            IcacheFlushKind::Asid(asid) => uop_cache.flush_asid(asid),
+            IcacheFlushKind::Vpage(page_addr) => uop_cache.flush_vpage(page_addr),
+            IcacheFlushKind::VpageAsid(page_addr, asid) => {
+                uop_cache.flush_vpage_asid(page_addr, asid);
+            }
         }
+        self.icache_flush = IcacheFlushKind::None;
 
         self.seqno = self.seqno.wrapping_add(1);
         let insn_addr = self.pc;
@@ -384,10 +407,17 @@ impl Cpu {
         // Tag M-mode cache entries with bit 0 to distinguish M-mode physical
         // addresses from S/U-mode virtual addresses that share the same value.
         // Valid fetch addresses are always 2-byte aligned so bit 0 is free.
+        //
+        // For S/U-mode, fold the current ASID into bits [63:48] so that
+        // entries for different address spaces don't alias.  Kernel VAs in
+        // Sv39/Sv48 already have bits [63:48] = 0xFFFF, so the OR is a no-op
+        // there — kernel entries are effectively ASID-global, matching the
+        // G-bit behaviour of the iTLB.
         let cache_key = if self.mmu.prv == PrivMode::M {
             insn_addr | 1
         } else {
-            insn_addr
+            let asid = (self.mmu.satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK;
+            insn_addr | (asid << 48)
         };
 
         if let Some(uop) = uop_cache.get(cache_key) {
@@ -802,7 +832,7 @@ impl Cpu {
                 let mode_ppn_mask = !((SATP_ASID_MASK) << SATP_ASID_SHIFT);
                 if (old_satp & mode_ppn_mask) != (value & mode_ppn_mask) {
                     self.mmu.flush_tlb();
-                    self.flush_icache = true;
+                    self.icache_flush = IcacheFlushKind::Full;
                 }
                 return Ok(());
             }
@@ -1100,7 +1130,7 @@ impl Cpu {
         c.mcounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.senvcfg = r.u64()?;
-        self.flush_icache = true;
+        self.icache_flush = IcacheFlushKind::Full;
         self.mmu.read_state(r.remaining(), make_device)
     }
 
@@ -1496,10 +1526,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::Sraw => Ok(((ops.s1 as i32).wrapping_shr(ops.s2 as u32) as u64, 0)),
         // RV32/RV64 Zifencei
         Op::FenceI => {
-            // Flush any cached instructions.  We have none so far.
             cpu.reservation = None;
-            // HACK
-            cpu.flush_icache = true;
+            cpu.icache_flush = IcacheFlushKind::Full;
             Ok((0, 0))
         }
         // RV32/RV64 Zicsr
@@ -2191,7 +2219,12 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
                     .flush_tlb_vpage_asid((rs1_val >> PG_SHIFT) as u32, rs2_val as u16),
             }
             cpu.reservation = None;
-            cpu.flush_icache = true;
+            cpu.icache_flush = match (rs1_val != 0, rs2_val != 0) {
+                (false, false) => IcacheFlushKind::Full,
+                (true, false) => IcacheFlushKind::Vpage(rs1_val),
+                (false, true) => IcacheFlushKind::Asid(rs2_val as u16),
+                (true, true) => IcacheFlushKind::VpageAsid(rs1_val, rs2_val as u16),
+            };
             Ok((0, 0))
         }
         Op::Wfi => {

@@ -51,6 +51,7 @@ mod tap {
             use std::os::unix::io::AsRawFd;
 
             #[repr(C)]
+            #[allow(clippy::items_after_statements)]
             struct Ifreq {
                 ifr_name: [libc::c_char; 16],
                 ifr_flags: i16,
@@ -64,11 +65,14 @@ mod tap {
 
             let mut ifr = Ifreq {
                 ifr_name: [0; 16],
+                #[allow(clippy::cast_possible_truncation)]
                 ifr_flags: (libc::IFF_TAP | libc::IFF_NO_PI) as i16,
                 _pad: [0; 22],
             };
             for (i, &b) in name.as_bytes().iter().take(15).enumerate() {
-                ifr.ifr_name[i] = b as libc::c_char;
+                #[allow(clippy::cast_possible_wrap)]
+                let c = b as libc::c_char;
+                ifr.ifr_name[i] = c;
             }
 
             unsafe {
