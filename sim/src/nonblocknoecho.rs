@@ -14,6 +14,7 @@ pub struct NonblockNoEcho {
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
     pub tracing_flag: Arc<AtomicBool>,
+    awaiting_command: bool,
 }
 
 impl NonblockNoEcho {
@@ -77,6 +78,7 @@ impl NonblockNoEcho {
             verbose_flag,
             speedometer_flag,
             tracing_flag,
+            awaiting_command: false,
         }
     }
 
@@ -93,60 +95,65 @@ impl NonblockNoEcho {
         }
     }
 
-    pub fn get_key(&mut self) -> Option<u8> {
+    fn read_byte(&mut self) -> Option<u8> {
         if !self.stdin_ready() {
             return None;
         }
-
-        let mut buffer = [0; 1]; // read exactly one byte
-        let got = self.reader.read(&mut buffer).map_or(None, |n| {
+        let mut buffer = [0; 1];
+        self.reader.read(&mut buffer).map_or(None, |n| {
             assert!(n == 1);
             Some(buffer[0])
-        })?;
+        })
+    }
 
-        if got == 3 {
-            let verbose = self.verbose_flag.load(Ordering::Relaxed);
-            let speedometer = self.speedometer_flag.load(Ordering::Relaxed);
-            let tracing = self.tracing_flag.load(Ordering::Relaxed);
-            eprintln!(
-                "[[v - Verbose({verbose}), s - Speedometer({speedometer}), t - Tracing({tracing}), x - eXit+snapshot, else, pass on to guest]]"
-            );
-            loop {
-                if !self.stdin_ready() {
-                    continue;
-                }
-                let Some(snd) = self.reader.read(&mut buffer).map_or(None, |n| {
-                    assert!(n == 1);
-                    Some(buffer[0])
-                }) else {
-                    continue;
-                };
+    /// Try to handle `key` as a command. Returns `true` if consumed.
+    fn handle_command(&mut self, key: u8) -> bool {
+        match key as char {
+            '?' => {
+                let verbose = self.verbose_flag.load(Ordering::Relaxed);
+                let speedometer = self.speedometer_flag.load(Ordering::Relaxed);
+                let tracing = self.tracing_flag.load(Ordering::Relaxed);
+                eprintln!(
+                    "[[v - Verbose({verbose}), s - Speedometer({speedometer}), \
+                     t - Tracing({tracing}), x - eXit+snapshot, else pass to guest]]"
+                );
+            }
+            't' => {
+                self.tracing_flag.fetch_xor(true, Ordering::Relaxed);
+            }
+            'v' => {
+                self.verbose_flag.fetch_xor(true, Ordering::Relaxed);
+            }
+            's' => {
+                self.speedometer_flag.fetch_xor(true, Ordering::Relaxed);
+            }
+            'x' => {
+                self.snapshot_flag.store(true, Ordering::Relaxed);
+                self.exit_flag.store(true, Ordering::Relaxed);
+            }
+            _ => return false,
+        }
+        true
+    }
 
-                match snd as char {
-                    't' => {
-                        let was = self.tracing_flag.fetch_xor(true, Ordering::Relaxed);
-                        eprintln!("Tracing {}", if was { "OFF" } else { "ON" });
-                    }
-                    'v' => {
-                        let was = self.verbose_flag.fetch_xor(true, Ordering::Relaxed);
-                        eprintln!("Verbose {}", if was { "OFF" } else { "ON" });
-                    }
-                    's' => {
-                        let was = self.speedometer_flag.fetch_xor(true, Ordering::Relaxed);
-                        eprintln!("Speedometer {}", if was { "OFF" } else { "ON" });
-                    }
-                    'x' => {
-                        self.snapshot_flag.store(true, Ordering::Relaxed);
-                        self.exit_flag.store(true, Ordering::Relaxed);
-                        return None;
-                    }
-                    _ => return Some(snd),
-                }
+    pub fn get_key(&mut self) -> Option<u8> {
+        let got = self.read_byte()?;
+
+        if self.awaiting_command {
+            self.awaiting_command = false;
+            if self.handle_command(got) {
                 return None;
             }
-        } else {
-            Some(buffer[0])
+            // Not a command — pass through to guest
+            return Some(got);
         }
+
+        if got == 3 {
+            self.awaiting_command = true;
+            return None;
+        }
+
+        Some(got)
     }
 }
 
