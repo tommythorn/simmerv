@@ -1,5 +1,5 @@
 use std::io::{self};
-use std::time::Instant;
+use wasm_timer::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
