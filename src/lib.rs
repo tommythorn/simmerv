@@ -17,6 +17,7 @@ pub mod riscv_insns;
 pub mod serial_backend;
 pub mod speedometer;
 pub mod tlb;
+pub mod uop_cache;
 
 use crate::cpu::Cpu;
 use crate::device::syscon::Syscon;
@@ -26,10 +27,11 @@ use crate::mmu::Mmu;
 use crate::network_backend::DummyNetworkBackend;
 use crate::network_backend::NetworkBackend;
 use crate::serial_backend::SerialBackend;
+use crate::uop_cache::CacheMode;
+use crate::uop_cache::UopCache;
 use anyhow::anyhow;
 use anyhow::bail;
 use fnv::FnvHashMap;
-use intmap::IntMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -56,7 +58,7 @@ pub struct Emulator {
     /// Stores mapping from symbol to virtual address
     pub symbol_map: FnvHashMap<String, u64>,
 
-    uop_cache: IntMap<u64, cpu::Uop>,
+    uop_cache: UopCache,
 
     /// The address where data will be sent to terminal
     pub tohost_addr: u64,
@@ -83,8 +85,15 @@ impl Emulator {
     /// # Arguments
     /// * `backend` — the serial I/O implementation
     /// * `capacity` — RAM size in bytes
+    /// * `cache_entries` — total uop cache entries
+    /// * `cache_mode` — direct-mapped or 2-way skew-associative
     #[must_use]
-    pub fn new(backend: Box<dyn SerialBackend>, capacity: usize) -> Self {
+    pub fn new(
+        backend: Box<dyn SerialBackend>,
+        capacity: usize,
+        cache_entries: usize,
+        cache_mode: CacheMode,
+    ) -> Self {
         let mut mmu = Mmu::new();
         // RAM regions must be added before I/O devices so the dispatch fast-path
         // hits on the first iteration.  Primary RAM first, then secondary.
@@ -117,7 +126,7 @@ impl Emulator {
 
             symbol_map: FnvHashMap::default(),
 
-            uop_cache: IntMap::new(),
+            uop_cache: UopCache::new(cache_entries, cache_mode),
 
             // These can be updated in load_image()
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists

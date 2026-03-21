@@ -81,6 +81,14 @@ struct Args {
     #[argh(option)]
     fw_dynamic: Option<String>,
 
+    /// uop cache mode: "direct" or "skew" (default: skew)
+    #[argh(option)]
+    uop_cache_mode: Option<String>,
+
+    /// total uop cache entries (default: 8192, rounded to power of two)
+    #[argh(option)]
+    uop_cache_entries: Option<usize>,
+
     /// memory images, elf or binary blobs, optionally follow by a comma and the
     /// the "0x"-prefixed load address in hex (this is required for binary
     /// blobs)
@@ -142,6 +150,14 @@ fn main() -> anyhow::Result<()> {
     let tracing_flag = Arc::new(AtomicBool::new(args.tracing));
     let mut symbols = BTreeMap::new();
     let memory_megs = args.memory_megs.unwrap_or(2048);
+    let cache_mode = match args.uop_cache_mode.as_deref() {
+        Some("direct") => simmerv::uop_cache::CacheMode::Direct,
+        None | Some("skew") => simmerv::uop_cache::CacheMode::Skew,
+        Some(other) => {
+            anyhow::bail!("unknown uop cache mode: {other:?} (expected \"direct\" or \"skew\")")
+        }
+    };
+    let cache_entries = args.uop_cache_entries.unwrap_or(8192);
     let mut emulator = Emulator::new(
         get_terminal(
             &terminal_type,
@@ -153,6 +169,8 @@ fn main() -> anyhow::Result<()> {
             Arc::clone(&tracing_flag),
         ),
         memory_megs * 1024 * 1024,
+        cache_entries,
+        cache_mode,
     );
     emulator.exit_flag = Arc::clone(&exit_flag);
     emulator.verbose = Arc::clone(&verbose_flag);

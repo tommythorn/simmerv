@@ -23,6 +23,7 @@ use crate::new_decoder::x;
 use crate::riscv;
 use crate::serial_backend::SerialBackend;
 use crate::speedometer::Speedometer;
+use crate::uop_cache::UopCache;
 pub use csr::*;
 use fp::RoundingMode;
 use fp::Sf;
@@ -33,7 +34,6 @@ use fp::cvt_i32_sf32;
 use fp::cvt_i64_sf32;
 use fp::cvt_u32_sf32;
 use fp::cvt_u64_sf32;
-use intmap::IntMap;
 use log;
 use num_traits::FromPrimitive;
 use riscv::MemoryAccessType;
@@ -326,12 +326,14 @@ impl Cpu {
     /// Runs program N cycles. Fetch, decode, and execution are completed in a
     /// cycle so far.
     #[allow(clippy::cast_sign_loss)]
-    pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut IntMap<u64, Uop>) -> bool {
+    pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut UopCache) -> bool {
         if self.speedometer_flag.load(Ordering::Relaxed)
             && self.speedometer.last_time.elapsed().as_secs() >= 1
         {
             // XXX Using cycle as instret is misleading in the presence of wfi
-            let _ = self.speedometer.update(self.cycle, self.mmu.tlb_stats());
+            let _ = self
+                .speedometer
+                .update(self.cycle, self.mmu.tlb_stats(), uop_cache.stats());
         }
 
         for _ in 0..cpu_steps {
@@ -361,7 +363,7 @@ impl Cpu {
 
     // It's here, the One Key Function.  This is where it all happens!
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn step_cpu(&mut self, uop_cache: &mut IntMap<u64, Uop>) -> Result<(), Exception> {
+    fn step_cpu(&mut self, uop_cache: &mut UopCache) -> Result<(), Exception> {
         self.cycle = self.cycle.wrapping_add(1);
         if self.wfi {
             if self.mmu.mip & self.csr.mie != 0 {
@@ -2348,7 +2350,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn tick() {
-        let mut uop_cache = IntMap::new();
+        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
         let mut cpu = create_cpu();
         cpu.update_pc(MEMORY_BASE);
 
@@ -2377,7 +2379,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn step_cpu() {
-        let mut uop_cache = IntMap::new();
+        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
         let mut cpu = create_cpu();
         cpu.update_pc(MEMORY_BASE);
         // write non-compressed "addi a0, a0, 12" instruction
@@ -2398,7 +2400,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn interrupt() {
-        let mut uop_cache = IntMap::new();
+        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write non-compressed "addi x0, x0, 1" instruction
@@ -2440,7 +2442,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn exception() {
-        let mut uop_cache = IntMap::new();
+        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write ECALL instruction
@@ -2468,7 +2470,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn hardocded_zero() {
-        let mut uop_cache = IntMap::new();
+        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
 
         let mut cpu = create_cpu();
         cpu.update_pc(MEMORY_BASE);

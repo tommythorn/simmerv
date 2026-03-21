@@ -2,6 +2,7 @@ use std::io::{self};
 use wasm_timer::Instant;
 
 use crate::mmu::TlbDisplayStats;
+use crate::uop_cache::UopCacheStats;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
@@ -18,6 +19,7 @@ pub struct Speedometer {
     pub last_time: Instant,
     last_count: u64,
     prev_stats: TlbDisplayStats,
+    prev_cache: UopCacheStats,
     prev_line_widths: Vec<u16>,
 }
 
@@ -28,6 +30,7 @@ impl Speedometer {
             last_count: 0,
             last_time: Instant::now(),
             prev_stats: TlbDisplayStats::default(),
+            prev_cache: UopCacheStats::default(),
             prev_line_widths: Vec::new(),
         }
     }
@@ -36,8 +39,13 @@ impl Speedometer {
     /// # Errors
     /// Can't access the terminal
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    #[allow(clippy::cast_precision_loss)]
-    pub fn update(&mut self, current_count: u64, stats: TlbDisplayStats) -> io::Result<()> {
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    pub fn update(
+        &mut self,
+        current_count: u64,
+        stats: TlbDisplayStats,
+        cache: UopCacheStats,
+    ) -> io::Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let width = get_terminal_width()?;
@@ -93,11 +101,25 @@ impl Speedometer {
                 if !flush_parts.is_empty() {
                     lines.push(format!("flush {}", flush_parts.join("  ")));
                 }
+
+                let cache_misses = d(cache.misses, self.prev_cache.misses);
+                let cache_flushes = d(cache.flushes, self.prev_cache.flushes);
+                let mut cache_parts: Vec<String> = Vec::new();
+                if cache_misses > 0.0 {
+                    cache_parts.push(format!("miss {cache_misses:.0}/Mi"));
+                }
+                if cache_flushes > 0.0 {
+                    cache_parts.push(format!("flush {cache_flushes:.0}/Mi"));
+                }
+                if !cache_parts.is_empty() {
+                    lines.push(format!("uop$ {}", cache_parts.join("  ")));
+                }
             }
 
             self.last_count = current_count;
             self.last_time = current_time;
             self.prev_stats = stats;
+            self.prev_cache = cache;
 
             let mut stdout = io::stdout();
             write!(stdout, "\x1b[s")?;

@@ -57,7 +57,12 @@ impl WasmRiscv {
     #[allow(clippy::new_without_default)] // #[wasm_bindgen] trait impls are not supported
     pub fn new() -> Self {
         WasmRiscv {
-            emulator: Emulator::new(Box::new(BufferedSerialBackend::new()), WASM_MEMORY_SIZE),
+            emulator: Emulator::new(
+                Box::new(BufferedSerialBackend::new()),
+                WASM_MEMORY_SIZE,
+                8192,
+                simmerv::uop_cache::CacheMode::Skew,
+            ),
         }
     }
 
