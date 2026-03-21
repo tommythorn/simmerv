@@ -947,14 +947,14 @@ impl Cpu {
 
         let op = format!("{op:?}").to_lowercase(); // XXX More clever CAdd -> c.add
 
-        let _ = write!(s, "{addr:08x} ");
+        let _ = write!(s, "{addr:016x} ");
         if insn % 4 == 3 {
-            let _ = write!(s, "{insn:08x} {op:11} {rd}, {rs1}, {rs2}, {imm:08x}"); // ,{rs3}
+            let _ = write!(s, "{insn:08x} {op:11} {rd}, {rs1}, {rs2}, {imm:016x}"); // ,{rs3}
             return;
         }
         let insn = insn & 0xffff;
         let op = &op[1..];
-        let _ = write!(s, "{insn:04x}     c.{op:9} {rd}, {rs1}, {rs2}, {imm:08x}");
+        let _ = write!(s, "{insn:04x}     c.{op:9} {rd}, {rs1}, {rs2}, {imm:016x}");
     }
 
     /// Returns mutable `Mmu`

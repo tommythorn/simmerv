@@ -70,50 +70,22 @@ impl Speedometer {
 
                 let imiss = d(stats.itlb_misses, self.prev_stats.itlb_misses);
                 let dmiss = d(stats.dtlb_misses, self.prev_stats.dtlb_misses);
-                let mut miss_parts: Vec<String> = Vec::new();
-                if imiss > 0.0 {
-                    miss_parts.push(format!("iTLB {imiss:.0}/Mi"));
-                }
-                if dmiss > 0.0 {
-                    miss_parts.push(format!("dTLB {dmiss:.0}/Mi"));
-                }
-                if !miss_parts.is_empty() {
-                    lines.push(format!("miss {}", miss_parts.join("  ")));
-                }
+                lines.push(format!("miss iTLB {imiss:6.0}/Mi  dTLB {dmiss:6.0}/Mi"));
 
                 let flush_full = d(stats.flush_full, self.prev_stats.flush_full);
                 let flush_asid = d(stats.flush_asid, self.prev_stats.flush_asid);
                 let flush_vpage = d(stats.flush_vpage, self.prev_stats.flush_vpage);
                 let flush_vpage_asid = d(stats.flush_vpage_asid, self.prev_stats.flush_vpage_asid);
-                let mut flush_parts: Vec<String> = Vec::new();
-                if flush_full > 0.0 {
-                    flush_parts.push(format!("full {flush_full:.0}/Mi"));
-                }
-                if flush_asid > 0.0 {
-                    flush_parts.push(format!("asid {flush_asid:.0}/Mi"));
-                }
-                if flush_vpage > 0.0 {
-                    flush_parts.push(format!("vpage {flush_vpage:.0}/Mi"));
-                }
-                if flush_vpage_asid > 0.0 {
-                    flush_parts.push(format!("vp+asid {flush_vpage_asid:.0}/Mi"));
-                }
-                if !flush_parts.is_empty() {
-                    lines.push(format!("flush {}", flush_parts.join("  ")));
-                }
+                lines.push(format!(
+                    "flush full {flush_full:4.0}/Mi  asid {flush_asid:4.0}/Mi  \
+                     vpage {flush_vpage:4.0}/Mi  vp+asid {flush_vpage_asid:4.0}/Mi"
+                ));
 
                 let cache_misses = d(cache.misses, self.prev_cache.misses);
                 let cache_flushes = d(cache.flushes, self.prev_cache.flushes);
-                let mut cache_parts: Vec<String> = Vec::new();
-                if cache_misses > 0.0 {
-                    cache_parts.push(format!("miss {cache_misses:.0}/Mi"));
-                }
-                if cache_flushes > 0.0 {
-                    cache_parts.push(format!("flush {cache_flushes:.0}/Mi"));
-                }
-                if !cache_parts.is_empty() {
-                    lines.push(format!("uop$ {}", cache_parts.join("  ")));
-                }
+                lines.push(format!(
+                    "uop$ miss {cache_misses:4.0}/Mi  flush {cache_flushes:4.0}/Mi"
+                ));
             }
 
             self.last_count = current_count;

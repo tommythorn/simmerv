@@ -189,7 +189,7 @@ impl Emulator {
                     }
                     println!();
                 } else {
-                    println!("--can't fetch from {insn_addr:08x}--");
+                    println!("--can't fetch from {insn_addr:016x}--");
                 }
             } else {
                 self.tick(600); // 600 is an arbitrary number
@@ -369,7 +369,7 @@ impl Emulator {
                 }
                 println!();
             } else {
-                println!("--can't fetch from {insn_addr:08x}--");
+                println!("--can't fetch from {insn_addr:016x}--");
             }
 
             if self.handle_htif()
