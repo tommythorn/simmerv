@@ -73,12 +73,28 @@ pub struct Mmu {
     /// Split TLBs for instruction fetch and data access.
     pub itlb: Tlb,
     pub dtlb: Tlb,
+
+    /// TLB flush counters (shared — both TLBs are always flushed together).
+    pub flush_full: u64,
+    pub flush_asid: u64,
+    pub flush_vpage: u64,
+    pub flush_vpage_asid: u64,
 }
 
 pub const PTE_V_MASK: u64 = 1 << 0;
 pub const PTE_U_MASK: u64 = 1 << 4;
 pub const PTE_A_MASK: u64 = 1 << 6;
 pub const PTE_D_MASK: u64 = 1 << 7;
+
+#[derive(Clone, Copy, Default)]
+pub struct TlbDisplayStats {
+    pub itlb_misses: u64,
+    pub dtlb_misses: u64,
+    pub flush_full: u64,
+    pub flush_asid: u64,
+    pub flush_vpage: u64,
+    pub flush_vpage_asid: u64,
+}
 
 impl Default for Mmu {
     fn default() -> Self { Self::new() }
@@ -118,6 +134,10 @@ impl Mmu {
             cycle: 0,
             itlb: Tlb::new(),
             dtlb: Tlb::new(),
+            flush_full: 0,
+            flush_asid: 0,
+            flush_vpage: 0,
+            flush_vpage_asid: 0,
         }
     }
 
@@ -168,26 +188,43 @@ impl Mmu {
 
     /// Flush both I-TLB and D-TLB.
     pub fn flush_tlb(&mut self) {
+        self.flush_full += 1;
         self.itlb.flush_all();
         self.dtlb.flush_all();
     }
 
     /// Flush TLB entries matching the given ASID (skip global).
     pub fn flush_tlb_asid(&mut self, asid: u16) {
+        self.flush_asid += 1;
         self.itlb.flush_asid(asid);
         self.dtlb.flush_asid(asid);
     }
 
     /// Flush TLB entries matching the given virtual page (all ASIDs).
     pub fn flush_tlb_vpage(&mut self, vpage: u32) {
+        self.flush_vpage += 1;
         self.itlb.flush_vpage(vpage);
         self.dtlb.flush_vpage(vpage);
     }
 
     /// Flush TLB entries matching both vpage and ASID.
     pub fn flush_tlb_vpage_asid(&mut self, vpage: u32, asid: u16) {
+        self.flush_vpage_asid += 1;
         self.itlb.flush_vpage_asid(vpage, asid);
         self.dtlb.flush_vpage_asid(vpage, asid);
+    }
+
+    /// Snapshot all TLB statistics for display.
+    #[must_use]
+    pub const fn tlb_stats(&self) -> TlbDisplayStats {
+        TlbDisplayStats {
+            itlb_misses: self.itlb.misses,
+            dtlb_misses: self.dtlb.misses,
+            flush_full: self.flush_full,
+            flush_asid: self.flush_asid,
+            flush_vpage: self.flush_vpage,
+            flush_vpage_asid: self.flush_vpage_asid,
+        }
     }
 
     /// Read the mtime CSR via CLINT.
@@ -749,6 +786,11 @@ impl Mmu {
             }
             // Permission mismatch — fall through to slow path which generates
             // the proper exception.
+        }
+
+        match access_type {
+            MemoryAccessType::Execute => self.itlb.misses += 1,
+            _ => self.dtlb.misses += 1,
         }
 
         let (pa, pte) = self.translate_address_slow(address, access_type, side_effect_free)?;

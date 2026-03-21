@@ -331,7 +331,7 @@ impl Cpu {
             && self.speedometer.last_time.elapsed().as_secs() >= 1
         {
             // XXX Using cycle as instret is misleading in the presence of wfi
-            let _ = self.speedometer.update(self.cycle);
+            let _ = self.speedometer.update(self.cycle, self.mmu.tlb_stats());
         }
 
         for _ in 0..cpu_steps {

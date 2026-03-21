@@ -46,13 +46,9 @@ mod tap {
         /// # Errors
         /// Returns an error if `/dev/net/tun` cannot be opened or the
         /// `TUNSETIFF` ioctl fails.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         pub fn open(name: &str) -> io::Result<Self> {
             use std::os::unix::io::AsRawFd;
-
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/net/tun")?;
 
             #[repr(C)]
             struct Ifreq {
@@ -60,6 +56,11 @@ mod tap {
                 ifr_flags: i16,
                 _pad: [u8; 22],
             }
+
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/net/tun")?;
 
             let mut ifr = Ifreq {
                 ifr_name: [0; 16],

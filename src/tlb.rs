@@ -32,6 +32,7 @@ impl TlbWay {
 pub struct Tlb {
     ways: [TlbWay; 2],
     replace_ctr: u8,
+    pub misses: u64,
 }
 
 #[inline(always)]
@@ -108,6 +109,7 @@ impl Tlb {
         Self {
             ways: [TlbWay::new(), TlbWay::new()],
             replace_ctr: 0,
+            misses: 0,
         }
     }
 

@@ -1,6 +1,8 @@
 use std::io::{self};
 use wasm_timer::Instant;
 
+use crate::mmu::TlbDisplayStats;
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
 
@@ -15,54 +17,122 @@ const TIOCGWINSZ: libc::c_ulong = 0x5413;
 pub struct Speedometer {
     pub last_time: Instant,
     last_count: u64,
-    first_time: Instant,
+    prev_stats: TlbDisplayStats,
+    prev_line_widths: Vec<u16>,
 }
 
 impl Speedometer {
-    /// Create a new speedometer
     #[must_use]
     pub fn new() -> Self {
-        let first_time = Instant::now();
         Self {
             last_count: 0,
-            first_time,
-            last_time: first_time,
+            last_time: Instant::now(),
+            prev_stats: TlbDisplayStats::default(),
+            prev_line_widths: Vec::new(),
         }
     }
 
-    /// Update the display with current event count
+    /// Update the display with current event count and TLB statistics.
     /// # Errors
     /// Can't access the terminal
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     #[allow(clippy::cast_precision_loss)]
-    pub fn update(&mut self, current_count: u64) -> io::Result<()> {
+    pub fn update(&mut self, current_count: u64, stats: TlbDisplayStats) -> io::Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let width = get_terminal_width()?;
-
             let current_time = Instant::now();
-
-            let elapsed = current_time.duration_since(self.first_time).as_secs_f64();
+            let elapsed = current_time.duration_since(self.last_time).as_secs_f64();
+            let delta_count = current_count - self.last_count;
 
             let rate_per_sec = if elapsed > 0.0 {
-                current_count as f64 / elapsed
+                delta_count as f64 / elapsed
             } else {
                 0.0
             };
 
-            let rate_str = format!("{:.2} Mi/s", rate_per_sec / 1_000_000.0);
+            let mi = delta_count as f64 / 1_000_000.0;
+
+            // Build lines: Mi/s always shown, TLB counters only if non-zero
+            let mut lines: Vec<String> = Vec::new();
+            lines.push(format!("{:.2} Mi/s", rate_per_sec / 1_000_000.0));
+
+            if mi > 0.0 {
+                let d = |cur: u64, prev: u64| (cur - prev) as f64 / mi;
+
+                let imiss = d(stats.itlb_misses, self.prev_stats.itlb_misses);
+                let dmiss = d(stats.dtlb_misses, self.prev_stats.dtlb_misses);
+                let mut miss_parts: Vec<String> = Vec::new();
+                if imiss > 0.0 {
+                    miss_parts.push(format!("iTLB {imiss:.0}/Mi"));
+                }
+                if dmiss > 0.0 {
+                    miss_parts.push(format!("dTLB {dmiss:.0}/Mi"));
+                }
+                if !miss_parts.is_empty() {
+                    lines.push(format!("miss {}", miss_parts.join("  ")));
+                }
+
+                let flush_full = d(stats.flush_full, self.prev_stats.flush_full);
+                let flush_asid = d(stats.flush_asid, self.prev_stats.flush_asid);
+                let flush_vpage = d(stats.flush_vpage, self.prev_stats.flush_vpage);
+                let flush_vpage_asid = d(stats.flush_vpage_asid, self.prev_stats.flush_vpage_asid);
+                let mut flush_parts: Vec<String> = Vec::new();
+                if flush_full > 0.0 {
+                    flush_parts.push(format!("full {flush_full:.0}/Mi"));
+                }
+                if flush_asid > 0.0 {
+                    flush_parts.push(format!("asid {flush_asid:.0}/Mi"));
+                }
+                if flush_vpage > 0.0 {
+                    flush_parts.push(format!("vpage {flush_vpage:.0}/Mi"));
+                }
+                if flush_vpage_asid > 0.0 {
+                    flush_parts.push(format!("vp+asid {flush_vpage_asid:.0}/Mi"));
+                }
+                if !flush_parts.is_empty() {
+                    lines.push(format!("flush {}", flush_parts.join("  ")));
+                }
+            }
 
             self.last_count = current_count;
             self.last_time = current_time;
-
-            #[allow(clippy::cast_possible_truncation)]
-            let rate_len = rate_str.len() as u16;
-            let col_position = width.saturating_sub(rate_len);
+            self.prev_stats = stats;
 
             let mut stdout = io::stdout();
             write!(stdout, "\x1b[s")?;
-            write!(stdout, "\x1b[1;{}H", col_position + 1)?;
-            write!(stdout, "{rate_str}")?;
+            let mut new_widths = Vec::with_capacity(lines.len());
+            let prev = &self.prev_line_widths;
+            let n_rows = lines.len().max(prev.len());
+            for row in 0..n_rows {
+                if let Some(line) = lines.get(row) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let line_len = line.len() as u16;
+                    let pad = prev.get(row).copied().unwrap_or(0).saturating_sub(line_len);
+                    let total = line_len + pad;
+                    let col = width.saturating_sub(total) + 1;
+                    write!(
+                        stdout,
+                        "\x1b[{};{col}H{line}{:pad$}",
+                        row + 1,
+                        "",
+                        pad = pad as usize
+                    )?;
+                    new_widths.push(total);
+                } else {
+                    // Previous update had a line here but now it's gone — blank it
+                    let prev_w = prev[row];
+                    let col = width.saturating_sub(prev_w) + 1;
+                    write!(
+                        stdout,
+                        "\x1b[{};{col}H{:w$}",
+                        row + 1,
+                        "",
+                        w = prev_w as usize
+                    )?;
+                }
+            }
+            self.prev_line_widths = new_widths;
             write!(stdout, "\x1b[u")?;
             stdout.flush()?;
         }
