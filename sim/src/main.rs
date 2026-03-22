@@ -85,7 +85,7 @@ struct Args {
     #[argh(option)]
     uop_cache_mode: Option<String>,
 
-    /// total uop cache entries (default: 8192, rounded to power of two)
+    /// total uop cache entries (default: 262144, rounded to power of two)
     #[argh(option)]
     uop_cache_entries: Option<usize>,
 
@@ -157,7 +157,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("unknown uop cache mode: {other:?} (expected \"direct\" or \"skew\")")
         }
     };
-    let cache_entries = args.uop_cache_entries.unwrap_or(131072);
+    let cache_entries = args.uop_cache_entries.unwrap_or(262144);
     let mut emulator = Emulator::new(
         get_terminal(
             &terminal_type,

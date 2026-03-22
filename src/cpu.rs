@@ -23,7 +23,9 @@ use crate::new_decoder::x;
 use crate::riscv;
 use crate::serial_backend::SerialBackend;
 use crate::speedometer::Speedometer;
-use crate::uop_cache::UopCache;
+use crate::uop_cache::BasicBlock;
+use crate::uop_cache::BbCache;
+use crate::uop_cache::MAX_BLOCK_LEN;
 pub use csr::*;
 use fp::RoundingMode;
 use fp::Sf;
@@ -64,7 +66,7 @@ pub type ExecResult = Result<(u64, u8), Exception>;
 #[derive(Debug, Clone, Copy)]
 pub struct Uop {
     /// Immediate field (imm, csrno, or shift amount)
-    pub imm: u64,
+    pub imm: i32,
     /// The opcode
     pub op: Op,
     /// Destination Register
@@ -123,6 +125,10 @@ impl Uop {
             _ => 4,
         }
     }
+
+    #[must_use]
+    #[inline]
+    pub const fn imm64(&self) -> u64 { self.imm as i64 as u64 }
 }
 
 impl PartialEq for Uop {
@@ -341,25 +347,29 @@ impl Cpu {
     /// Runs program N cycles. Fetch, decode, and execution are completed in a
     /// cycle so far.
     #[allow(clippy::cast_sign_loss)]
-    pub fn run_soc(&mut self, cpu_steps: usize, uop_cache: &mut UopCache) -> bool {
+    pub fn run_soc(&mut self, cpu_steps: usize, bb: &mut BbCache) -> bool {
         if self.speedometer_flag.load(Ordering::Relaxed)
             && self.speedometer.last_time.elapsed().as_secs() >= 1
         {
             // XXX Using cycle as instret is misleading in the presence of wfi
             let _ = self
                 .speedometer
-                .update(self.cycle, self.mmu.tlb_stats(), uop_cache.stats());
+                .update(self.cycle, self.mmu.tlb_stats(), bb.stats());
         }
 
-        for _ in 0..cpu_steps {
-            let insn_addr = self.pc;
-            if let Err(exc) = self.step_cpu(uop_cache) {
-                self.handle_exception(&exc, insn_addr);
-                return true;
-            }
-
-            if self.wfi {
-                break;
+        let mut steps_done: usize = 0;
+        while steps_done < cpu_steps {
+            match self.step_block(bb) {
+                Ok(n) => {
+                    steps_done += n as usize;
+                    if self.wfi {
+                        break;
+                    }
+                }
+                Err((exc, fault_addr)) => {
+                    self.handle_exception(&exc, fault_addr);
+                    return true;
+                }
             }
         }
         self.mmu.service(self.cycle);
@@ -376,33 +386,66 @@ impl Cpu {
         false
     }
 
-    // It's here, the One Key Function.  This is where it all happens!
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn step_cpu(&mut self, uop_cache: &mut UopCache) -> Result<(), Exception> {
-        self.cycle = self.cycle.wrapping_add(1);
-        if self.wfi {
-            if self.mmu.mip & self.csr.mie != 0 {
-                self.wfi = false;
-            }
-            return Ok(());
-        }
+    #[inline]
+    const fn is_block_terminal(op: Op, imm: i32) -> bool {
+        matches!(
+            op,
+            Op::Ecall
+                | Op::Ebreak
+                | Op::CEbreak
+                | Op::Mret
+                | Op::Sret
+                | Op::FenceI
+                | Op::SfenceVma
+                | Op::SinvalVma
+                | Op::Wfi
+        ) || matches!(
+            op,
+            Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci
+        ) && imm == 0x180_i32 // CSR_SATP
+    }
 
+    #[inline]
+    const fn is_branch(op: Op) -> bool {
+        matches!(
+            op,
+            Op::Beq | Op::Bne | Op::Blt | Op::Bge | Op::Bltu | Op::Bgeu | Op::CBeqz | Op::CBnez
+        )
+    }
+
+    /// Execute one block (either from cache or freshly decoded).
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
+    fn step_block(&mut self, bb: &mut BbCache) -> Result<u32, (Exception, u64)> {
+        // Apply any pending icache flush.
         match self.icache_flush {
             IcacheFlushKind::None => {}
             IcacheFlushKind::Full => {
                 log::trace!("uop cache flush");
-                uop_cache.clear();
+                bb.clear();
             }
-            IcacheFlushKind::Asid(asid) => uop_cache.flush_asid(asid),
-            IcacheFlushKind::Vpage(page_addr) => uop_cache.flush_vpage(page_addr),
+            IcacheFlushKind::Asid(asid) => bb.flush_asid(asid),
+            IcacheFlushKind::Vpage(page_addr) => bb.flush_vpage(page_addr),
             IcacheFlushKind::VpageAsid(page_addr, asid) => {
-                uop_cache.flush_vpage_asid(page_addr, asid);
+                bb.flush_vpage_asid(page_addr, asid);
             }
         }
         self.icache_flush = IcacheFlushKind::None;
 
-        self.seqno = self.seqno.wrapping_add(1);
-        let insn_addr = self.pc;
+        self.cycle = self.cycle.wrapping_add(1);
+
+        // WFI fast-path
+        if self.wfi {
+            if self.mmu.mip & self.csr.mie != 0 {
+                self.wfi = false;
+            }
+            return Ok(1);
+        }
+
+        let block_start = self.pc;
 
         // Tag M-mode cache entries with bit 0 to distinguish M-mode physical
         // addresses from S/U-mode virtual addresses that share the same value.
@@ -414,49 +457,216 @@ impl Cpu {
         // there — kernel entries are effectively ASID-global, matching the
         // G-bit behaviour of the iTLB.
         let cache_key = if self.mmu.prv == PrivMode::M {
-            insn_addr | 1
+            block_start | 1
         } else {
             let asid = (self.mmu.satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK;
-            insn_addr | (asid << 48)
+            block_start | (asid << 48)
         };
 
-        if let Some(uop) = uop_cache.get(cache_key) {
-            self.pc += uop.get_insn_size();
+        // ── Cache hit path ────────────────────────────────────────────────
+        if let Some(slot) = bb.probe(cache_key) {
+            // Read len/truncated: temporary borrows of bb.data, released immediately
+            // since `u8` and `bool` are Copy.
+            let len = bb.block_at(slot).len;
+            let truncated = bb.block_at(slot).truncated;
+            let mut n_executed: u32 = 0;
+            let mut exception: Option<(Exception, u64)> = None;
+            for i in 0..len as usize {
+                // Copy the uop out — Uop is Copy, so the borrow on bb is
+                // released before the mutable uses of bb below.
+                let uop = bb.block_at(slot).uops[i];
+                let cur_insn_addr = self.pc;
+                let expected_next = cur_insn_addr + uop.get_insn_size();
+                self.pc = expected_next;
+                self.seqno = self.seqno.wrapping_add(1);
 
-            let ops = Operands {
-                s1: self.read_x(uop.rs1),
-                s2: self.read_x(uop.rs2),
-                s3: self.read_x(uop.rs3),
-            };
-            let (res, fflags) = new_execute(self, uop, &ops)?;
+                let ops = Operands {
+                    s1: self.read_x(uop.rs1),
+                    s2: self.read_x(uop.rs2),
+                    s3: self.read_x(uop.rs3),
+                };
+                match new_execute(self, &uop, &ops, cur_insn_addr) {
+                    Ok((res, fflags)) => {
+                        self.write_x(uop.rd, res);
+                        self.add_to_fflags(fflags);
+                    }
+                    Err(e) => {
+                        exception = Some((e, cur_insn_addr));
+                        break;
+                    }
+                }
+                n_executed += 1;
 
-            self.write_x(uop.rd, res);
-            self.add_to_fflags(fflags);
-        } else {
-            // XXX For full correctness we mustn't fail if we _can_ fetch 16-bit
-            // _and_ it turns out to be a legal instruction.
-            let insn = self.memop(Execute, insn_addr, 0, 0, 4)? as u32;
-            self.pc += if insn & 3 == 3 { 4 } else { 2 };
-            let uop = decode(insn_addr, insn);
-            if matches!(uop.op, Op::CUnimp | Op::Unimp) {
-                return Err(Exception {
-                    trap: Trap::IllegalInstruction,
-                    tval: u64::from(insn),
-                });
+                if self.pc != expected_next {
+                    // PC deviated — taken branch or jump, exit early.
+                    break;
+                } else if Self::is_branch(uop.op) {
+                    bb.untaken_branches += 1;
+                }
             }
-
-            uop_cache.insert(cache_key, uop);
-
-            let ops = Operands {
-                s1: self.read_x(uop.rs1),
-                s2: self.read_x(uop.rs2),
-                s3: self.read_x(uop.rs3),
-            };
-            let (res, fflags) = new_execute(self, &uop, &ops)?;
-            self.write_x(uop.rd, res);
-            self.add_to_fflags(fflags);
+            bb.insn_hits += u64::from(n_executed);
+            bb.block_hits += 1;
+            if truncated {
+                bb.truncated_executions += 1;
+            }
+            // Extra cycles for instructions beyond the first.
+            self.cycle = self
+                .cycle
+                .wrapping_add(u64::from(n_executed).saturating_sub(1));
+            if let Some(err) = exception {
+                return Err(err);
+            }
+            return Ok(n_executed);
         }
 
+        // ── Cache miss: build basic block ─────────────────────────────────
+        let page_end = (block_start & !0xFFF) + 0x1000;
+        let mut block = BasicBlock::default();
+        let mut fetch_pc = block_start;
+        let mut truncated = false;
+
+        loop {
+            if block.len as usize >= MAX_BLOCK_LEN {
+                break;
+            }
+            let i = block.len as usize;
+
+            // Page boundary check (skip for i == 0).
+            if i > 0 && fetch_pc >= page_end {
+                truncated = true;
+                break;
+            }
+
+            // Fetch instruction (4 bytes; actual size determined after decode).
+            let insn_result = self.memop(Execute, fetch_pc, 0, 0, 4);
+            let insn = match insn_result {
+                Ok(v) => v as u32,
+                Err(e) => {
+                    if i == 0 {
+                        return Err((e, fetch_pc));
+                    }
+                    break;
+                }
+            };
+
+            let insn_size = if insn & 3 == 3 { 4u64 } else { 2u64 };
+
+            // Skip 4-byte instruction straddling page boundary (not for i==0).
+            if i > 0 && insn_size == 4 && fetch_pc + 4 > page_end {
+                truncated = true;
+                break;
+            }
+
+            let uop = decode(fetch_pc, insn);
+
+            if matches!(uop.op, Op::CUnimp | Op::Unimp) {
+                if i == 0 {
+                    return Err((
+                        Exception {
+                            trap: Trap::IllegalInstruction,
+                            tval: u64::from(insn),
+                        },
+                        fetch_pc,
+                    ));
+                }
+                break;
+            }
+
+            block.uops[i] = uop;
+            block.len += 1;
+            fetch_pc += insn_size;
+
+            if Self::is_block_terminal(uop.op, uop.imm) {
+                break;
+            }
+        }
+        block.truncated = truncated;
+
+        // ── Execute the freshly-decoded block ─────────────────────────────
+        let mut n_executed: u32 = 0;
+        let mut exception: Option<(Exception, u64)> = None;
+        for i in 0..block.len as usize {
+            let uop = block.uops[i];
+            let cur_insn_addr = self.pc;
+            let expected_next = cur_insn_addr + uop.get_insn_size();
+            self.pc = expected_next;
+            self.seqno = self.seqno.wrapping_add(1);
+
+            let ops = Operands {
+                s1: self.read_x(uop.rs1),
+                s2: self.read_x(uop.rs2),
+                s3: self.read_x(uop.rs3),
+            };
+            match new_execute(self, &uop, &ops, cur_insn_addr) {
+                Ok((res, fflags)) => {
+                    self.write_x(uop.rd, res);
+                    self.add_to_fflags(fflags);
+                }
+                Err(e) => {
+                    exception = Some((e, cur_insn_addr));
+                    break;
+                }
+            }
+            n_executed += 1;
+
+            if self.pc != expected_next {
+                break;
+            }
+        }
+
+        if let Some(err) = exception {
+            // Do not cache blocks that raised an exception.
+            return Err(err);
+        }
+
+        // Cache the complete block.
+        bb.insert(cache_key, &block);
+        self.cycle = self
+            .cycle
+            .wrapping_add(u64::from(n_executed).saturating_sub(1));
+        Ok(n_executed)
+    }
+
+    /// Fetch, decode, and execute exactly one instruction without any cache
+    /// interaction. Used by the tracing path so that exactly one instruction
+    /// retires per call.
+    ///
+    /// # Errors
+    /// Returns an [`Exception`] if the instruction faults (illegal instruction,
+    /// page fault, etc.).
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn step_single(&mut self) -> Result<(), Exception> {
+        // Apply any pending icache flush (no cache to flush, but clear the flag).
+        self.icache_flush = IcacheFlushKind::None;
+
+        self.cycle = self.cycle.wrapping_add(1);
+
+        if self.wfi {
+            if self.mmu.mip & self.csr.mie != 0 {
+                self.wfi = false;
+            }
+            return Ok(());
+        }
+
+        let insn_addr = self.pc;
+        let insn = self.memop(Execute, insn_addr, 0, 0, 4)? as u32;
+        self.pc += if insn & 3 == 3 { 4 } else { 2 };
+        let uop = decode(insn_addr, insn);
+        if matches!(uop.op, Op::CUnimp | Op::Unimp) {
+            return Err(Exception {
+                trap: Trap::IllegalInstruction,
+                tval: u64::from(insn),
+            });
+        }
+        self.seqno = self.seqno.wrapping_add(1);
+        let ops = Operands {
+            s1: self.read_x(uop.rs1),
+            s2: self.read_x(uop.rs2),
+            s3: self.read_x(uop.rs3),
+        };
+        let (res, fflags) = new_execute(self, &uop, &ops, insn_addr)?;
+        self.write_x(uop.rd, res);
+        self.add_to_fflags(fflags);
         Ok(())
     }
 
@@ -494,7 +704,7 @@ impl Cpu {
         }
     }
 
-    fn handle_exception(&mut self, exception: &Exception, insn_addr: u64) {
+    pub fn handle_exception(&mut self, exception: &Exception, insn_addr: u64) {
         if matches!(exception.trap, Trap::IllegalInstruction) {
             log::info!("Illegal instruction {insn_addr:016x}");
         }
@@ -1370,7 +1580,7 @@ fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
     clippy::cast_possible_truncation,
     clippy::cast_lossless
 )]
-fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
+fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> ExecResult {
     match uop.op {
         Op::CNop
         | Op::SfenceWInval
@@ -1386,80 +1596,81 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
             tval: 0x9002,
         }),
 
-        Op::Lui | Op::Auipc | Op::CLui => Ok((uop.imm, 0)),
+        Op::Lui | Op::CLui => Ok((uop.imm64(), 0)),
+        Op::Auipc => Ok((insn_addr.wrapping_add(uop.imm64()), 0)),
         Op::Jal | Op::CJ => {
             let tmp = cpu.pc;
-            cpu.pc = uop.imm;
+            cpu.pc = insn_addr.wrapping_add(uop.imm64());
             Ok((tmp, 0))
         }
         Op::Jalr | Op::CJr | Op::CJalr => {
             let tmp = cpu.pc;
-            cpu.pc = ops.s1.wrapping_add(uop.imm) & !1;
+            cpu.pc = ops.s1.wrapping_add(uop.imm64()) & !1;
             Ok((tmp, 0))
         }
         Op::Beq | Op::CBeqz => {
             if ops.s1 == ops.s2 {
-                cpu.pc = uop.imm;
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
             Ok((0, 0))
         }
         Op::Bne | Op::CBnez => {
             if ops.s1 != ops.s2 {
-                cpu.pc = uop.imm;
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
             Ok((0, 0))
         }
         Op::Blt => {
             if (ops.s1 as i64) < ops.s2 as i64 {
-                cpu.pc = uop.imm;
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
             Ok((0, 0))
         }
         Op::Bge => {
             if (ops.s1 as i64) >= ops.s2 as i64 {
-                cpu.pc = uop.imm;
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
             Ok((0, 0))
         }
         Op::Bltu => {
             if ops.s1 < ops.s2 {
-                cpu.pc = uop.imm;
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
             Ok((0, 0))
         }
         Op::Bgeu => {
             if ops.s1 >= ops.s2 {
-                cpu.pc = uop.imm;
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
             Ok((0, 0))
         }
-        Op::Lb => Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 1)? as i8 as u64, 0)),
-        Op::Lh => Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 2)? as i16 as u64, 0)),
+        Op::Lb => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 1)? as i8 as u64, 0)),
+        Op::Lh => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 2)? as i16 as u64, 0)),
         Op::Lw | Op::CLw | Op::CLwsp => {
-            Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 4)? as i32 as u64, 0))
+            Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 4)? as i32 as u64, 0))
         }
-        Op::Lbu => Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 1)?, 0)),
-        Op::Lhu => Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 2)?, 0)),
+        Op::Lbu => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 1)?, 0)),
+        Op::Lhu => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 2)?, 0)),
         Op::Sb => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 1)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 1)?;
             Ok((0, 0))
         }
         Op::Sh => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 2)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 2)?;
             Ok((0, 0))
         }
         Op::Sw | Op::CSw | Op::CSwsp => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 4)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 4)?;
             Ok((0, 0))
         }
         Op::Addi | Op::CAddi | Op::CAddi4spn | Op::CLi | Op::CAddi16sp => {
-            Ok((ops.s1.wrapping_add(uop.imm), 0))
+            Ok((ops.s1.wrapping_add(uop.imm64()), 0))
         }
         Op::Slti => Ok((u64::from((ops.s1 as i64) < uop.imm as i64), 0)),
-        Op::Sltiu => Ok((u64::from(ops.s1 < uop.imm), 0)),
-        Op::Xori => Ok((ops.s1 ^ uop.imm, 0)),
-        Op::Ori => Ok((ops.s1 | uop.imm, 0)),
-        Op::Andi | Op::CAndi => Ok((ops.s1 & uop.imm, 0)),
+        Op::Sltiu => Ok((u64::from(ops.s1 < uop.imm64()), 0)),
+        Op::Xori => Ok((ops.s1 ^ uop.imm64(), 0)),
+        Op::Ori => Ok((ops.s1 | uop.imm64(), 0)),
+        Op::Andi | Op::CAndi => Ok((ops.s1 & uop.imm64(), 0)),
         // RV32I SLLI subsumed by RV64I
         // RV32I SRLI subsumed by RV64I
         // RV32I SRAI subsumed by RV64I
@@ -1474,7 +1685,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::Or | Op::COr => Ok((ops.s1 | ops.s2, 0)),
         Op::And | Op::CAnd => Ok((ops.s1 & ops.s2, 0)),
         Op::Fence => {
-            if uop.imm == 0x0100000f {
+            if uop.imm == 0x0100000f_u32 as i32 {
                 // PAUSE instruction hint
                 // Nothing to do here, but it would be interesting to see
                 // it used.
@@ -1493,7 +1704,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
                 PrivMode::S => Trap::EnvironmentCallFromSMode,
                 PrivMode::M => Trap::EnvironmentCallFromMMode,
             },
-            tval: uop.imm,
+            tval: uop.imm64(),
         }),
         Op::Ebreak => Err(Exception {
             trap: Trap::Breakpoint,
@@ -1501,24 +1712,24 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         }),
         // RV64I
         Op::Lwu => {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 4)?;
+            let v = cpu.memop(Read, ops.s1, uop.imm64(), 0, 4)?;
             Ok((v, 0))
         }
         Op::Ld | Op::CLd | Op::CLdsp => {
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 8)?;
+            let v = cpu.memop(Read, ops.s1, uop.imm64(), 0, 8)?;
             Ok((v, 0))
         }
         Op::Sd | Op::CSd | Op::CSdsp => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 8)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 8)?;
             Ok((0, 0))
         }
-        Op::Slli | Op::CSlli => Ok((ops.s1 << uop.imm, 0)),
-        Op::Srli | Op::CSrli => Ok((ops.s1 >> uop.imm, 0)),
-        Op::Srai | Op::CSrai => Ok((((ops.s1 as i64) >> uop.imm) as u64, 0)),
-        Op::Addiw | Op::CAddiw => Ok((sext32(ops.s1.wrapping_add(uop.imm) as u32), 0)),
-        Op::Slliw => Ok((((ops.s1 as i32) << (uop.imm & 31)) as u64, 0)),
-        Op::Srliw => Ok((sext32((ops.s1 as u32) >> (uop.imm & 31)), 0)),
-        Op::Sraiw => Ok((((ops.s1 as i32) >> (uop.imm & 31)) as u64, 0)),
+        Op::Slli | Op::CSlli => Ok((ops.s1 << uop.imm as u32, 0)),
+        Op::Srli | Op::CSrli => Ok((ops.s1 >> uop.imm as u32, 0)),
+        Op::Srai | Op::CSrai => Ok((((ops.s1 as i64) >> uop.imm as u32) as u64, 0)),
+        Op::Addiw | Op::CAddiw => Ok((sext32(ops.s1.wrapping_add(uop.imm64()) as u32), 0)),
+        Op::Slliw => Ok((((ops.s1 as i32) << (uop.imm & 31) as u32) as u64, 0)),
+        Op::Srliw => Ok((sext32((ops.s1 as u32) >> (uop.imm & 31) as u32), 0)),
+        Op::Sraiw => Ok((((ops.s1 as i32) >> (uop.imm & 31) as u32) as u64, 0)),
         Op::Addw | Op::CAddw => Ok((sext32(ops.s1.wrapping_add(ops.s2) as u32), 0)),
         Op::Subw | Op::CSubw => Ok((sext32(ops.s1.wrapping_sub(ops.s2) as u32), 0)),
         Op::Sllw => Ok((sext32((ops.s1 as u32).wrapping_shl(ops.s2 as u32)), 0)),
@@ -1822,22 +2033,28 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         // RV32F
         Op::Flw => {
             cpu.check_float_access_and_dirty(0)?;
-            Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 4)? | fp::NAN_BOX_F32, 0))
+            Ok((
+                cpu.memop(Read, ops.s1, uop.imm64(), 0, 4)? | fp::NAN_BOX_F32,
+                0,
+            ))
         }
         Op::Fsw => {
             cpu.check_float_access_and_dirty(0)?;
             cpu.reservation = None;
-            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 4)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 4)?;
             Ok((0, 0))
         }
         Op::Flh => {
             cpu.check_float_access_and_dirty(0)?;
-            Ok((cpu.memop(Read, ops.s1, uop.imm, 0, 2)? | fp::NAN_BOX_F16, 0))
+            Ok((
+                cpu.memop(Read, ops.s1, uop.imm64(), 0, 2)? | fp::NAN_BOX_F16,
+                0,
+            ))
         }
         Op::Fsh => {
             cpu.check_float_access_and_dirty(0)?;
             cpu.reservation = None;
-            let _ = cpu.memop(Write, ops.s1, uop.imm, ops.s2, 2)?;
+            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 2)?;
             Ok((0, 0))
         }
         Op::FmaddS => {
@@ -1988,12 +2205,12 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         // RV32D
         Op::Fld | Op::CFld | Op::CFldsp => {
             cpu.check_float_access_and_dirty(0)?;
-            let v = cpu.memop(Read, ops.s1, uop.imm, 0, 8)?;
+            let v = cpu.memop(Read, ops.s1, uop.imm64(), 0, 8)?;
             Ok((v, 0))
         }
         Op::Fsd | Op::CFsd | Op::CFsdsp => {
             cpu.check_float_access_and_dirty(0)?;
-            cpu.mmu.store64(ops.s1.wrapping_add(uop.imm), ops.s2)?;
+            cpu.mmu.store64(ops.s1.wrapping_add(uop.imm64()), ops.s2)?;
             Ok((0, 0))
         }
         Op::FmaddD => {
@@ -2253,7 +2470,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::Sh2addUw => Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 2), 0)),
         Op::Sh3add => Ok((ops.s2.wrapping_add(ops.s1 << 3), 0)),
         Op::Sh3addUw => Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 3), 0)),
-        Op::SlliUw => Ok(((ops.s1 & 0xffffffff) << uop.imm, 0)),
+        Op::SlliUw => Ok(((ops.s1 & 0xffffffff) << uop.imm as u32, 0)),
         // Zicond extension
         Op::CzeroEqz => Ok((if ops.s2 == 0 { 0 } else { ops.s1 }, 0)),
         Op::CzeroNez => Ok((if ops.s2 != 0 { 0 } else { ops.s1 }, 0)),
@@ -2301,13 +2518,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands) -> ExecResult {
         Op::ZextH => Ok((ops.s1 & 0xffff, 0)),
         // Zbs — single-bit instructions
         Op::Bclr => Ok((ops.s1 & !(1 << (ops.s2 & 63)), 0)),
-        Op::Bclri => Ok((ops.s1 & !(1 << (uop.imm & 63)), 0)),
+        Op::Bclri => Ok((ops.s1 & !(1u64 << (uop.imm & 63) as u32), 0)),
         Op::Bext => Ok(((ops.s1 >> (ops.s2 & 63)) & 1, 0)),
-        Op::Bexti => Ok(((ops.s1 >> (uop.imm & 63)) & 1, 0)),
+        Op::Bexti => Ok(((ops.s1 >> (uop.imm & 63) as u32) & 1, 0)),
         Op::Binv => Ok((ops.s1 ^ (1 << (ops.s2 & 63)), 0)),
-        Op::Binvi => Ok((ops.s1 ^ (1 << (uop.imm & 63)), 0)),
+        Op::Binvi => Ok((ops.s1 ^ (1u64 << (uop.imm & 63) as u32), 0)),
         Op::Bset => Ok((ops.s1 | (1 << (ops.s2 & 63)), 0)),
-        Op::Bseti => Ok((ops.s1 | (1 << (uop.imm & 63)), 0)),
+        Op::Bseti => Ok((ops.s1 | (1u64 << (uop.imm & 63) as u32), 0)),
         Op::Clmul => {
             let mut r = 0;
             for i in 0..64 {
@@ -2383,7 +2600,6 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn tick() {
-        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
         let mut cpu = create_cpu();
         cpu.update_pc(MEMORY_BASE);
 
@@ -2398,12 +2614,17 @@ mod test_cpu {
             Err(_e) => panic!("Failed to store"),
         }
 
-        cpu.run_soc(1, &mut uop_cache);
+        // Use step_single for precise single-instruction execution.
+        if let Err(exc) = cpu.step_single() {
+            cpu.handle_exception(&exc, MEMORY_BASE);
+        }
 
         assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
         assert_eq!(1, cpu.read_register(x(1)));
 
-        cpu.run_soc(1, &mut uop_cache);
+        if let Err(exc) = cpu.step_single() {
+            cpu.handle_exception(&exc, MEMORY_BASE + 4);
+        }
 
         assert_eq!(MEMORY_BASE + 6, cpu.read_pc());
         assert_eq!(8, cpu.read_register(x(8)));
@@ -2411,8 +2632,7 @@ mod test_cpu {
 
     #[test]
     #[allow(clippy::match_wild_err_arm)]
-    fn step_cpu() {
-        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
+    fn step_single() {
         let mut cpu = create_cpu();
         cpu.update_pc(MEMORY_BASE);
         // write non-compressed "addi a0, a0, 12" instruction
@@ -2422,7 +2642,7 @@ mod test_cpu {
         }
         assert_eq!(MEMORY_BASE, cpu.read_pc());
         assert_eq!(0, cpu.read_register(x(10)));
-        if let Err(exc) = cpu.step_cpu(&mut uop_cache) {
+        if let Err(exc) = cpu.step_single() {
             cpu.handle_exception(&exc, MEMORY_BASE);
         }
         assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
@@ -2433,7 +2653,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn interrupt() {
-        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
+        let mut bb = BbCache::new(256, crate::uop_cache::CacheMode::Direct);
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write non-compressed "addi x0, x0, 1" instruction
@@ -2448,7 +2668,7 @@ mod test_cpu {
         cpu.mmu.mip |= MIP_MTIP;
         cpu.write_csr_raw(Csr::Mtvec, handler_vector);
 
-        cpu.run_soc(1, &mut uop_cache);
+        cpu.run_soc(1, &mut bb);
 
         // Interrupt isn't caught because mie is disabled
         assert_eq!(MEMORY_BASE + 4, cpu.read_pc());
@@ -2457,7 +2677,7 @@ mod test_cpu {
         // Enable mie in mstatus
         cpu.write_csr_raw(Csr::Mstatus, 0x8);
 
-        cpu.run_soc(1, &mut uop_cache);
+        cpu.run_soc(1, &mut bb);
 
         // Interrupt happened and moved to handler
         assert_eq!(handler_vector, cpu.read_pc());
@@ -2475,7 +2695,7 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn exception() {
-        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
+        let mut bb = BbCache::new(256, crate::uop_cache::CacheMode::Direct);
         let handler_vector = 0x10000000;
         let mut cpu = create_cpu();
         // Write ECALL instruction
@@ -2486,7 +2706,7 @@ mod test_cpu {
         cpu.write_csr_raw(Csr::Mtvec, handler_vector);
         cpu.update_pc(MEMORY_BASE);
 
-        cpu.run_soc(1, &mut uop_cache);
+        cpu.run_soc(1, &mut bb);
 
         // Interrupt happened and moved to handler
         assert_eq!(handler_vector, cpu.read_pc());
@@ -2503,8 +2723,6 @@ mod test_cpu {
     #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn hardocded_zero() {
-        let mut uop_cache = UopCache::new(256, crate::uop_cache::CacheMode::Direct);
-
         let mut cpu = create_cpu();
         cpu.update_pc(MEMORY_BASE);
 
@@ -2524,14 +2742,26 @@ mod test_cpu {
 
         // Test x0
         assert_eq!(0, cpu.read_register(x(0)));
-        cpu.run_soc(1, &mut uop_cache); // Execute  "addi x0, x0, 1"
+        if let Err(exc) = cpu.step_single() {
+            cpu.handle_exception(&exc, MEMORY_BASE);
+        }
         // x0 is still zero because it's hardcoded zero
         assert_eq!(0, cpu.read_register(x(0)));
 
         // Test x1
         assert_eq!(0, cpu.read_register(x(1)));
-        cpu.run_soc(1, &mut uop_cache); // Execute  "addi x1, x1, 1"
+        if let Err(exc) = cpu.step_single() {
+            cpu.handle_exception(&exc, MEMORY_BASE + 4);
+        }
         // x1 is not hardcoded zero
         assert_eq!(1, cpu.read_register(x(1)));
+    }
+}
+#[cfg(test)]
+mod size_check2 {
+    use super::*;
+    #[test]
+    fn uop_size() {
+        assert_eq!(std::mem::size_of::<Uop>(), 12, "Uop should be 12 bytes");
     }
 }

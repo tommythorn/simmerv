@@ -1,5 +1,8 @@
 use crate::cpu::Uop;
 
+/// Maximum number of uops in a single cached basic block.
+pub const MAX_BLOCK_LEN: usize = 16;
+
 /// Cache mapping strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {
@@ -9,10 +12,30 @@ pub enum CacheMode {
     Skew,
 }
 
-/// Fixed-size uop cache with configurable mapping strategy.
-pub struct UopCache {
+/// A cached sequence of decoded uops covering one basic block.
+#[derive(Clone)]
+pub struct BasicBlock {
+    pub uops: [Uop; MAX_BLOCK_LEN],
+    /// Number of valid uops in this block (`1..=MAX_BLOCK_LEN`).
+    pub len: u8,
+    /// True if block building stopped at a 4K page boundary.
+    pub truncated: bool,
+}
+
+impl Default for BasicBlock {
+    fn default() -> Self {
+        Self {
+            uops: [Uop::default(); MAX_BLOCK_LEN],
+            len: 0,
+            truncated: false,
+        }
+    }
+}
+
+/// Fixed-size basic-block uop cache with configurable mapping strategy.
+pub struct BbCache {
     tags: Vec<u64>,
-    data: Vec<Uop>,
+    data: Vec<BasicBlock>,
     /// Number of entries per way.
     sets: usize,
     /// Mask for indexing into a way (sets - 1).
@@ -24,11 +47,19 @@ pub struct UopCache {
     capacity: usize,
     /// Number of currently occupied (non-INVALID) slots.
     occupied: usize,
-    pub hits: u64,
+    /// Number of block-level cache hits.
+    pub block_hits: u64,
+    /// Total instructions executed from cached blocks (`insn_hits` /
+    /// `block_hits` = avg block len).
+    pub insn_hits: u64,
     /// Miss where the slot held `INVALID_TAG` — cold fill after a flush.
     pub cold_misses: u64,
     /// Miss where the slot held a *different* valid key — conflict eviction.
     pub conflict_misses: u64,
+    /// Executions of page-boundary-truncated blocks.
+    pub truncated_executions: u64,
+    /// Branch uops executed where the branch was not taken.
+    pub untaken_branches: u64,
     /// Full cache clears (FENCE.I, SFENCE.VMA x0/x0, SATP PPN/mode change).
     pub flush_full: u64,
     /// Targeted flushes by ASID (SFENCE.VMA x0/rs2).
@@ -38,24 +69,26 @@ pub struct UopCache {
     /// Targeted flushes by virtual page + ASID (SFENCE.VMA rs1/rs2).
     pub flush_vpage_asid: u64,
     /// Ring buffer of (`lookup_key`, `evicted_tag`) pairs from recent conflict
-    /// misses.  Filled on the first `CONFLICT_LOG_SIZE` conflicts and never
-    /// overwritten, so a single glance reveals the chronic offenders.
-    conflict_log: [(u64, u64); Self::CONFLICT_LOG_SIZE],
+    /// misses.
+    conflict_log: [(u64, u64); 8],
     conflict_log_len: usize,
 }
 
-impl UopCache {
+impl BbCache {
     const CONFLICT_LOG_SIZE: usize = 8;
 
     /// Create a new cache.
     ///
-    /// `total_entries` is rounded up to a power of two.
-    /// In `Skew` mode, entries are split equally between two ways.
+    /// `total_uop_entries` is the total uop-equivalent capacity; it is divided
+    /// by `MAX_BLOCK_LEN` internally to get the number of block slots.
+    /// The result is rounded up to a power of two.
+    /// In `Skew` mode, block slots are split equally between two ways.
     #[must_use]
-    pub fn new(total_entries: usize, mode: CacheMode) -> Self {
+    pub fn new(total_uop_entries: usize, mode: CacheMode) -> Self {
+        let block_slots = (total_uop_entries / MAX_BLOCK_LEN).max(1);
         let sets = match mode {
-            CacheMode::Direct => total_entries.next_power_of_two(),
-            CacheMode::Skew => (total_entries / 2).max(1).next_power_of_two(),
+            CacheMode::Direct => block_slots.next_power_of_two(),
+            CacheMode::Skew => (block_slots / 2).max(1).next_power_of_two(),
         };
         let n = match mode {
             CacheMode::Direct => sets,
@@ -63,16 +96,19 @@ impl UopCache {
         };
         Self {
             tags: vec![INVALID_TAG; n],
-            data: vec![Uop::default(); n],
+            data: vec![BasicBlock::default(); n],
             sets,
             mask: sets - 1,
             mode,
             replace_ctr: 0,
             capacity: n,
             occupied: 0,
-            hits: 0,
+            block_hits: 0,
+            insn_hits: 0,
             cold_misses: 0,
             conflict_misses: 0,
+            truncated_executions: 0,
+            untaken_branches: 0,
             flush_full: 0,
             flush_asid: 0,
             flush_vpage: 0,
@@ -95,26 +131,25 @@ impl UopCache {
         // page offset but different pages) necessarily have *different*
         // bits [23:12], so they are guaranteed to land on different way-1
         // slots — providing true skew for exactly the dominant conflict
-        // pattern.  The previous >> 16 fold was useless for OpenSBI and
-        // compact kernel code because bits [31:16] are constant across the
-        // entire text range (0x8000 / 0xFFFF respectively), making index1
-        // just index0 XOR a constant.
+        // pattern.
         let k = key as usize;
         (k ^ (k >> 12)) & self.mask | self.sets
     }
 
+    /// Look up `key` and return its slot index on a hit, or `None` on a miss.
+    /// Miss stats (`cold_misses` / `conflict_misses`) are updated on a miss.
+    /// The caller is responsible for updating `block_hits` / `insn_hits` on a
+    /// hit.
     #[inline]
-    pub fn get(&mut self, key: u64) -> Option<&Uop> {
+    pub fn probe(&mut self, key: u64) -> Option<usize> {
         let i0 = self.index0(key);
         if self.tags[i0] == key {
-            self.hits += 1;
-            return Some(&self.data[i0]);
+            return Some(i0);
         }
         if self.mode == CacheMode::Skew {
             let i1 = self.index1(key);
             if self.tags[i1] == key {
-                self.hits += 1;
-                return Some(&self.data[i1]);
+                return Some(i1);
             }
             // Cold if both candidate slots are empty; conflict otherwise.
             if self.tags[i0] == INVALID_TAG && self.tags[i1] == INVALID_TAG {
@@ -131,6 +166,12 @@ impl UopCache {
         }
         None
     }
+
+    /// Return a shared reference to the block at `slot` (as returned by
+    /// `probe`).
+    #[inline]
+    #[must_use]
+    pub fn block_at(&self, slot: usize) -> &BasicBlock { &self.data[slot] }
 
     /// Record a conflict miss in the log (first `CONFLICT_LOG_SIZE` only).
     fn log_conflict(&mut self, key: u64, tag0: u64, tag1: u64) {
@@ -172,7 +213,7 @@ impl UopCache {
     }
 
     #[inline]
-    pub fn insert(&mut self, key: u64, uop: Uop) {
+    pub fn insert(&mut self, key: u64, block: &BasicBlock) {
         match self.mode {
             CacheMode::Direct => {
                 let i = self.index0(key);
@@ -180,7 +221,7 @@ impl UopCache {
                     self.occupied += 1;
                 }
                 self.tags[i] = key;
-                self.data[i] = uop;
+                self.data[i] = block.clone();
             }
             CacheMode::Skew => {
                 let i0 = self.index0(key);
@@ -199,7 +240,7 @@ impl UopCache {
                     self.occupied += 1;
                 }
                 self.tags[i] = key;
-                self.data[i] = uop;
+                self.data[i] = block.clone();
             }
         }
     }
@@ -260,7 +301,10 @@ impl UopCache {
     #[must_use]
     pub const fn stats(&self) -> UopCacheStats {
         UopCacheStats {
-            hits: self.hits,
+            hits: self.insn_hits,
+            block_hits: self.block_hits,
+            truncated_executions: self.truncated_executions,
+            untaken_branches: self.untaken_branches,
             cold_misses: self.cold_misses,
             conflict_misses: self.conflict_misses,
             flush_full: self.flush_full,
@@ -277,7 +321,11 @@ const INVALID_TAG: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Default)]
 pub struct UopCacheStats {
+    /// Total instructions executed from cached blocks (= `insn_hits`).
     pub hits: u64,
+    pub block_hits: u64,
+    pub truncated_executions: u64,
+    pub untaken_branches: u64,
     pub cold_misses: u64,
     pub conflict_misses: u64,
     pub flush_full: u64,
@@ -287,3 +335,5 @@ pub struct UopCacheStats {
     pub occupied: usize,
     pub capacity: usize,
 }
+// [Uop; 16]=192 + len(1) + truncated(1) + pad(2) = 196
+const _: () = assert!(std::mem::size_of::<BasicBlock>() == 196);

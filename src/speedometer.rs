@@ -81,10 +81,25 @@ impl Speedometer {
                      vpage {flush_vpage:4.0}/Mi  vp+asid {flush_vpage_asid:4.0}/Mi"
                 ));
 
+                let block_hits = d(cache.block_hits, self.prev_cache.block_hits);
+                let truncated = d(
+                    cache.truncated_executions,
+                    self.prev_cache.truncated_executions,
+                );
+                let untaken_br = d(cache.untaken_branches, self.prev_cache.untaken_branches);
+                let delta_blocks = cache.block_hits - self.prev_cache.block_hits;
+                let delta_insns = cache.hits - self.prev_cache.hits;
+                let avg_len = if delta_blocks > 0 {
+                    delta_insns as f64 / delta_blocks as f64
+                } else {
+                    0.0
+                };
                 let cold = d(cache.cold_misses, self.prev_cache.cold_misses);
                 let conflict = d(cache.conflict_misses, self.prev_cache.conflict_misses);
                 lines.push(format!(
-                    "uop$ occ {}/{} cold {cold:6.0}/Mi  conflict {conflict:6.0}/Mi",
+                    "uop$ occ {}/{} blocks {block_hits:6.0}/Mi  avg_len {avg_len:.1}  \
+                     truncated {truncated:6.0}/Mi  untaken_br {untaken_br:6.0}/Mi  \
+                     cold {cold:6.0}/Mi  conflict {conflict:6.0}/Mi",
                     cache.occupied, cache.capacity,
                 ));
                 let f_full = d(cache.flush_full, self.prev_cache.flush_full);

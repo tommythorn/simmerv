@@ -40,7 +40,7 @@ fn decode_ci(_a: u64, insn: u32, op: Op) -> Uop {
     // CI-format compressed instructions (e.g. C.ADDI)
     let r = (insn >> 7) & 31; // [11:7]
     let raw_imm = (((insn >> 7) & 0x20) | ((insn >> 2) & 31)) as i32; // 6-bit imm
-    let imm = i64::from((raw_imm << 26) >> 26) as u64; // sign-extend 6-bit to 64-bit
+    let imm = (raw_imm << 26) >> 26; // sign-extend 6-bit to 32-bit
 
     Uop {
         op,
@@ -51,7 +51,7 @@ fn decode_ci(_a: u64, insn: u32, op: Op) -> Uop {
     }
 }
 
-fn decode_cb(a: u64, insn: u32, op: Op) -> Uop {
+fn decode_cb(_a: u64, insn: u32, op: Op) -> Uop {
     // CB-format compressed instructions, C.BEQZ and C.BNEZ
     let r = (insn >> 7) & 7;
     let offset = (u32::from((insn & 0x1000) != 0) * 0xffff_fe00)
@@ -66,12 +66,10 @@ fn decode_cb(a: u64, insn: u32, op: Op) -> Uop {
     let insn32 = (imm2 << 25) | ((r + 8) << 15) | (imm1 << 7) | 0x63;
 
     let iword = insn32 as i32;
-    let imm = a.wrapping_add(
-        (iword >> 31 << 12
-            | ((iword << 4) & 0x800)
-            | ((iword >> 20) & 0x7e0)
-            | ((iword >> 7) & 0x1e)) as u64,
-    );
+    let imm = iword >> 31 << 12
+        | ((iword << 4) & 0x800)
+        | ((iword >> 20) & 0x7e0)
+        | ((iword >> 7) & 0x1e);
 
     Uop {
         op,
@@ -89,7 +87,7 @@ fn decode_ci_shift(_a: u64, insn: u32, op: Op) -> Uop {
         op,
         rd: xd(rd_rs1),
         rs1: x(rd_rs1),
-        imm: imm as u64,
+        imm: imm as i32,
         ..Uop::default()
     }
 }
@@ -136,7 +134,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CAddi4spn,
             rd: xd(rd),
             rs1: x(2), // base is sp
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -150,7 +148,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CFld,
             rd: f(rd),
             rs1: x(rs1),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -162,7 +160,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CFldsp,
             rd: f(rd),
             rs1: x(2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -175,7 +173,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CLw,
             rd,
             rs1,
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -188,7 +186,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CLd,
             rd,
             rs1,
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -201,7 +199,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CFsd,
             rs1: x(rs1),
             rs2: f(rs2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -214,7 +212,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CSw,
             rs1: x(rs1),
             rs2: x(rs2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -227,7 +225,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CSd,
             rs1: x(rs1),
             rs2: x(rs2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -244,7 +242,7 @@ impl RiscvDecoder for Decoder {
     fn c_li(_a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         let rd = (insn >> 7) & 31;
         let imm = ((insn >> 2) & 31) | (((insn >> 12) & 1) << 5);
-        let imm = sign_extend(imm, 6) as u64;
+        let imm = sign_extend(imm, 6);
         Uop {
             op: Op::CLi,
             rd: xd(rd),
@@ -267,7 +265,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CAddi16sp,
             rd: xd(2), // sp is x2
             rs1: x(2),
-            imm: imm as u64,
+            imm,
             ..Uop::default()
         }
     }
@@ -283,7 +281,7 @@ impl RiscvDecoder for Decoder {
         Uop {
             op: Op::CLui,
             rd: xd(rd),
-            imm: imm as u64,
+            imm,
             ..Uop::default()
         }
     }
@@ -301,7 +299,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CAndi,
             rd: xd(r + 8),
             rs1: x(r + 8),
-            imm: sign_extend(imm, 6) as u64,
+            imm: sign_extend(imm, 6),
             ..Uop::default()
         }
     }
@@ -312,7 +310,7 @@ impl RiscvDecoder for Decoder {
     fn c_subw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_ca(a, insn, Op::CSubw) }
     fn c_addw(a: u64, insn: u32, _c: &mut Self::Context) -> Uop { decode_ca(a, insn, Op::CAddw) }
 
-    fn c_j(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+    fn c_j(_a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         let imm = (((insn >> 2) & 1) << 5)
             | (((insn >> 3) & 7) << 1)
             | (((insn >> 6) & 1) << 7)
@@ -324,7 +322,7 @@ impl RiscvDecoder for Decoder {
         let imm = sign_extend(imm, 12);
         Uop {
             op: Op::CJ,
-            imm: a.wrapping_add(imm as u64),
+            imm,
             ..Uop::default()
         }
     }
@@ -340,7 +338,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CSlli,
             rd: xd(rd),
             rs1: x(rd),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -357,7 +355,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CLwsp,
             rd: xd(rd),
             rs1: x(2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -376,7 +374,7 @@ impl RiscvDecoder for Decoder {
             rd: xd(rd),
             rs1: x(2),
             rs2: x(0),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -451,7 +449,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CFsdsp,
             rs1: x(2),
             rs2: f(rs2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -463,7 +461,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CSwsp,
             rs1: x(2),
             rs2: x(rs2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -475,7 +473,7 @@ impl RiscvDecoder for Decoder {
             op: Op::CSdsp,
             rs1: x(2),
             rs2: x(rs2),
-            imm: imm as u64,
+            imm: imm as i32,
             ..Uop::default()
         }
     }
@@ -900,16 +898,16 @@ fn decode_u(_addr: u64, word: u32, op: Op) -> Uop {
     Uop {
         op,
         rd: xd((word >> 7) & 31), // [11:7]
-        imm: (word & 0xfffff000) as i32 as u64,
+        imm: (word & 0xfffff000) as i32,
         ..Uop::default()
     }
 }
 
-fn decode_auipc(addr: u64, word: u32, op: Op) -> Uop {
+fn decode_auipc(_addr: u64, word: u32, op: Op) -> Uop {
     Uop {
         op,
         rd: xd((word >> 7) & 31), // [11:7]
-        imm: addr.wrapping_add((word & 0xfffff000) as i32 as u64),
+        imm: (word & 0xfffff000) as i32,
         ..Uop::default()
     }
 }
@@ -928,17 +926,15 @@ fn decode_exceptional(_addr: u64, _word: u32, op: Op) -> Uop {
     }
 }
 
-fn decode_j(addr: u64, word: u32, op: Op) -> Uop {
+fn decode_j(_addr: u64, word: u32, op: Op) -> Uop {
     let iword = word as i32;
     Uop {
         op,
         rd: xd((word >> 7) & 31), // [11:7]
-        imm: addr.wrapping_add(
-            (iword >> 31 << 20 | // imm[31:20] = [31]
+        imm: (iword >> 31 << 20 | // imm[31:20] = [31]
              (iword & 0x000f_f000) | // imm[19:12] = [19:12]
              ((iword & 0x0010_0000) >> 9) | // imm[11] = [20]
-             ((iword & 0x7fe0_0000) >> 20)) as u64,
-        ), // imm[10:1] = [30:21]
+             ((iword & 0x7fe0_0000) >> 20)), // imm[10:1] = [30:21]
         ..Uop::default()
     }
 }
@@ -950,18 +946,16 @@ fn decode_empty(_addr: u64, _word: u32, op: Op) -> Uop {
     }
 }
 
-fn decode_b(addr: u64, word: u32, op: Op) -> Uop {
+fn decode_b(_addr: u64, word: u32, op: Op) -> Uop {
     let iword = word as i32;
     Uop {
         op,
         rs1: x((word >> 15) & 31), // [19:15]
         rs2: x((word >> 20) & 31), // [24:20]
-        imm: addr.wrapping_add(
-            (iword >> 31 << 12 | // imm[31:12] = [31]
+        imm: (iword >> 31 << 12 | // imm[31:12] = [31]
             ((iword << 4) & 0x0000_0800) | // imm[11] = [7]
             ((iword >> 20) & 0x0000_07e0) | // imm[10:5] = [30:25]
-            ((iword >> 7) & 0x0000_001e)) as u64,
-        ), // imm[4:1] = [11:8]
+            ((iword >> 7) & 0x0000_001e)), // imm[4:1] = [11:8]
         ..Uop::default()
     }
 }
@@ -969,9 +963,9 @@ fn decode_b(addr: u64, word: u32, op: Op) -> Uop {
 fn decode_csr(_addr: u64, word: u32, op: Op) -> Uop {
     Uop {
         op,
-        rd: xd((word >> 7) & 31),             // [11:7]
-        rs1: x((word >> 15) & 31),            // [19:15], also uimm
-        imm: u64::from((word >> 20) & 0xfff), // [31:20]
+        rd: xd((word >> 7) & 31),           // [11:7]
+        rs1: x((word >> 15) & 31),          // [19:15], also uimm
+        imm: ((word >> 20) & 0xfff) as i32, // [31:20]
         ..Uop::default()
     }
 }
@@ -980,9 +974,9 @@ fn decode_csri(_addr: u64, word: u32, op: Op) -> Uop {
     // uimm is not a register read
     Uop {
         op,
-        rd: xd((word >> 7) & 31),             // [11:7]
-        rs1: x((word >> 15) & 31),            // [19:15], also uimm
-        imm: u64::from((word >> 20) & 0xfff), // [31:20]
+        rd: xd((word >> 7) & 31),           // [11:7]
+        rs1: x((word >> 15) & 31),          // [19:15], also uimm
+        imm: ((word >> 20) & 0xfff) as i32, // [31:20]
         ..Uop::default()
     }
 }
@@ -990,9 +984,9 @@ fn decode_csri(_addr: u64, word: u32, op: Op) -> Uop {
 fn decode_i(_addr: u64, word: u32, op: Op) -> Uop {
     Uop {
         op,
-        rd: xd((word >> 7) & 31),          // [11:7]
-        rs1: x((word >> 15) & 31),         // [19:15]
-        imm: ((word as i32) >> 20) as u64, // [31:20]
+        rd: xd((word >> 7) & 31),  // [11:7]
+        rs1: x((word >> 15) & 31), // [19:15]
+        imm: (word as i32) >> 20,  // [31:20]
         ..Uop::default()
     }
 }
@@ -1000,9 +994,9 @@ fn decode_i(_addr: u64, word: u32, op: Op) -> Uop {
 fn decode_i_fx(_addr: u64, word: u32, op: Op) -> Uop {
     Uop {
         op,
-        rd: f((word >> 7) & 31),           // [11:7]
-        rs1: x((word >> 15) & 31),         // [19:15]
-        imm: ((word as i32) >> 20) as u64, // [31:20]
+        rd: f((word >> 7) & 31),   // [11:7]
+        rs1: x((word >> 15) & 31), // [19:15]
+        imm: (word as i32) >> 20,  // [31:20]
         ..Uop::default()
     }
 }
@@ -1064,7 +1058,7 @@ fn decode_r_shift(_addr: u64, word: u32, op: Op) -> Uop {
         op,
         rd: xd((word >> 7) & 31),
         rs1: x((word >> 15) & 31),
-        imm: u64::from((word >> 20) & 0x3f),
+        imm: ((word >> 20) & 0x3f) as i32,
         ..Uop::default()
     }
 }
@@ -1086,7 +1080,7 @@ fn decode_s(_addr: u64, word: u32, op: Op) -> Uop {
         op,
         rs1: x((word >> 15) & 31),
         rs2: x((word >> 20) & 31),
-        imm: sign_extend((word >> 20) & 0xfe0 | (word >> 7) & 31, 12) as u64,
+        imm: sign_extend((word >> 20) & 0xfe0 | (word >> 7) & 31, 12),
         ..Uop::default()
     }
 }
@@ -1096,7 +1090,7 @@ fn decode_s_xf(_addr: u64, word: u32, op: Op) -> Uop {
         op,
         rs1: x((word >> 15) & 31),
         rs2: f((word >> 20) & 31),
-        imm: sign_extend((word >> 20) & 0xfe0 | (word >> 7) & 31, 12) as u64,
+        imm: sign_extend((word >> 20) & 0xfe0 | (word >> 7) & 31, 12),
         ..Uop::default()
     }
 }

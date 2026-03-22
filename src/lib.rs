@@ -27,8 +27,8 @@ use crate::mmu::Mmu;
 use crate::network_backend::DummyNetworkBackend;
 use crate::network_backend::NetworkBackend;
 use crate::serial_backend::SerialBackend;
+use crate::uop_cache::BbCache;
 use crate::uop_cache::CacheMode;
-use crate::uop_cache::UopCache;
 use anyhow::anyhow;
 use anyhow::bail;
 use fnv::FnvHashMap;
@@ -58,7 +58,7 @@ pub struct Emulator {
     /// Stores mapping from symbol to virtual address
     pub symbol_map: FnvHashMap<String, u64>,
 
-    uop_cache: UopCache,
+    bb_cache: BbCache,
 
     /// The address where data will be sent to terminal
     pub tohost_addr: u64,
@@ -126,7 +126,7 @@ impl Emulator {
 
             symbol_map: FnvHashMap::default(),
 
-            uop_cache: UopCache::new(cache_entries, cache_mode),
+            bb_cache: BbCache::new(cache_entries, cache_mode),
 
             // These can be updated in load_image()
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists
@@ -165,7 +165,7 @@ impl Emulator {
                 let fflags = self.cpu.fflags;
                 s.clear();
                 self.cpu.disassemble(&mut s);
-                let exceptional = self.tick(1);
+                let exceptional = self.tick_single();
                 print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
                 if let Ok(insn) = insn_word {
                     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -285,7 +285,7 @@ impl Emulator {
         let mut uart_backend = self.cpu.mmu.take_uart_backend();
         let mut net_backend = self.cpu.mmu.take_net_backend();
 
-        self.uop_cache.clear();
+        self.bb_cache.clear();
         self.cpu
             .read_state(&state, |name, _range| {
                 use crate::device::uart::Uart;
@@ -445,7 +445,19 @@ impl Emulator {
     pub fn tick(&mut self, n: usize) -> bool {
         // XXX We should be able to set this arbitrarily high, but we seem
         // to hit a race condition and a Linux hang beyond this value
-        self.cpu.run_soc(n, &mut self.uop_cache)
+        self.cpu.run_soc(n, &mut self.bb_cache)
+    }
+
+    /// Executes exactly one instruction without any block-cache interaction.
+    /// Used by the tracing path so that one disassembly line == one retired
+    /// instruction.
+    pub fn tick_single(&mut self) -> bool {
+        let insn_addr = self.cpu.pc;
+        if let Err(exc) = self.cpu.step_single() {
+            self.cpu.handle_exception(&exc, insn_addr);
+            return true;
+        }
+        false
     }
 
     /// Sets up program run by the program. This method analyzes the passed
