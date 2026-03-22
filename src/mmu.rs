@@ -71,8 +71,10 @@ pub struct Mmu {
     cycle: u64,
 
     /// Split TLBs for instruction fetch and data access.
-    pub itlb: Tlb,
-    pub dtlb: Tlb,
+    /// iTLB: 256 sets × 2 ways = 512 entries.
+    /// dTLB: 512 sets × 2 ways = 1024 entries.
+    pub itlb: Tlb<256>,
+    pub dtlb: Tlb<512>,
 
     /// TLB flush counters (shared — both TLBs are always flushed together).
     pub flush_full: u64,
@@ -132,8 +134,8 @@ impl Mmu {
             devices: Vec::new(),
             service_queue: BinaryHeap::new(),
             cycle: 0,
-            itlb: Tlb::new(),
-            dtlb: Tlb::new(),
+            itlb: Tlb::<256>::new(),
+            dtlb: Tlb::<512>::new(),
             flush_full: 0,
             flush_asid: 0,
             flush_vpage: 0,
@@ -754,12 +756,11 @@ impl Mmu {
             MemoryAccessType::Execute => 2,
         };
 
-        let tlb = match access_type {
-            MemoryAccessType::Execute => &self.itlb,
-            _ => &self.dtlb,
-        };
-
-        if let Some((ppage, perm)) = tlb.lookup(vpage, asid) {
+        if let Some((ppage, perm)) = if access_type == MemoryAccessType::Execute {
+            self.itlb.lookup(vpage, asid)
+        } else {
+            self.dtlb.lookup(vpage, asid)
+        } {
             let prv_is_user = effective_prv == PrivMode::U;
             let sum = self.mstatus & MSTATUS_SUM != 0;
             let mxr = self.mstatus & MSTATUS_MXR != 0;

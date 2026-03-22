@@ -1,7 +1,5 @@
 #![allow(clippy::inline_always)]
 
-const TLB_SETS: usize = 256;
-
 const PERM_R: u16 = 1 << 0;
 const PERM_U: u16 = 1 << 3;
 const PERM_G: u16 = 1 << 4;
@@ -13,37 +11,38 @@ const INVALID_VPAGE: u32 = u32::MAX;
 /// the right).
 const INVALID_PERM: u16 = PERM_G;
 
-struct TlbWay {
-    vpage: [u32; TLB_SETS],
-    ppage: [u32; TLB_SETS],
-    perm: [u16; TLB_SETS],
+struct TlbWay<const SETS: usize> {
+    vpage: [u32; SETS],
+    ppage: [u32; SETS],
+    perm: [u16; SETS],
 }
 
-impl TlbWay {
+impl<const SETS: usize> TlbWay<SETS> {
     const fn new() -> Self {
         Self {
-            vpage: [INVALID_VPAGE; TLB_SETS],
-            ppage: [0; TLB_SETS],
-            perm: [INVALID_PERM; TLB_SETS],
+            vpage: [INVALID_VPAGE; SETS],
+            ppage: [0; SETS],
+            perm: [INVALID_PERM; SETS],
         }
     }
 }
 
-pub struct Tlb {
-    ways: [TlbWay; 2],
+pub struct Tlb<const SETS: usize> {
+    ways: [TlbWay<SETS>; 2],
     replace_ctr: u8,
     pub misses: u64,
 }
 
+/// Hash a (vpage, asid) pair to a way slot index in `0..SETS`.
 #[inline(always)]
-fn index_way(way: usize, vpage: u32, asid: u16) -> usize {
+fn index_way<const SETS: usize>(way: usize, vpage: u32, asid: u16) -> usize {
     let a = u32::from(asid);
     let h = if way == 0 {
         vpage ^ a
     } else {
         vpage ^ (vpage >> 8) ^ (a << 4)
     };
-    h as usize & 0xFF
+    h as usize & (SETS - 1)
 }
 
 /// Pack permission bits for a TLB entry.
@@ -99,11 +98,11 @@ pub const fn check_perm(
     true
 }
 
-impl Default for Tlb {
+impl<const SETS: usize> Default for Tlb<SETS> {
     fn default() -> Self { Self::new() }
 }
 
-impl Tlb {
+impl<const SETS: usize> Tlb<SETS> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -118,7 +117,7 @@ impl Tlb {
     #[inline(always)]
     pub fn lookup(&self, vpage: u32, asid: u16) -> Option<(u32, u16)> {
         for (way_idx, way) in self.ways.iter().enumerate() {
-            let idx = index_way(way_idx, vpage, asid);
+            let idx = index_way::<SETS>(way_idx, vpage, asid);
             if way.vpage[idx] == vpage {
                 let p = way.perm[idx];
                 let entry_asid = p >> PERM_ASID_SHIFT;
@@ -133,8 +132,8 @@ impl Tlb {
     /// Insert an entry. `perm` should be produced by `pack_perm`.
     #[inline]
     pub fn insert(&mut self, vpage: u32, ppage: u32, perm: u16, asid: u16) {
-        let idx0 = index_way(0, vpage, asid);
-        let idx1 = index_way(1, vpage, asid);
+        let idx0 = index_way::<SETS>(0, vpage, asid);
+        let idx1 = index_way::<SETS>(1, vpage, asid);
         let way_idx = if self.ways[0].vpage[idx0] == INVALID_VPAGE {
             0
         } else if self.ways[1].vpage[idx1] == INVALID_VPAGE {
@@ -153,8 +152,8 @@ impl Tlb {
     /// Flush all entries.
     pub fn flush_all(&mut self) {
         for way in &mut self.ways {
-            way.vpage = [INVALID_VPAGE; TLB_SETS];
-            way.perm = [INVALID_PERM; TLB_SETS];
+            way.vpage = [INVALID_VPAGE; SETS];
+            way.perm = [INVALID_PERM; SETS];
         }
     }
 
@@ -167,7 +166,7 @@ impl Tlb {
     pub fn flush_asid(&mut self, asid: u16) {
         let target = asid << PERM_ASID_SHIFT;
         for way in &mut self.ways {
-            for i in 0..TLB_SETS {
+            for i in 0..SETS {
                 if way.perm[i] & !0xF == target {
                     way.vpage[i] = INVALID_VPAGE;
                     way.perm[i] = INVALID_PERM;
@@ -179,7 +178,7 @@ impl Tlb {
     /// Flush entries matching the given virtual page (all ASIDs).
     pub fn flush_vpage(&mut self, vpage: u32) {
         for way in &mut self.ways {
-            for i in 0..TLB_SETS {
+            for i in 0..SETS {
                 if way.vpage[i] == vpage {
                     way.vpage[i] = INVALID_VPAGE;
                     way.perm[i] = INVALID_PERM;
@@ -191,7 +190,7 @@ impl Tlb {
     /// Flush entries matching both the given virtual page and ASID.
     pub fn flush_vpage_asid(&mut self, vpage: u32, asid: u16) {
         for (way_idx, way) in self.ways.iter_mut().enumerate() {
-            let idx = index_way(way_idx, vpage, asid);
+            let idx = index_way::<SETS>(way_idx, vpage, asid);
             if way.vpage[idx] == vpage {
                 let p = way.perm[idx];
                 if p & PERM_G == 0 && (p >> PERM_ASID_SHIFT) == asid {
