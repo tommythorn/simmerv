@@ -547,7 +547,7 @@ impl Cpu {
             }
 
             // Fetch instruction (4 bytes; actual size determined after decode).
-            let insn_result = self.memop(Execute, fetch_pc, 0, 0, 4);
+            let insn_result = self.memop_code(fetch_pc);
             let insn = match insn_result {
                 Ok(v) => v as u32,
                 Err(e) => {
@@ -660,7 +660,7 @@ impl Cpu {
         }
 
         let insn_addr = self.pc;
-        let insn = self.memop(Execute, insn_addr, 0, 0, 4)? as u32;
+        let insn = self.memop_code(insn_addr)? as u32;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
         let uop = decode(insn_addr, insn);
         if matches!(uop.op, Op::CUnimp | Op::Unimp) {
@@ -1424,8 +1424,50 @@ impl Cpu {
         }
     }
 
+    /// Fetch a 4-byte instruction word from `va`.
     #[allow(clippy::inline_always)]
     #[inline(always)]
+    fn memop_code(&mut self, va: u64) -> Result<u64, Exception> {
+        // A 4-byte instruction can straddle a page boundary only if the low
+        // 12 bits are 0xFFE or 0xFFF.  Handle that (rare) case via the slow path.
+        if va & 0xfff > 0x1000 - 4 {
+            return self.memop_slow(Execute, va, 0, 4, false);
+        }
+
+        let pa = self.mmu.translate_code_address(va)?;
+
+        let Ok(slice) = self.mmu.dma_slice(pa, 4) else {
+            return self.mmu.load_mmio(pa, 4).map_err(|()| Exception {
+                trap: Trap::InstructionAccessFault,
+                tval: va,
+            });
+        };
+
+        Ok(u64::from(u32::from_le_bytes([
+            slice[0], slice[1], slice[2], slice[3],
+        ])))
+    }
+
+    /// Fetch a 4-byte instruction word for disassembly (side-effect-free).
+    /// # Errors
+    /// Usual memory exceptions
+    pub fn memop_disass(&mut self, baseva: u64) -> Result<u64, Exception> {
+        if baseva & 0xfff > 0x1000 - 4 {
+            return self.memop_slow(Execute, baseva, 0, 4, true);
+        }
+        let pa = self.mmu.translate_code_address(baseva)?;
+        let Ok(slice) = self.mmu.dma_slice(pa, 4) else {
+            return Ok(0);
+        };
+        Ok(u64::from(u32::from_le_bytes([
+            slice[0], slice[1], slice[2], slice[3],
+        ])))
+    }
+
+    /// Data load/store.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn memop(
         &mut self,
         access: MemoryAccessType,
@@ -1438,50 +1480,15 @@ impl Cpu {
             self.reservation = None;
         }
 
-        self.memop_general(access, baseva, offset, v, size, false)
-    }
-
-    /// # Errors
-    /// Usual memory exceptions
-    pub fn memop_disass(&mut self, baseva: u64) -> Result<u64, Exception> {
-        self.memop_general(Execute, baseva, 0, 0, 4, true)
-    }
-
-    // Memory access
-    // - does virtual -> physical address translation
-    // - directly handles exception
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn memop_general(
-        &mut self,
-        access: MemoryAccessType,
-        baseva: u64,
-        offset: u64,
-        v: u64,
-        size: u64,
-        side_effect_free: bool,
-    ) -> Result<u64, Exception> {
         let va = baseva.wrapping_add(offset);
 
         if va & 0xfff > 0x1000 - size {
-            // Slow path. All bytes aren't in the same page so not contigious
-            // in memory
-            return self.memop_slow(access, va, v, size, side_effect_free);
+            return self.memop_slow(access, va, v, size, false);
         }
 
-        let pa = if access == Execute {
-            self.mmu.translate_code_address(va)?
-        } else {
-            self.mmu
-                .translate_data_address(va, access, side_effect_free)?
-        };
+        let pa = self.mmu.translate_data_address(va, access, false)?;
 
         let Ok(slice) = self.mmu.dma_slice(pa, size as usize) else {
-            // Not RAM — use word-sized MMIO access (not byte-by-byte).
-            if side_effect_free {
-                return Ok(0);
-            }
             return match access {
                 Write => self
                     .mmu
@@ -1492,11 +1499,7 @@ impl Cpu {
                         tval: va,
                     }),
                 Read | Execute => self.mmu.load_mmio(pa, size).map_err(|()| Exception {
-                    trap: if access == Execute {
-                        Trap::InstructionAccessFault
-                    } else {
-                        Trap::LoadAccessFault
-                    },
+                    trap: Trap::LoadAccessFault,
                     tval: va,
                 }),
             };
