@@ -741,31 +741,105 @@ impl Mmu {
         access_type: MemoryAccessType,
         side_effect_free: bool,
     ) -> Result<u64, Exception> {
-        let effective_prv =
-            if self.mstatus & MSTATUS_MPRV != 0 && access_type != MemoryAccessType::Execute {
-                priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
-            } else {
-                self.prv
-            };
+        if access_type == MemoryAccessType::Execute {
+            self.translate_code_address(address)
+        } else {
+            self.translate_data_address(address, access_type, side_effect_free)
+        }
+    }
 
-        let satp_mode = ((self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK) as usize;
-        if effective_prv == PrivMode::M || satp_mode == SatpMode::Bare as usize {
+    /// Translate a fetch (Execute) address. No MPRV, uses iTLB.
+    ///
+    /// # Errors
+    /// Returns an `Exception` if the address translation fails.
+    #[allow(
+        clippy::inline_always,
+        clippy::cast_possible_truncation,
+        clippy::missing_panics_doc
+    )]
+    #[inline(always)]
+    pub fn translate_code_address(&mut self, address: u64) -> Result<u64, Exception> {
+        if self.prv == PrivMode::M
+            || (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64
+        {
             return Ok(address);
         }
 
         let vpage = (address >> PG_SHIFT) as u32;
         let asid = self.current_asid();
-        let access_shift = match access_type {
-            MemoryAccessType::Read => 0,
-            MemoryAccessType::Write => 1,
-            MemoryAccessType::Execute => 2,
+
+        if let Some((ppage, perm)) = self.itlb.lookup(vpage, asid) {
+            let prv_is_user = self.prv == PrivMode::U;
+            let sum = self.mstatus & MSTATUS_SUM != 0;
+            let mxr = self.mstatus & MSTATUS_MXR != 0;
+            if check_perm(perm, 2, prv_is_user, sum, mxr) {
+                let tlb_pa = (u64::from(ppage) << PG_SHIFT) | (address & 0xfff);
+                if cfg!(feature = "paranoid-tlb") {
+                    let slow =
+                        self.translate_address_slow(address, MemoryAccessType::Execute, true);
+                    match slow {
+                        Ok((expected_pa, _)) => assert_eq!(
+                            tlb_pa, expected_pa,
+                            "iTLB hit pa {tlb_pa:#x} != walk pa {expected_pa:#x} \
+                             for va {address:#x} asid {asid}"
+                        ),
+                        Err(e) => panic!(
+                            "iTLB hit pa {tlb_pa:#x} but walk faulted {:?} \
+                             for va {address:#x} asid {asid} perm {perm:#06x}",
+                            e.trap
+                        ),
+                    }
+                }
+                return Ok(tlb_pa);
+            }
+        }
+
+        self.itlb.misses += 1;
+        let (pa, pte) = self.translate_address_slow(address, MemoryAccessType::Execute, false)?;
+        if pte != 0 {
+            let ppage = (pa >> PG_SHIFT) as u32;
+            let xwr = ((pte >> 1) & 7) as u8;
+            let user = pte & PTE_U_MASK != 0;
+            let global = pte & (1 << 5) != 0;
+            let perm = pack_perm(xwr, user, global, asid);
+            self.itlb.insert(vpage, ppage, perm, asid);
+        }
+        Ok(pa)
+    }
+
+    /// Translate a load or store address. Handles MPRV, uses dTLB.
+    ///
+    /// # Errors
+    /// Returns an `Exception` if the address translation fails.
+    #[allow(
+        clippy::inline_always,
+        clippy::cast_possible_truncation,
+        clippy::missing_panics_doc
+    )]
+    #[inline(always)]
+    pub fn translate_data_address(
+        &mut self,
+        address: u64,
+        access_type: MemoryAccessType,
+        side_effect_free: bool,
+    ) -> Result<u64, Exception> {
+        let effective_prv = if self.mstatus & MSTATUS_MPRV != 0 {
+            priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
+        } else {
+            self.prv
         };
 
-        if let Some((ppage, perm)) = if access_type == MemoryAccessType::Execute {
-            self.itlb.lookup(vpage, asid)
-        } else {
-            self.dtlb.lookup(vpage, asid)
-        } {
+        if effective_prv == PrivMode::M
+            || (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64
+        {
+            return Ok(address);
+        }
+
+        let vpage = (address >> PG_SHIFT) as u32;
+        let asid = self.current_asid();
+        let access_shift = u32::from(access_type == MemoryAccessType::Write);
+
+        if let Some((ppage, perm)) = self.dtlb.lookup(vpage, asid) {
             let prv_is_user = effective_prv == PrivMode::U;
             let sum = self.mstatus & MSTATUS_SUM != 0;
             let mxr = self.mstatus & MSTATUS_MXR != 0;
@@ -776,12 +850,12 @@ impl Mmu {
                     match slow {
                         Ok((expected_pa, _)) => assert_eq!(
                             tlb_pa, expected_pa,
-                            "TLB hit pa {tlb_pa:#x} != walk pa {expected_pa:#x} \
+                            "dTLB hit pa {tlb_pa:#x} != walk pa {expected_pa:#x} \
                              for va {address:#x} access {access_type:?} \
                              prv {effective_prv:?} asid {asid}"
                         ),
                         Err(e) => panic!(
-                            "TLB hit pa {tlb_pa:#x} but walk faulted {:?} \
+                            "dTLB hit pa {tlb_pa:#x} but walk faulted {:?} \
                              for va {address:#x} access {access_type:?} \
                              prv {effective_prv:?} asid {asid} perm {perm:#06x}",
                             e.trap
@@ -790,17 +864,10 @@ impl Mmu {
                 }
                 return Ok(tlb_pa);
             }
-            // Permission mismatch — fall through to slow path which generates
-            // the proper exception.
         }
 
-        match access_type {
-            MemoryAccessType::Execute => self.itlb.misses += 1,
-            _ => self.dtlb.misses += 1,
-        }
-
+        self.dtlb.misses += 1;
         let (pa, pte) = self.translate_address_slow(address, access_type, side_effect_free)?;
-
         if !side_effect_free && pte != 0 {
             let ppage = (pa >> PG_SHIFT) as u32;
             let mut xwr = ((pte >> 1) & 7) as u8;
@@ -810,14 +877,10 @@ impl Mmu {
                 xwr &= !2; // clear W
             }
             let user = pte & PTE_U_MASK != 0;
-            let global = pte & (1 << 5) != 0; // PTE G bit
+            let global = pte & (1 << 5) != 0;
             let perm = pack_perm(xwr, user, global, asid);
-            match access_type {
-                MemoryAccessType::Execute => self.itlb.insert(vpage, ppage, perm, asid),
-                _ => self.dtlb.insert(vpage, ppage, perm, asid),
-            }
+            self.dtlb.insert(vpage, ppage, perm, asid);
         }
-
         Ok(pa)
     }
 

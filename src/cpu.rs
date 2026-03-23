@@ -1470,7 +1470,12 @@ impl Cpu {
             return self.memop_slow(access, va, v, size, side_effect_free);
         }
 
-        let pa = self.mmu.translate_address(va, access, side_effect_free)?;
+        let pa = if access == Execute {
+            self.mmu.translate_code_address(va)?
+        } else {
+            self.mmu
+                .translate_data_address(va, access, side_effect_free)?
+        };
 
         let Ok(slice) = self.mmu.dma_slice(pa, size as usize) else {
             // Not RAM — use word-sized MMIO access (not byte-by-byte).
