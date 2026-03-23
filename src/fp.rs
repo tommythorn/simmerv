@@ -91,8 +91,8 @@ pub trait Sf {
 
     #[must_use]
     fn pack(sign: u64, exp: u64, mant: u64) -> u64 {
-        assert_eq!(sign & !1, 0);
-        assert_eq!(exp & !Self::EXP_MASK, 0);
+        debug_assert_eq!(sign & !1, 0);
+        debug_assert_eq!(exp & !Self::EXP_MASK, 0);
         Self::nanbox(sign << (Self::N - 1) | exp << Self::MANT_SIZE | mant & Self::MANT_MASK)
     }
 
@@ -280,7 +280,7 @@ pub trait Sf {
         // a_mant is considered to have at most F_SIZE - 1 bits
         let shift = a_mant.leading_zeros() as isize - (64 - 1 - Self::IMANT_SIZE) as isize;
 
-        assert!(shift >= 0);
+        debug_assert!(shift >= 0);
         let a_exp = a_exp - (shift as i64);
         a_mant <<= shift;
         Self::round_pack(a_sign, a_exp, a_mant, rm)
@@ -368,7 +368,7 @@ pub trait Sf {
 
     #[must_use]
     fn normalize_subnormal(mant: u64) -> (i64, u64) {
-        assert_eq!(mant & !Self::MANT_MASK, 0);
+        debug_assert_eq!(mant & !Self::MANT_MASK, 0);
         let shift = Self::MANT_SIZE - (63 - mant.leading_zeros() as usize);
         log::info!(
             "Normalize {} 0x{mant:x} -> shift {shift} -> new mantissa {:x}",

@@ -73,8 +73,8 @@ pub struct Mmu {
     /// Split TLBs for instruction fetch and data access.
     /// iTLB: 256 sets × 2 ways = 512 entries.
     /// dTLB: 512 sets × 2 ways = 1024 entries.
-    pub itlb: Tlb<256>,
-    pub dtlb: Tlb<512>,
+    pub itlb: Tlb<512>,
+    pub dtlb: Tlb<1024>,
 
     /// TLB flush counters (shared — both TLBs are always flushed together).
     pub flush_full: u64,
@@ -134,8 +134,8 @@ impl Mmu {
             devices: Vec::new(),
             service_queue: BinaryHeap::new(),
             cycle: 0,
-            itlb: Tlb::<256>::new(),
-            dtlb: Tlb::<512>::new(),
+            itlb: Tlb::<512>::new(),
+            dtlb: Tlb::<1024>::new(),
             flush_full: 0,
             flush_asid: 0,
             flush_vpage: 0,
@@ -189,7 +189,7 @@ impl Mmu {
     }
 
     /// Flush both I-TLB and D-TLB.
-    pub fn flush_tlb(&mut self) {
+    pub const fn flush_tlb(&mut self) {
         self.flush_full += 1;
         self.itlb.flush_all();
         self.dtlb.flush_all();
@@ -203,14 +203,14 @@ impl Mmu {
     }
 
     /// Flush TLB entries matching the given virtual page (all ASIDs).
-    pub fn flush_tlb_vpage(&mut self, vpage: u32) {
+    pub const fn flush_tlb_vpage(&mut self, vpage: u32) {
         self.flush_vpage += 1;
         self.itlb.flush_vpage(vpage);
         self.dtlb.flush_vpage(vpage);
     }
 
     /// Flush TLB entries matching both vpage and ASID.
-    pub fn flush_tlb_vpage_asid(&mut self, vpage: u32, asid: u16) {
+    pub const fn flush_tlb_vpage_asid(&mut self, vpage: u32, asid: u16) {
         self.flush_vpage_asid += 1;
         self.itlb.flush_vpage_asid(vpage, asid);
         self.dtlb.flush_vpage_asid(vpage, asid);
@@ -244,7 +244,8 @@ impl Mmu {
     pub fn service(&mut self, cycle: u64) {
         self.cycle = cycle;
         self.clint.1.service(&mut self.mip);
-        let mut all_irqs: Vec<u32> = Vec::new();
+        let mut all_irqs = [0u32; 16];
+        let mut n_irqs: usize = 0;
 
         loop {
             match self.service_queue.peek() {
@@ -264,15 +265,18 @@ impl Mmu {
             // Split borrow: self.devices[idx].1 and self.memory are separate fields
             self.devices[idx].1.service(&mut ctx, &mut self.memory);
             self.mip = ctx.mip;
-            if let Some(irq) = ctx.asserted_irq {
-                all_irqs.push(irq);
+            if let Some(irq) = ctx.asserted_irq
+                && n_irqs < all_irqs.len()
+            {
+                all_irqs[n_irqs] = irq;
+                n_irqs += 1;
             }
             if let Some(n) = ctx.next_service_in {
                 self.service_queue.push(Reverse((cycle + n as u64, idx)));
             }
         }
 
-        self.plic.1.process_irqs(&all_irqs, &mut self.mip);
+        self.plic.1.process_irqs(&all_irqs[..n_irqs], &mut self.mip);
     }
 
     /// Updates privilege mode. With permission bits stored in TLB entries
@@ -723,7 +727,8 @@ impl Mmu {
     }
 
     /// Extract the current ASID from the SATP register.
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     const fn current_asid(&self) -> u16 { ((self.satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK) as u16 }
 
     /// # Errors

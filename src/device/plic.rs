@@ -25,6 +25,7 @@ pub struct Plic {
     pub threshold: u32,
     pub ips: [u8; 1024],
     pub priorities: [u32; 1024],
+    dirty: bool,
 }
 
 impl Default for Plic {
@@ -41,6 +42,7 @@ impl Plic {
             threshold: 0,
             priorities: [0; 1024],
             ips: [0; 1024],
+            dirty: false,
         }
     }
 
@@ -55,20 +57,24 @@ impl Plic {
     }
 
     fn update_irq(&mut self, mip: &mut u64) {
-        let mut best_irq = 0;
-        let mut best_priority = 0;
+        if self.dirty {
+            self.dirty = false;
+            let mut best_irq = 0;
+            let mut best_priority = 0;
 
-        for irq in 1..64 {
-            let ip = (self.ips[irq >> 3] >> (irq & 7)) & 1 == 1;
-            let enabled = (self.enabled >> irq) & 1 == 1;
-            let priority = self.priorities[irq];
-            if ip && enabled && priority > self.threshold && priority > best_priority {
-                best_irq = irq;
-                best_priority = priority;
+            for irq in 1..64 {
+                let ip = (self.ips[irq >> 3] >> (irq & 7)) & 1 == 1;
+                let enabled = (self.enabled >> irq) & 1 == 1;
+                let priority = self.priorities[irq];
+                if ip && enabled && priority > self.threshold && priority > best_priority {
+                    best_irq = irq;
+                    best_priority = priority;
+                }
             }
+
+            self.irq = best_irq as u32;
         }
 
-        self.irq = best_irq as u32;
         if self.irq != 0 {
             *mip |= MIP_MEIP | MIP_SEIP;
         } else {
@@ -79,11 +85,13 @@ impl Plic {
     const fn set_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] |= 1 << (irq & 7);
+        self.dirty = true;
     }
 
     const fn clear_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] &= !(1 << (irq & 7));
+        self.dirty = true;
     }
 }
 
@@ -120,9 +128,18 @@ impl MemoryMapped for Plic {
 
     fn write(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
         match offset {
-            0x000000..=0x000fff => write_u32(offset, size, &mut self.priorities[offset / 4], data),
-            0x002080..=0x002087 => write_u64(offset, size, &mut self.enabled, data),
-            0x201000..=0x201003 => write_u32(offset, size, &mut self.threshold, data),
+            0x000000..=0x000fff => {
+                write_u32(offset, size, &mut self.priorities[offset / 4], data);
+                self.dirty = true;
+            }
+            0x002080..=0x002087 => {
+                write_u64(offset, size, &mut self.enabled, data);
+                self.dirty = true;
+            }
+            0x201000..=0x201003 => {
+                write_u32(offset, size, &mut self.threshold, data);
+                self.dirty = true;
+            }
             0x201004..=0x201007 => {
                 let mut claimed_irq = 0;
                 write_u32(offset, size, &mut claimed_irq, data);
@@ -155,6 +172,7 @@ impl MemoryMapped for Plic {
         for p in &mut self.priorities {
             *p = r.u32()?;
         }
+        self.dirty = true;
         Ok(())
     }
 

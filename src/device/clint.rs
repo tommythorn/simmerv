@@ -12,14 +12,18 @@ use super::write_u64;
 use crate::cpu::MIP_MSIP;
 use crate::cpu::MIP_MTIP;
 use std::ops::Range;
-use wasm_timer::SystemTime;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use wasm_timer::SystemTime as Instant;
 
 /// Emulates CLINT known as Timer. Refer to the [specification](https://sifive.cdn.prismic.io/sifive%2Fc89f6e5a-cf9e-44c3-a3db-04420702dcc1_sifive+e31+manual+v19.08.pdf)
 /// for the detail.
 pub struct Clint {
     pub mtimecmp: u64,
     pub mtime_delta: u64,
-    t0: SystemTime,
+    t0: Instant,
 }
 
 impl Default for Clint {
@@ -33,7 +37,7 @@ impl Clint {
         Self {
             mtimecmp: 0,
             mtime_delta: 0,
-            t0: SystemTime::now(),
+            t0: Instant::now(),
         }
     }
 
@@ -42,7 +46,12 @@ impl Clint {
     ///
     /// # Arguments
     #[allow(clippy::cast_possible_truncation)]
+    #[cfg(target_arch = "wasm32")]
     fn now_micros(&self) -> u64 { self.t0.elapsed().map_or(0, |t| t.as_micros() as u64) }
+
+    #[allow(clippy::cast_possible_truncation)]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn now_micros(&self) -> u64 { self.t0.elapsed().as_micros() as u64 }
 
     /// `Clint` can raise interrupt. If it does it rises a certain bit
     /// depending on interrupt type of CPU `mip` register.

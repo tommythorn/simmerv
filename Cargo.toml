@@ -47,6 +47,9 @@ libc = "0.2"
 [build-dependencies]
 cc = "1"
 
+[profile.release]
+debug = true
+
 [dev-dependencies.cargo-husky]
 version = "1"
 default-features = false # Disable features which are enabled by default

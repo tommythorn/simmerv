@@ -223,6 +223,7 @@ pub struct Cpu {
 
     pub speedometer: Speedometer,
     pub speedometer_flag: Arc<AtomicBool>,
+    speedometer_next_cycle: u64,
 }
 
 pub const CONFIG_SW_MANAGED_A_AND_D: bool = true;
@@ -265,6 +266,7 @@ impl Cpu {
             icache_flush: IcacheFlushKind::None,
             speedometer: Speedometer::new(),
             speedometer_flag: Arc::new(AtomicBool::new(false)),
+            speedometer_next_cycle: 0,
         };
         cpu.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
         cpu.write_x(x(11), Mmu::DTB_BASE); // start of DTB
@@ -298,7 +300,7 @@ impl Cpu {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn write_x(&mut self, r: Reg, v: u64) {
-        assert_ne!(r.get(), 0);
+        debug_assert_ne!(r.get(), 0);
         self.rf[r] = v;
     }
 
@@ -349,12 +351,16 @@ impl Cpu {
     #[allow(clippy::cast_sign_loss)]
     pub fn run_soc(&mut self, cpu_steps: usize, bb: &mut BbCache) -> bool {
         if self.speedometer_flag.load(Ordering::Relaxed)
-            && self.speedometer.last_time.elapsed().as_secs() >= 1
+            && self.cycle >= self.speedometer_next_cycle
         {
             // XXX Using cycle as instret is misleading in the presence of wfi
-            let _ = self
-                .speedometer
-                .update(self.cycle, self.mmu.tlb_stats(), bb.stats());
+            if self.speedometer.last_time.elapsed().as_secs() >= 1 {
+                let _ = self
+                    .speedometer
+                    .update(self.cycle, self.mmu.tlb_stats(), bb.stats());
+            }
+            // Re-arm: check at most ~10M emulated cycles from now
+            self.speedometer_next_cycle = self.cycle.wrapping_add(10_000_000);
         }
 
         let mut steps_done: usize = 0;
@@ -405,7 +411,8 @@ impl Cpu {
         ) && imm == 0x180_i32 // CSR_SATP
     }
 
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     const fn is_branch(op: Op) -> bool {
         matches!(
             op,
@@ -488,7 +495,9 @@ impl Cpu {
                 match new_execute(self, &uop, &ops, cur_insn_addr) {
                     Ok((res, fflags)) => {
                         self.write_x(uop.rd, res);
-                        self.add_to_fflags(fflags);
+                        if fflags != 0 {
+                            self.add_to_fflags(fflags);
+                        }
                     }
                     Err(e) => {
                         exception = Some((e, cur_insn_addr));
@@ -600,7 +609,9 @@ impl Cpu {
             match new_execute(self, &uop, &ops, cur_insn_addr) {
                 Ok((res, fflags)) => {
                     self.write_x(uop.rd, res);
-                    self.add_to_fflags(fflags);
+                    if fflags != 0 {
+                        self.add_to_fflags(fflags);
+                    }
                 }
                 Err(e) => {
                     exception = Some((e, cur_insn_addr));
@@ -666,7 +677,9 @@ impl Cpu {
         };
         let (res, fflags) = new_execute(self, &uop, &ops, insn_addr)?;
         self.write_x(uop.rd, res);
-        self.add_to_fflags(fflags);
+        if fflags != 0 {
+            self.add_to_fflags(fflags);
+        }
         Ok(())
     }
 
@@ -1350,47 +1363,49 @@ impl Cpu {
     }
 
     fn read_frm(&self) -> RoundingMode {
-        assert_ne!(self.fs, 0);
+        debug_assert_ne!(self.fs, 0);
         self.frm
     }
 
     fn write_frm(&mut self, frm: RoundingMode) {
-        assert_ne!(self.fs, 0);
+        debug_assert_ne!(self.fs, 0);
         self.fs = 3;
         self.frm = frm;
     }
 
     fn read_fflags(&self) -> u8 {
-        assert_ne!(self.fs, 0);
+        debug_assert_ne!(self.fs, 0);
         self.fflags
     }
 
     fn write_fflags(&mut self, fflags: u8) {
-        assert_ne!(self.fs, 0);
-        assert_eq!(fflags & !31, 0);
+        debug_assert_ne!(self.fs, 0);
+        debug_assert_eq!(fflags & !31, 0);
         self.fs = 3;
         self.fflags = fflags;
     }
 
+    /// Accumulate non-zero fflags
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn add_to_fflags(&mut self, fflags: u8) {
-        if fflags != 0 {
-            assert_ne!(self.fs, 0);
-            assert_eq!(fflags & !31, 0);
-            self.fs = 3;
-            self.fflags |= fflags;
-        }
+        debug_assert_ne!(fflags, 0);
+        debug_assert_ne!(self.fs, 0);
+        debug_assert_eq!(fflags & !31, 0);
+        self.fs = 3;
+        self.fflags |= fflags;
     }
 
     #[allow(clippy::precedence)]
     fn read_fcsr(&self) -> u64 {
-        assert_ne!(self.fs, 0);
-        assert_eq!(self.fflags & !31, 0);
+        debug_assert_ne!(self.fs, 0);
+        debug_assert_eq!(self.fflags & !31, 0);
         u64::from(self.fflags) | (self.frm as u64) << 5
     }
 
     #[allow(clippy::cast_sign_loss)]
     fn write_fcsr(&mut self, v: u64) {
-        assert_ne!(self.fs, 0);
+        debug_assert_ne!(self.fs, 0);
         self.write_fflags((v & 31) as u8);
         // We must refuse to write illegal values FRM
         if let Some(frm) = FromPrimitive::from_u64((v >> 5) & 7) {
@@ -1409,6 +1424,8 @@ impl Cpu {
         }
     }
 
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn memop(
         &mut self,
         access: MemoryAccessType,
@@ -1433,6 +1450,8 @@ impl Cpu {
     // Memory access
     // - does virtual -> physical address translation
     // - directly handles exception
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn memop_general(
         &mut self,
@@ -1480,14 +1499,25 @@ impl Cpu {
 
         match access {
             Write => {
-                slice.copy_from_slice(&u64::to_le_bytes(v)[0..size as usize]);
+                match size {
+                    1 => slice[0] = v as u8,
+                    2 => slice.copy_from_slice(&(v as u16).to_le_bytes()),
+                    4 => slice.copy_from_slice(&(v as u32).to_le_bytes()),
+                    _ => slice.copy_from_slice(&v.to_le_bytes()),
+                }
                 Ok(0)
             }
             Read | Execute => {
                 // Unsigned, sign extension is the job of the consumer
-                let mut buf = [0; 8];
-                buf[0..size as usize].copy_from_slice(slice);
-                Ok(u64::from_le_bytes(buf))
+                Ok(match size {
+                    1 => u64::from(slice[0]),
+                    2 => u64::from(u16::from_le_bytes([slice[0], slice[1]])),
+                    4 => u64::from(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]])),
+                    _ => u64::from_le_bytes([
+                        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6],
+                        slice[7],
+                    ]),
+                })
             }
         }
     }
