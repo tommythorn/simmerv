@@ -11,6 +11,7 @@ use crate::device::plic::Plic;
 use crate::device::uart::Uart;
 use crate::riscv;
 use crate::serial_backend::SerialBackend;
+use crate::tlb::DTlb;
 use crate::tlb::Tlb;
 use crate::tlb::check_perm;
 use crate::tlb::pack_perm;
@@ -71,16 +72,39 @@ pub struct Mmu {
     cycle: u64,
 
     /// Split TLBs for instruction fetch and data access.
-    /// iTLB: 256 sets × 2 ways = 512 entries.
-    /// dTLB: 512 sets × 2 ways = 1024 entries.
+    /// iTLB: 512 entries (stores physical page numbers).
+    /// dTLB: 1024 entries (stores RAM region index + page byte offset).
     pub itlb: Tlb<512>,
-    pub dtlb: Tlb<1024>,
+    pub dtlb: DTlb<1024>,
 
     /// TLB flush counters (shared — both TLBs are always flushed together).
     pub flush_full: u64,
     pub flush_asid: u64,
     pub flush_vpage: u64,
     pub flush_vpage_asid: u64,
+}
+
+/// Result of a data address translation.
+///
+/// When `mem_idx != DataAddr::NO_RAM` the access targets RAM and can be
+/// served directly from `Mmu::memory[mem_idx].1[page_byte_offset | (va &
+/// 0xfff)]` without any further scanning.  Otherwise the physical address `pa`
+/// must be used with the normal MMIO load/store path.
+pub struct DataAddr {
+    /// Physical address.  Always valid (used for MMIO and by callers that
+    /// only need `pa`).
+    pub pa: u64,
+    /// Index into `Mmu::memory`, or `NO_RAM` when the page is MMIO or the
+    /// access is in physical (M-mode) mode.
+    pub mem_idx: u8,
+    /// Byte offset of the start of the virtual page within
+    /// `Mmu::memory[mem_idx].1`.  Only valid when `mem_idx != NO_RAM`.
+    pub page_byte_offset: u32,
+}
+
+impl DataAddr {
+    /// Sentinel `mem_idx` meaning "not a cached RAM entry".
+    pub const NO_RAM: u8 = u8::MAX;
 }
 
 pub const PTE_V_MASK: u64 = 1 << 0;
@@ -135,7 +159,7 @@ impl Mmu {
             service_queue: BinaryHeap::new(),
             cycle: 0,
             itlb: Tlb::<512>::new(),
-            dtlb: Tlb::<1024>::new(),
+            dtlb: DTlb::<1024>::new(),
             flush_full: 0,
             flush_asid: 0,
             flush_vpage: 0,
@@ -731,6 +755,21 @@ impl Mmu {
     #[inline(always)]
     const fn current_asid(&self) -> u16 { ((self.satp >> SATP_ASID_SHIFT) & SATP_ASID_MASK) as u16 }
 
+    /// Find which RAM region contains `pa` and return `(mem_idx,
+    /// page_byte_offset)`. `page_byte_offset` is `(pa & !0xfff) -
+    /// region.start`, i.e. the byte offset of the start of the containing
+    /// page within the region's backing `Vec<u8>`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn find_ram_for_pa(&self, pa: u64) -> Option<(u8, u32)> {
+        for (i, (range, _)) in self.memory.iter().enumerate() {
+            if range.contains(&pa) {
+                let page_byte_offset = (pa - range.start) as u32 & !0xfff;
+                return Some((i as u8, page_byte_offset));
+            }
+        }
+        None
+    }
+
     /// # Errors
     /// If this fails then the error will have the exception that should be
     /// raised
@@ -744,7 +783,9 @@ impl Mmu {
         if access_type == MemoryAccessType::Execute {
             self.translate_code_address(address)
         } else {
-            self.translate_data_address(address, access_type, side_effect_free)
+            Ok(self
+                .translate_data_address(address, access_type, side_effect_free)?
+                .pa)
         }
     }
 
@@ -809,6 +850,11 @@ impl Mmu {
 
     /// Translate a load or store address. Handles MPRV, uses dTLB.
     ///
+    /// On a dTLB hit to a RAM page, `mem_idx` and `page_byte_offset` in the
+    /// returned [`DataAddr`] are valid — callers can access
+    /// `memory[mem_idx].1[page_byte_offset | (va & 0xfff)]` directly.
+    /// MMIO and physical-mode accesses return `mem_idx == DataAddr::NO_RAM`.
+    ///
     /// # Errors
     /// Returns an `Exception` if the address translation fails.
     #[allow(
@@ -822,7 +868,7 @@ impl Mmu {
         address: u64,
         access_type: MemoryAccessType,
         side_effect_free: bool,
-    ) -> Result<u64, Exception> {
+    ) -> Result<DataAddr, Exception> {
         let effective_prv = if self.mstatus & MSTATUS_MPRV != 0 {
             priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
         } else {
@@ -832,44 +878,54 @@ impl Mmu {
         if effective_prv == PrivMode::M
             || (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64
         {
-            return Ok(address);
+            return Ok(DataAddr {
+                pa: address,
+                mem_idx: DataAddr::NO_RAM,
+                page_byte_offset: 0,
+            });
         }
 
         let vpage = (address >> PG_SHIFT) as u32;
         let asid = self.current_asid();
         let access_shift = u32::from(access_type == MemoryAccessType::Write);
 
-        if let Some((ppage, perm)) = self.dtlb.lookup(vpage, asid) {
+        if let Some((mem_idx, page_byte_offset, perm)) = self.dtlb.lookup(vpage, asid) {
             let prv_is_user = effective_prv == PrivMode::U;
             let sum = self.mstatus & MSTATUS_SUM != 0;
             let mxr = self.mstatus & MSTATUS_MXR != 0;
             if check_perm(perm, access_shift, prv_is_user, sum, mxr) {
-                let tlb_pa = (u64::from(ppage) << PG_SHIFT) | (address & 0xfff);
+                // Reconstruct pa for the paranoid check and for callers that only need pa.
+                let pa = self.memory[mem_idx as usize].0.start
+                    + u64::from(page_byte_offset)
+                    + (address & 0xfff);
                 if cfg!(feature = "paranoid-tlb") {
                     let slow = self.translate_address_slow(address, access_type, true);
                     match slow {
                         Ok((expected_pa, _)) => assert_eq!(
-                            tlb_pa, expected_pa,
-                            "dTLB hit pa {tlb_pa:#x} != walk pa {expected_pa:#x} \
+                            pa, expected_pa,
+                            "dTLB hit pa {pa:#x} != walk pa {expected_pa:#x} \
                              for va {address:#x} access {access_type:?} \
                              prv {effective_prv:?} asid {asid}"
                         ),
                         Err(e) => panic!(
-                            "dTLB hit pa {tlb_pa:#x} but walk faulted {:?} \
+                            "dTLB hit pa {pa:#x} but walk faulted {:?} \
                              for va {address:#x} access {access_type:?} \
                              prv {effective_prv:?} asid {asid} perm {perm:#06x}",
                             e.trap
                         ),
                     }
                 }
-                return Ok(tlb_pa);
+                return Ok(DataAddr {
+                    pa,
+                    mem_idx,
+                    page_byte_offset,
+                });
             }
         }
 
         self.dtlb.misses += 1;
         let (pa, pte) = self.translate_address_slow(address, access_type, side_effect_free)?;
         if !side_effect_free && pte != 0 {
-            let ppage = (pa >> PG_SHIFT) as u32;
             let mut xwr = ((pte >> 1) & 7) as u8;
             // When using SW-managed A/D, mask out W if D is not set so
             // that future writes still fault through the slow path.
@@ -879,9 +935,22 @@ impl Mmu {
             let user = pte & PTE_U_MASK != 0;
             let global = pte & (1 << 5) != 0;
             let perm = pack_perm(xwr, user, global, asid);
-            self.dtlb.insert(vpage, ppage, perm, asid);
+            // Only RAM pages go into the dTLB; MMIO pages use the slow path every time.
+            if let Some((mem_idx, page_byte_offset)) = self.find_ram_for_pa(pa) {
+                self.dtlb
+                    .insert(vpage, mem_idx, page_byte_offset, perm, asid);
+                return Ok(DataAddr {
+                    pa,
+                    mem_idx,
+                    page_byte_offset,
+                });
+            }
         }
-        Ok(pa)
+        Ok(DataAddr {
+            pa,
+            mem_idx: DataAddr::NO_RAM,
+            page_byte_offset: 0,
+        })
     }
 
     #[allow(

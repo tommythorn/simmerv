@@ -13,6 +13,7 @@ use crate::fp;
 use crate::fp::fflag::DIVIDEZERO;
 use crate::generated_riscv_decoder::Op;
 use crate::generated_riscv_decoder::decoder;
+use crate::mmu::DataAddr;
 use crate::mmu::Mmu;
 use crate::native_fp;
 use crate::new_decoder;
@@ -1464,70 +1465,89 @@ impl Cpu {
         ])))
     }
 
-    /// Data load/store.
+    /// Data load.
     #[allow(clippy::inline_always)]
     #[inline(always)]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn memop(
+    fn memop_read(&mut self, baseva: u64, offset: u64, size: u64) -> Result<u64, Exception> {
+        let va = baseva.wrapping_add(offset);
+
+        if va & 0xfff > 0x1000 - size {
+            return self.memop_slow(Read, va, 0, size, false);
+        }
+
+        let addr = self.mmu.translate_data_address(va, Read, false)?;
+
+        if addr.mem_idx != DataAddr::NO_RAM {
+            let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
+            let mem = &self.mmu.memory[addr.mem_idx as usize].1;
+            return Ok(match size {
+                1 => u64::from(mem[off]),
+                2 => u64::from(u16::from_le_bytes([mem[off], mem[off + 1]])),
+                4 => u64::from(u32::from_le_bytes([
+                    mem[off],
+                    mem[off + 1],
+                    mem[off + 2],
+                    mem[off + 3],
+                ])),
+                _ => u64::from_le_bytes([
+                    mem[off],
+                    mem[off + 1],
+                    mem[off + 2],
+                    mem[off + 3],
+                    mem[off + 4],
+                    mem[off + 5],
+                    mem[off + 6],
+                    mem[off + 7],
+                ]),
+            });
+        }
+
+        self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
+            trap: Trap::LoadAccessFault,
+            tval: va,
+        })
+    }
+
+    /// Data store. Clears any load-reservation.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn memop_write(
         &mut self,
-        access: MemoryAccessType,
         baseva: u64,
         offset: u64,
         v: u64,
         size: u64,
-    ) -> Result<u64, Exception> {
-        if access == MemoryAccessType::Write {
-            self.reservation = None;
-        }
-
+    ) -> Result<(), Exception> {
+        self.reservation = None;
         let va = baseva.wrapping_add(offset);
 
         if va & 0xfff > 0x1000 - size {
-            return self.memop_slow(access, va, v, size, false);
+            self.memop_slow(Write, va, v, size, false)?;
+            return Ok(());
         }
 
-        let pa = self.mmu.translate_data_address(va, access, false)?;
+        let addr = self.mmu.translate_data_address(va, Write, false)?;
 
-        let Ok(slice) = self.mmu.dma_slice(pa, size as usize) else {
-            return match access {
-                Write => self
-                    .mmu
-                    .store_mmio(pa, v, size)
-                    .map(|()| 0)
-                    .map_err(|()| Exception {
-                        trap: Trap::StoreAccessFault,
-                        tval: va,
-                    }),
-                Read | Execute => self.mmu.load_mmio(pa, size).map_err(|()| Exception {
-                    trap: Trap::LoadAccessFault,
-                    tval: va,
-                }),
-            };
-        };
-
-        match access {
-            Write => {
-                match size {
-                    1 => slice[0] = v as u8,
-                    2 => slice.copy_from_slice(&(v as u16).to_le_bytes()),
-                    4 => slice.copy_from_slice(&(v as u32).to_le_bytes()),
-                    _ => slice.copy_from_slice(&v.to_le_bytes()),
-                }
-                Ok(0)
+        if addr.mem_idx != DataAddr::NO_RAM {
+            let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
+            let mem = &mut self.mmu.memory[addr.mem_idx as usize].1;
+            match size {
+                1 => mem[off] = v as u8,
+                2 => mem[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes()),
+                4 => mem[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()),
+                _ => mem[off..off + 8].copy_from_slice(&v.to_le_bytes()),
             }
-            Read | Execute => {
-                // Unsigned, sign extension is the job of the consumer
-                Ok(match size {
-                    1 => u64::from(slice[0]),
-                    2 => u64::from(u16::from_le_bytes([slice[0], slice[1]])),
-                    4 => u64::from(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]])),
-                    _ => u64::from_le_bytes([
-                        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6],
-                        slice[7],
-                    ]),
-                })
-            }
+            return Ok(());
         }
+
+        self.mmu
+            .store_mmio(addr.pa, v, size)
+            .map_err(|()| Exception {
+                trap: Trap::StoreAccessFault,
+                tval: va,
+            })
     }
 
     // Slow path where we either span multiple pages and/or access outside memory
@@ -1682,23 +1702,23 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
             }
             Ok((0, 0))
         }
-        Op::Lb => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 1)? as i8 as u64, 0)),
-        Op::Lh => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 2)? as i16 as u64, 0)),
+        Op::Lb => Ok((cpu.memop_read(ops.s1, uop.imm64(), 1)? as i8 as u64, 0)),
+        Op::Lh => Ok((cpu.memop_read(ops.s1, uop.imm64(), 2)? as i16 as u64, 0)),
         Op::Lw | Op::CLw | Op::CLwsp => {
-            Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 4)? as i32 as u64, 0))
+            Ok((cpu.memop_read(ops.s1, uop.imm64(), 4)? as i32 as u64, 0))
         }
-        Op::Lbu => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 1)?, 0)),
-        Op::Lhu => Ok((cpu.memop(Read, ops.s1, uop.imm64(), 0, 2)?, 0)),
+        Op::Lbu => Ok((cpu.memop_read(ops.s1, uop.imm64(), 1)?, 0)),
+        Op::Lhu => Ok((cpu.memop_read(ops.s1, uop.imm64(), 2)?, 0)),
         Op::Sb => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 1)?;
+            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 1)?;
             Ok((0, 0))
         }
         Op::Sh => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 2)?;
+            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 2)?;
             Ok((0, 0))
         }
         Op::Sw | Op::CSw | Op::CSwsp => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 4)?;
+            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 4)?;
             Ok((0, 0))
         }
         Op::Addi | Op::CAddi | Op::CAddi4spn | Op::CLi | Op::CAddi16sp => {
@@ -1750,15 +1770,15 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
         }),
         // RV64I
         Op::Lwu => {
-            let v = cpu.memop(Read, ops.s1, uop.imm64(), 0, 4)?;
+            let v = cpu.memop_read(ops.s1, uop.imm64(), 4)?;
             Ok((v, 0))
         }
         Op::Ld | Op::CLd | Op::CLdsp => {
-            let v = cpu.memop(Read, ops.s1, uop.imm64(), 0, 8)?;
+            let v = cpu.memop_read(ops.s1, uop.imm64(), 8)?;
             Ok((v, 0))
         }
         Op::Sd | Op::CSd | Op::CSdsp => {
-            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 8)?;
+            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 8)?;
             Ok((0, 0))
         }
         Op::Slli | Op::CSlli => Ok((ops.s1 << uop.imm as u32, 0)),
@@ -2071,28 +2091,20 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
         // RV32F
         Op::Flw => {
             cpu.check_float_access_and_dirty(0)?;
-            Ok((
-                cpu.memop(Read, ops.s1, uop.imm64(), 0, 4)? | fp::NAN_BOX_F32,
-                0,
-            ))
+            Ok((cpu.memop_read(ops.s1, uop.imm64(), 4)? | fp::NAN_BOX_F32, 0))
         }
         Op::Fsw => {
             cpu.check_float_access_and_dirty(0)?;
-            cpu.reservation = None;
-            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 4)?;
+            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 4)?;
             Ok((0, 0))
         }
         Op::Flh => {
             cpu.check_float_access_and_dirty(0)?;
-            Ok((
-                cpu.memop(Read, ops.s1, uop.imm64(), 0, 2)? | fp::NAN_BOX_F16,
-                0,
-            ))
+            Ok((cpu.memop_read(ops.s1, uop.imm64(), 2)? | fp::NAN_BOX_F16, 0))
         }
         Op::Fsh => {
             cpu.check_float_access_and_dirty(0)?;
-            cpu.reservation = None;
-            let _ = cpu.memop(Write, ops.s1, uop.imm64(), ops.s2, 2)?;
+            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 2)?;
             Ok((0, 0))
         }
         Op::FmaddS => {
@@ -2243,7 +2255,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
         // RV32D
         Op::Fld | Op::CFld | Op::CFldsp => {
             cpu.check_float_access_and_dirty(0)?;
-            let v = cpu.memop(Read, ops.s1, uop.imm64(), 0, 8)?;
+            let v = cpu.memop_read(ops.s1, uop.imm64(), 8)?;
             Ok((v, 0))
         }
         Op::Fsd | Op::CFsd | Op::CFsdsp => {
@@ -2594,7 +2606,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
         Op::CboZero => {
             let base = ops.s1 & !63;
             for i in 0..8u64 {
-                cpu.memop(Write, base, i * 8, 0, 8)?;
+                cpu.memop_write(base, i * 8, 0, 8)?;
             }
             Ok((0, 0))
         }
