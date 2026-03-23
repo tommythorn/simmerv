@@ -152,7 +152,7 @@ impl<const SETS: usize> Tlb<SETS> {
         let idx = vpage as usize & (SETS - 1);
         if self.vpage[idx] == vpage {
             let p = self.perm[idx];
-            if p & PERM_G == 0 && (p >> PERM_ASID_SHIFT) == asid {
+            if p & !0xF == (asid << PERM_ASID_SHIFT) {
                 self.vpage[idx] = INVALID_VPAGE;
                 self.perm[idx] = INVALID_PERM;
             }
@@ -240,7 +240,7 @@ impl<const SETS: usize> DTlb<SETS> {
         let idx = vpage as usize & (SETS - 1);
         if self.vpage[idx] == vpage {
             let p = self.perm[idx];
-            if p & PERM_G == 0 && (p >> PERM_ASID_SHIFT) == asid {
+            if p & !0xF == (asid << PERM_ASID_SHIFT) {
                 self.vpage[idx] = INVALID_VPAGE;
                 self.perm[idx] = INVALID_PERM;
             }
