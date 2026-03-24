@@ -271,4 +271,5 @@ pub trait RiscvDecoder {
     fn fcvt_d_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn fcvt_h_d(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn unimp(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn end(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
 }

@@ -82,10 +82,6 @@ impl Speedometer {
                 ));
 
                 let block_hits = d(cache.block_hits, self.prev_cache.block_hits);
-                let truncated = d(
-                    cache.truncated_executions,
-                    self.prev_cache.truncated_executions,
-                );
                 let untaken_br = d(cache.untaken_branches, self.prev_cache.untaken_branches);
                 let delta_blocks = cache.block_hits - self.prev_cache.block_hits;
                 let delta_insns = cache.hits - self.prev_cache.hits;
@@ -98,7 +94,7 @@ impl Speedometer {
                 let conflict = d(cache.conflict_misses, self.prev_cache.conflict_misses);
                 lines.push(format!(
                     "uop$ occ {}/{} blocks {block_hits:6.0}/Mi  avg_len {avg_len:.1}  \
-                     truncated {truncated:6.0}/Mi  untaken_br {untaken_br:6.0}/Mi  \
+                     untaken_br {untaken_br:6.0}/Mi  \
                      cold {cold:6.0}/Mi  conflict {conflict:6.0}/Mi",
                     cache.occupied, cache.capacity,
                 ));

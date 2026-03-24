@@ -6,7 +6,7 @@
 /// `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz_Zfhmin`
 /// instructions, useful for deriving decoders etc.  There is simple utility
 /// function that generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 263] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 264] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -278,6 +278,7 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 263] = [
     (0xfff0007f, 0x44000053, "fcvt.h.s"),
     (0xfff0007f, 0x42200053, "fcvt.d.h"),
     (0xfff0007f, 0x44100053, "fcvt.h.d"),
+    (0x00000000, 0x00000000, "end"), // sentinel — never matches a real instruction
 ];
 
 fn to_pascal_case(s: &str) -> String {
@@ -1492,6 +1493,10 @@ mod test {
         }
         fn unimp(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "unimp";
+            0
+        }
+        fn end(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "end";
             0
         }
     }

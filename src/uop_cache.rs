@@ -13,21 +13,21 @@ pub enum CacheMode {
 }
 
 /// A cached sequence of decoded uops covering one basic block.
+/// The block is terminated by the first `Op::End` sentinel uop.
 #[derive(Clone)]
 pub struct BasicBlock {
     pub uops: [Uop; MAX_BLOCK_LEN],
-    /// Number of valid uops in this block (`1..=MAX_BLOCK_LEN`).
-    pub len: u8,
-    /// True if block building stopped at a 4K page boundary.
-    pub truncated: bool,
+    /// Padding to avoid cache-set aliasing: 192 bytes (3 × 64-byte lines)
+    /// causes heavy conflict misses in the host L1/L2; 196 bytes breaks the
+    /// periodicity.  Do NOT remove.
+    _cache_align_pad: [u8; 4],
 }
 
 impl Default for BasicBlock {
     fn default() -> Self {
         Self {
             uops: [Uop::default(); MAX_BLOCK_LEN],
-            len: 0,
-            truncated: false,
+            _cache_align_pad: [0; 4],
         }
     }
 }
@@ -56,8 +56,6 @@ pub struct BbCache {
     pub cold_misses: u64,
     /// Miss where the slot held a *different* valid key — conflict eviction.
     pub conflict_misses: u64,
-    /// Executions of page-boundary-truncated blocks.
-    pub truncated_executions: u64,
     /// Branch uops executed where the branch was not taken.
     pub untaken_branches: u64,
     /// Full cache clears (FENCE.I, SFENCE.VMA x0/x0, SATP PPN/mode change).
@@ -107,7 +105,6 @@ impl BbCache {
             insn_hits: 0,
             cold_misses: 0,
             conflict_misses: 0,
-            truncated_executions: 0,
             untaken_branches: 0,
             flush_full: 0,
             flush_asid: 0,
@@ -303,7 +300,6 @@ impl BbCache {
         UopCacheStats {
             hits: self.insn_hits,
             block_hits: self.block_hits,
-            truncated_executions: self.truncated_executions,
             untaken_branches: self.untaken_branches,
             cold_misses: self.cold_misses,
             conflict_misses: self.conflict_misses,
@@ -324,7 +320,6 @@ pub struct UopCacheStats {
     /// Total instructions executed from cached blocks (= `insn_hits`).
     pub hits: u64,
     pub block_hits: u64,
-    pub truncated_executions: u64,
     pub untaken_branches: u64,
     pub cold_misses: u64,
     pub conflict_misses: u64,
@@ -335,5 +330,5 @@ pub struct UopCacheStats {
     pub occupied: usize,
     pub capacity: usize,
 }
-// [Uop; 16]=192 + len(1) + truncated(1) + pad(2) = 196
+// [Uop; 16]=192 + _cache_align_pad(4) = 196
 const _: () = assert!(std::mem::size_of::<BasicBlock>() == 196);

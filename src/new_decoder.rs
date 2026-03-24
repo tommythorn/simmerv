@@ -862,6 +862,9 @@ impl RiscvDecoder for Decoder {
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_exceptional(a, insn, Op::Unimp)
     }
+    fn end(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        decode_exceptional(a, insn, Op::End)
+    }
 }
 
 /// Generate a source integer `Reg`

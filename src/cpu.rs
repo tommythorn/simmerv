@@ -233,7 +233,7 @@ pub const PG_SHIFT: usize = 12; // 4K page size
 impl Default for Uop {
     fn default() -> Self {
         Self {
-            op: Op::Unimp,
+            op: Op::End,
             rd: NODESTREG,
             rs1: ZEROREG,
             rs2: ZEROREG,
@@ -475,14 +475,15 @@ impl Cpu {
         if let Some(slot) = bb.probe(cache_key) {
             // Read len/truncated: temporary borrows of bb.data, released immediately
             // since `u8` and `bool` are Copy.
-            let len = bb.block_at(slot).len;
-            let truncated = bb.block_at(slot).truncated;
             let mut n_executed: u32 = 0;
+            let mut untaken_branches: u64 = 0;
             let mut exception: Option<(Exception, u64)> = None;
-            for i in 0..len as usize {
+            for uop in bb.block_at(slot).uops {
+                if uop.op == Op::End {
+                    break;
+                }
                 // Copy the uop out — Uop is Copy, so the borrow on bb is
                 // released before the mutable uses of bb below.
-                let uop = bb.block_at(slot).uops[i];
                 let cur_insn_addr = self.pc;
                 let expected_next = cur_insn_addr + uop.get_insn_size();
                 self.pc = expected_next;
@@ -511,14 +512,12 @@ impl Cpu {
                     // PC deviated — taken branch or jump, exit early.
                     break;
                 } else if Self::is_branch(uop.op) {
-                    bb.untaken_branches += 1;
+                    untaken_branches += 1;
                 }
             }
+            bb.untaken_branches += untaken_branches;
             bb.insn_hits += u64::from(n_executed);
             bb.block_hits += 1;
-            if truncated {
-                bb.truncated_executions += 1;
-            }
             // Extra cycles for instructions beyond the first.
             self.cycle = self
                 .cycle
@@ -533,17 +532,15 @@ impl Cpu {
         let page_end = (block_start & !0xFFF) + 0x1000;
         let mut block = BasicBlock::default();
         let mut fetch_pc = block_start;
-        let mut truncated = false;
+        let mut i = 0usize;
 
         loop {
-            if block.len as usize >= MAX_BLOCK_LEN {
+            if i >= MAX_BLOCK_LEN {
                 break;
             }
-            let i = block.len as usize;
 
             // Page boundary check (skip for i == 0).
             if i > 0 && fetch_pc >= page_end {
-                truncated = true;
                 break;
             }
 
@@ -563,13 +560,12 @@ impl Cpu {
 
             // Skip 4-byte instruction straddling page boundary (not for i==0).
             if i > 0 && insn_size == 4 && fetch_pc + 4 > page_end {
-                truncated = true;
                 break;
             }
 
             let uop = decode(fetch_pc, insn);
 
-            if matches!(uop.op, Op::CUnimp | Op::Unimp) {
+            if matches!(uop.op, Op::CUnimp | Op::End) {
                 if i == 0 {
                     return Err((
                         Exception {
@@ -583,20 +579,21 @@ impl Cpu {
             }
 
             block.uops[i] = uop;
-            block.len += 1;
+            i += 1;
             fetch_pc += insn_size;
 
             if Self::is_block_terminal(uop.op, uop.imm) {
                 break;
             }
         }
-        block.truncated = truncated;
 
         // ── Execute the freshly-decoded block ─────────────────────────────
         let mut n_executed: u32 = 0;
         let mut exception: Option<(Exception, u64)> = None;
-        for i in 0..block.len as usize {
-            let uop = block.uops[i];
+        for uop in block.uops {
+            if uop.op == Op::End {
+                break;
+            }
             let cur_insn_addr = self.pc;
             let expected_next = cur_insn_addr + uop.get_insn_size();
             self.pc = expected_next;
@@ -664,7 +661,7 @@ impl Cpu {
         let insn = self.memop_code(insn_addr)? as u32;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
         let uop = decode(insn_addr, insn);
-        if matches!(uop.op, Op::CUnimp | Op::Unimp) {
+        if matches!(uop.op, Op::CUnimp | Op::End) {
             return Err(Exception {
                 trap: Trap::IllegalInstruction,
                 tval: u64::from(insn),
@@ -2610,8 +2607,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
             }
             Ok((0, 0))
         }
-        // Last one is a sentiel and must always be this illegal instruction
-        Op::Unimp | Op::CUnimp => Err(Exception {
+        // End is the sentinel for unrecognised 32-bit instructions; CUnimp for compressed.
+        Op::End | Op::Unimp | Op::CUnimp => Err(Exception {
             trap: Trap::IllegalInstruction,
             tval: 0,
         }),
