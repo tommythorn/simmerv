@@ -59,6 +59,81 @@ pub struct Exception {
 
 pub type ExecResult = Result<(u64, u8), Exception>;
 
+/// 16-byte execution result returned in `(rax, rdx)` on x86-64.
+///
+/// No sret pointer needed. `flags == 0`: ok; `0 < flags < 2^63`: ok with
+/// fflags (`flags & 0xFF`); bit 63 set: exception (`val`=tval,
+/// `bits[15:8]`=Trap).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ExecOut {
+    pub val: u64,
+    pub flags: u64,
+}
+
+const EXCEPTION_BIT: u64 = 0x8000_0000_0000_0000;
+
+#[allow(clippy::inline_always)]
+impl ExecOut {
+    #[inline(always)]
+    #[must_use]
+    pub const fn ok(val: u64) -> Self { Self { val, flags: 0 } }
+    #[inline(always)]
+    #[must_use]
+    #[allow(clippy::cast_lossless)]
+    pub const fn ok_ff(val: u64, ff: u8) -> Self {
+        Self {
+            val,
+            flags: ff as u64,
+        }
+    }
+    #[inline(always)]
+    #[must_use]
+    pub const fn err(trap: Trap, tval: u64) -> Self {
+        Self {
+            val: tval,
+            flags: EXCEPTION_BIT | ((trap as u64) << 8),
+        }
+    }
+    #[inline(always)]
+    #[must_use]
+    pub const fn is_err(self) -> bool { self.flags & EXCEPTION_BIT != 0 }
+    #[inline(always)]
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn fflags(self) -> u8 { self.flags as u8 }
+    #[inline(always)]
+    #[must_use]
+    pub fn to_exception(self) -> Exception {
+        Exception {
+            trap: num_traits::FromPrimitive::from_u64((self.flags >> 8) & 0xFF)
+                .unwrap_or(Trap::IllegalInstruction),
+            tval: self.val,
+        }
+    }
+    /// Convert a `(value, fflags)` pair (as returned by float helpers) to
+    /// `ExecOut`.
+    #[inline(always)]
+    #[must_use]
+    #[allow(clippy::cast_lossless)]
+    pub const fn from_wf(wf: (u64, u8)) -> Self {
+        Self {
+            val: wf.0,
+            flags: wf.1 as u64,
+        }
+    }
+}
+
+/// Like `?` but for functions returning `ExecOut`.
+macro_rules! etry {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return ExecOut::err(e.trap, e.tval),
+        }
+    };
+}
+
 /// The decoded instruction, convenient for execution
 // XXX Needs Seqno, ctf_target_opt
 // XXX ctf, exceptional, serialize (and more?) should be combined into a classification represented
@@ -80,10 +155,21 @@ pub struct Uop {
     pub rs3: Reg,
     /// FP Rounding Mode
     pub rm: u8,
+    /// Instruction size in bytes (2 or 4); precomputed at decode time.
+    pub insn_size: u8,
 }
 
 impl Uop {
-    const fn get_insn_size(&self) -> u64 {
+    const fn get_insn_size(&self) -> u64 { (self.insn_size & 0x7F) as u64 }
+
+    /// Returns true if this is a conditional branch (precomputed at decode time
+    /// via bit 7 of `insn_size`).
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    #[must_use]
+    pub const fn is_branch_flag(&self) -> bool { self.insn_size & 0x80 != 0 }
+
+    const fn _get_insn_size_from_op(&self) -> u64 {
         match self.op {
             Op::CUnimp
             | Op::CAddi4spn
@@ -240,6 +326,7 @@ impl Default for Uop {
             rs3: ZEROREG,
             imm: 0,
             rm: 0,
+            insn_size: 4,
         }
     }
 }
@@ -478,46 +565,45 @@ impl Cpu {
             let mut n_executed: u32 = 0;
             let mut untaken_branches: u64 = 0;
             let mut exception: Option<(Exception, u64)> = None;
-            for uop in bb.block_at(slot).uops {
+            let cached_block = bb.block_at(slot);
+            for uop in &cached_block.uops {
+                let uop = *uop;
                 if uop.op == Op::End {
                     break;
                 }
-                // Copy the uop out — Uop is Copy, so the borrow on bb is
-                // released before the mutable uses of bb below.
+                // uop is a local copy; cached_block borrows bb immutably but
+                // bb is not mutated inside this loop, so NLL is satisfied.
                 let cur_insn_addr = self.pc;
                 let expected_next = cur_insn_addr + uop.get_insn_size();
                 self.pc = expected_next;
-                self.seqno = self.seqno.wrapping_add(1);
 
-                let ops = Operands {
-                    s1: self.read_x(uop.rs1),
-                    s2: self.read_x(uop.rs2),
-                    s3: self.read_x(uop.rs3),
-                };
-                match new_execute(self, &uop, &ops, cur_insn_addr) {
-                    Ok((res, fflags)) => {
-                        self.write_x(uop.rd, res);
-                        if fflags != 0 {
-                            self.add_to_fflags(fflags);
-                        }
-                    }
-                    Err(e) => {
-                        exception = Some((e, cur_insn_addr));
-                        break;
-                    }
+                let s1 = self.read_x(uop.rs1);
+                let s2 = self.read_x(uop.rs2);
+                let s3 = self.read_x(uop.rs3);
+                let out = execute_fast(self, &uop, s1, s2, s3, cur_insn_addr);
+                if out.is_err() {
+                    exception = Some((out.to_exception(), cur_insn_addr));
+                    break;
+                }
+                self.write_x(uop.rd, out.val);
+                let ff = out.fflags();
+                if ff != 0 {
+                    self.add_to_fflags(ff);
                 }
                 n_executed += 1;
 
                 if self.pc != expected_next {
                     // PC deviated — taken branch or jump, exit early.
                     break;
-                } else if Self::is_branch(uop.op) {
+                } else if uop.is_branch_flag() {
                     untaken_branches += 1;
                 }
             }
             bb.untaken_branches += untaken_branches;
             bb.insn_hits += u64::from(n_executed);
             bb.block_hits += 1;
+            // Batch seqno update (only used for snapshots, not CSRs)
+            self.seqno = self.seqno.wrapping_add(n_executed as usize);
             // Extra cycles for instructions beyond the first.
             self.cycle = self
                 .cycle
@@ -597,24 +683,19 @@ impl Cpu {
             let cur_insn_addr = self.pc;
             let expected_next = cur_insn_addr + uop.get_insn_size();
             self.pc = expected_next;
-            self.seqno = self.seqno.wrapping_add(1);
 
-            let ops = Operands {
-                s1: self.read_x(uop.rs1),
-                s2: self.read_x(uop.rs2),
-                s3: self.read_x(uop.rs3),
-            };
-            match new_execute(self, &uop, &ops, cur_insn_addr) {
-                Ok((res, fflags)) => {
-                    self.write_x(uop.rd, res);
-                    if fflags != 0 {
-                        self.add_to_fflags(fflags);
-                    }
-                }
-                Err(e) => {
-                    exception = Some((e, cur_insn_addr));
-                    break;
-                }
+            let s1 = self.read_x(uop.rs1);
+            let s2 = self.read_x(uop.rs2);
+            let s3 = self.read_x(uop.rs3);
+            let out = new_execute(self, &uop, s1, s2, s3, cur_insn_addr);
+            if out.is_err() {
+                exception = Some((out.to_exception(), cur_insn_addr));
+                break;
+            }
+            self.write_x(uop.rd, out.val);
+            let ff = out.fflags();
+            if ff != 0 {
+                self.add_to_fflags(ff);
             }
             n_executed += 1;
 
@@ -668,15 +749,17 @@ impl Cpu {
             });
         }
         self.seqno = self.seqno.wrapping_add(1);
-        let ops = Operands {
-            s1: self.read_x(uop.rs1),
-            s2: self.read_x(uop.rs2),
-            s3: self.read_x(uop.rs3),
-        };
-        let (res, fflags) = new_execute(self, &uop, &ops, insn_addr)?;
-        self.write_x(uop.rd, res);
-        if fflags != 0 {
-            self.add_to_fflags(fflags);
+        let s1 = self.read_x(uop.rs1);
+        let s2 = self.read_x(uop.rs2);
+        let s3 = self.read_x(uop.rs3);
+        let out = new_execute(self, &uop, s1, s2, s3, insn_addr);
+        if out.is_err() {
+            return Err(out.to_exception());
+        }
+        self.write_x(uop.rd, out.val);
+        let ff = out.fflags();
+        if ff != 0 {
+            self.add_to_fflags(ff);
         }
         Ok(())
     }
@@ -1626,16 +1709,121 @@ const fn get_trap_cause(exc: &Exception) -> u64 {
 }
 
 #[must_use]
-pub fn decode(a: u64, word: u32) -> Uop { decoder(a, word, &mut new_decoder::Decoder {}) }
+pub fn decode(a: u64, word: u32) -> Uop {
+    let mut uop = decoder(a, word, &mut new_decoder::Decoder {});
+    let size: u8 = if word & 3 == 3 { 4 } else { 2 };
+    let branch_flag: u8 = if Cpu::is_branch(uop.op) { 0x80 } else { 0 };
+    uop.insn_size = size | branch_flag;
+    uop
+}
 
 fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
+
+/// Inline fast path for the most common ops (integer ALU, branches, jumps).
+/// Avoids the function-call overhead of `new_execute` for ~70% of instructions.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
+fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u64) -> ExecOut {
+    match uop.op {
+        // Lui / Auipc
+        Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
+        Op::Auipc => ExecOut::ok(insn_addr.wrapping_add(uop.imm64())),
+        // Jumps
+        Op::Jal | Op::CJ => {
+            let tmp = cpu.pc;
+            cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            ExecOut::ok(tmp)
+        }
+        Op::Jalr | Op::CJr | Op::CJalr => {
+            let tmp = cpu.pc;
+            cpu.pc = s1.wrapping_add(uop.imm64()) & !1;
+            ExecOut::ok(tmp)
+        }
+        // Branches
+        Op::Beq | Op::CBeqz => {
+            if s1 == s2 {
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            }
+            ExecOut::ok(0)
+        }
+        Op::Bne | Op::CBnez => {
+            if s1 != s2 {
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            }
+            ExecOut::ok(0)
+        }
+        Op::Blt => {
+            if (s1 as i64) < s2 as i64 {
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            }
+            ExecOut::ok(0)
+        }
+        Op::Bge => {
+            if (s1 as i64) >= s2 as i64 {
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            }
+            ExecOut::ok(0)
+        }
+        Op::Bltu => {
+            if s1 < s2 {
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            }
+            ExecOut::ok(0)
+        }
+        Op::Bgeu => {
+            if s1 >= s2 {
+                cpu.pc = insn_addr.wrapping_add(uop.imm64());
+            }
+            ExecOut::ok(0)
+        }
+        // Integer immediate
+        Op::Addi | Op::CAddi | Op::CAddi4spn | Op::CLi | Op::CAddi16sp => {
+            ExecOut::ok(s1.wrapping_add(uop.imm64()))
+        }
+        Op::Slti => ExecOut::ok(u64::from((s1 as i64) < uop.imm as i64)),
+        Op::Sltiu => ExecOut::ok(u64::from(s1 < uop.imm64())),
+        Op::Xori => ExecOut::ok(s1 ^ uop.imm64()),
+        Op::Ori => ExecOut::ok(s1 | uop.imm64()),
+        Op::Andi | Op::CAndi => ExecOut::ok(s1 & uop.imm64()),
+        Op::Slli | Op::CSlli => ExecOut::ok(s1 << uop.imm as u32),
+        Op::Srli | Op::CSrli => ExecOut::ok(s1 >> uop.imm as u32),
+        Op::Srai | Op::CSrai => ExecOut::ok(((s1 as i64) >> uop.imm as u32) as u64),
+        // Integer register
+        Op::Add | Op::CAdd | Op::CMv => ExecOut::ok(s1.wrapping_add(s2)),
+        Op::Sub | Op::CSub => ExecOut::ok(s1.wrapping_sub(s2)),
+        Op::Sll => ExecOut::ok(s1.wrapping_shl(s2 as u32)),
+        Op::Slt => ExecOut::ok(u64::from((s1 as i64) < s2 as i64)),
+        Op::Sltu => ExecOut::ok(u64::from(s1 < s2)),
+        Op::Xor | Op::CXor => ExecOut::ok(s1 ^ s2),
+        Op::Srl => ExecOut::ok(s1.wrapping_shr(s2 as u32)),
+        Op::Sra => ExecOut::ok((s1 as i64).wrapping_shr(s2 as u32) as u64),
+        Op::Or | Op::COr => ExecOut::ok(s1 | s2),
+        Op::And | Op::CAnd => ExecOut::ok(s1 & s2),
+        // RV64I word ops
+        Op::Addiw | Op::CAddiw => ExecOut::ok(sext32(s1.wrapping_add(uop.imm64()) as u32)),
+        Op::Slliw => ExecOut::ok(((s1 as i32) << (uop.imm & 31) as u32) as u64),
+        Op::Srliw => ExecOut::ok(sext32((s1 as u32) >> (uop.imm & 31) as u32)),
+        Op::Sraiw => ExecOut::ok(((s1 as i32) >> (uop.imm & 31) as u32) as u64),
+        Op::Addw | Op::CAddw => ExecOut::ok(sext32(s1.wrapping_add(s2) as u32)),
+        Op::Subw | Op::CSubw => ExecOut::ok(sext32(s1.wrapping_sub(s2) as u32)),
+        Op::Sllw => ExecOut::ok(sext32((s1 as u32).wrapping_shl(s2 as u32))),
+        Op::Srlw => ExecOut::ok(sext32((s1 as u32).wrapping_shr(s2 as u32))),
+        Op::Sraw => ExecOut::ok((s1 as i32).wrapping_shr(s2 as u32) as u64),
+        // RV32M/RV64M integer multiply
+        Op::Mul => ExecOut::ok(s1.wrapping_mul(s2)),
+        Op::Mulw => ExecOut::ok((s1 as i32).wrapping_mul(s2 as i32) as u64),
+        // Everything else: memory, float, CSR, atomic, etc.
+        _ => new_execute(cpu, uop, s1, s2, s3, insn_addr),
+    }
+}
 
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_lossless
 )]
-fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> ExecResult {
+fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u64) -> ExecOut {
     match uop.op {
         Op::CNop
         | Op::SfenceWInval
@@ -1645,100 +1833,97 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
         | Op::CboFlush
         | Op::PrefetchI
         | Op::PrefetchR
-        | Op::PrefetchW => Ok((0, 0)),
-        Op::CEbreak => Err(Exception {
-            trap: Trap::Breakpoint,
-            tval: 0x9002,
-        }),
+        | Op::PrefetchW => ExecOut::ok(0),
+        Op::CEbreak => ExecOut::err(Trap::Breakpoint, 0x9002),
 
-        Op::Lui | Op::CLui => Ok((uop.imm64(), 0)),
-        Op::Auipc => Ok((insn_addr.wrapping_add(uop.imm64()), 0)),
+        Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
+        Op::Auipc => ExecOut::ok(insn_addr.wrapping_add(uop.imm64())),
         Op::Jal | Op::CJ => {
             let tmp = cpu.pc;
             cpu.pc = insn_addr.wrapping_add(uop.imm64());
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::Jalr | Op::CJr | Op::CJalr => {
             let tmp = cpu.pc;
-            cpu.pc = ops.s1.wrapping_add(uop.imm64()) & !1;
-            Ok((tmp, 0))
+            cpu.pc = s1.wrapping_add(uop.imm64()) & !1;
+            ExecOut::ok(tmp)
         }
         Op::Beq | Op::CBeqz => {
-            if ops.s1 == ops.s2 {
+            if s1 == s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Bne | Op::CBnez => {
-            if ops.s1 != ops.s2 {
+            if s1 != s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Blt => {
-            if (ops.s1 as i64) < ops.s2 as i64 {
+            if (s1 as i64) < s2 as i64 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Bge => {
-            if (ops.s1 as i64) >= ops.s2 as i64 {
+            if (s1 as i64) >= s2 as i64 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Bltu => {
-            if ops.s1 < ops.s2 {
+            if s1 < s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Bgeu => {
-            if ops.s1 >= ops.s2 {
+            if s1 >= s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
-        Op::Lb => Ok((cpu.memop_read(ops.s1, uop.imm64(), 1)? as i8 as u64, 0)),
-        Op::Lh => Ok((cpu.memop_read(ops.s1, uop.imm64(), 2)? as i16 as u64, 0)),
+        Op::Lb => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 1)) as i8 as u64),
+        Op::Lh => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2)) as i16 as u64),
         Op::Lw | Op::CLw | Op::CLwsp => {
-            Ok((cpu.memop_read(ops.s1, uop.imm64(), 4)? as i32 as u64, 0))
+            ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 4)) as i32 as u64)
         }
-        Op::Lbu => Ok((cpu.memop_read(ops.s1, uop.imm64(), 1)?, 0)),
-        Op::Lhu => Ok((cpu.memop_read(ops.s1, uop.imm64(), 2)?, 0)),
+        Op::Lbu => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 1))),
+        Op::Lhu => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2))),
         Op::Sb => {
-            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 1)?;
-            Ok((0, 0))
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 1));
+            ExecOut::ok(0)
         }
         Op::Sh => {
-            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 2)?;
-            Ok((0, 0))
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 2));
+            ExecOut::ok(0)
         }
         Op::Sw | Op::CSw | Op::CSwsp => {
-            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 4)?;
-            Ok((0, 0))
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 4));
+            ExecOut::ok(0)
         }
         Op::Addi | Op::CAddi | Op::CAddi4spn | Op::CLi | Op::CAddi16sp => {
-            Ok((ops.s1.wrapping_add(uop.imm64()), 0))
+            ExecOut::ok(s1.wrapping_add(uop.imm64()))
         }
-        Op::Slti => Ok((u64::from((ops.s1 as i64) < uop.imm as i64), 0)),
-        Op::Sltiu => Ok((u64::from(ops.s1 < uop.imm64()), 0)),
-        Op::Xori => Ok((ops.s1 ^ uop.imm64(), 0)),
-        Op::Ori => Ok((ops.s1 | uop.imm64(), 0)),
-        Op::Andi | Op::CAndi => Ok((ops.s1 & uop.imm64(), 0)),
+        Op::Slti => ExecOut::ok(u64::from((s1 as i64) < uop.imm as i64)),
+        Op::Sltiu => ExecOut::ok(u64::from(s1 < uop.imm64())),
+        Op::Xori => ExecOut::ok(s1 ^ uop.imm64()),
+        Op::Ori => ExecOut::ok(s1 | uop.imm64()),
+        Op::Andi | Op::CAndi => ExecOut::ok(s1 & uop.imm64()),
         // RV32I SLLI subsumed by RV64I
         // RV32I SRLI subsumed by RV64I
         // RV32I SRAI subsumed by RV64I
-        Op::Add | Op::CAdd | Op::CMv => Ok((ops.s1.wrapping_add(ops.s2), 0)),
-        Op::Sub | Op::CSub => Ok((ops.s1.wrapping_sub(ops.s2), 0)),
-        Op::Sll => Ok((ops.s1.wrapping_shl(ops.s2 as u32), 0)),
-        Op::Slt => Ok((u64::from((ops.s1 as i64) < ops.s2 as i64), 0)),
-        Op::Sltu => Ok((u64::from(ops.s1 < ops.s2), 0)),
-        Op::Xor | Op::CXor => Ok((ops.s1 ^ ops.s2, 0)),
-        Op::Srl => Ok(((ops.s1.wrapping_shr(ops.s2 as u32)), 0)),
-        Op::Sra => Ok(((ops.s1 as i64).wrapping_shr(ops.s2 as u32) as u64, 0)),
-        Op::Or | Op::COr => Ok((ops.s1 | ops.s2, 0)),
-        Op::And | Op::CAnd => Ok((ops.s1 & ops.s2, 0)),
+        Op::Add | Op::CAdd | Op::CMv => ExecOut::ok(s1.wrapping_add(s2)),
+        Op::Sub | Op::CSub => ExecOut::ok(s1.wrapping_sub(s2)),
+        Op::Sll => ExecOut::ok(s1.wrapping_shl(s2 as u32)),
+        Op::Slt => ExecOut::ok(u64::from((s1 as i64) < s2 as i64)),
+        Op::Sltu => ExecOut::ok(u64::from(s1 < s2)),
+        Op::Xor | Op::CXor => ExecOut::ok(s1 ^ s2),
+        Op::Srl => ExecOut::ok(s1.wrapping_shr(s2 as u32)),
+        Op::Sra => ExecOut::ok((s1 as i64).wrapping_shr(s2 as u32) as u64),
+        Op::Or | Op::COr => ExecOut::ok(s1 | s2),
+        Op::And | Op::CAnd => ExecOut::ok(s1 & s2),
         Op::Fence => {
             if uop.imm == 0x0100000f_u32 as i32 {
                 // PAUSE instruction hint
@@ -1747,678 +1932,627 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
                 log::trace!("pause isn't yet implemented");
             }
             // Fence memory ops (we are currently TSO already)
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::FenceTso => {
             // Fence memory ops (we are currently TSO already)
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
-        Op::Ecall => Err(Exception {
-            trap: match cpu.mmu.prv {
+        Op::Ecall => ExecOut::err(
+            match cpu.mmu.prv {
                 PrivMode::U => Trap::EnvironmentCallFromUMode,
                 PrivMode::S => Trap::EnvironmentCallFromSMode,
                 PrivMode::M => Trap::EnvironmentCallFromMMode,
             },
-            tval: uop.imm64(),
-        }),
-        Op::Ebreak => Err(Exception {
-            trap: Trap::Breakpoint,
-            tval: 0x00100073,
-        }),
+            uop.imm64(),
+        ),
+        Op::Ebreak => ExecOut::err(Trap::Breakpoint, 0x00100073),
         // RV64I
         Op::Lwu => {
-            let v = cpu.memop_read(ops.s1, uop.imm64(), 4)?;
-            Ok((v, 0))
+            let v = etry!(cpu.memop_read(s1, uop.imm64(), 4));
+            ExecOut::ok(v)
         }
         Op::Ld | Op::CLd | Op::CLdsp => {
-            let v = cpu.memop_read(ops.s1, uop.imm64(), 8)?;
-            Ok((v, 0))
+            let v = etry!(cpu.memop_read(s1, uop.imm64(), 8));
+            ExecOut::ok(v)
         }
         Op::Sd | Op::CSd | Op::CSdsp => {
-            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 8)?;
-            Ok((0, 0))
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 8));
+            ExecOut::ok(0)
         }
-        Op::Slli | Op::CSlli => Ok((ops.s1 << uop.imm as u32, 0)),
-        Op::Srli | Op::CSrli => Ok((ops.s1 >> uop.imm as u32, 0)),
-        Op::Srai | Op::CSrai => Ok((((ops.s1 as i64) >> uop.imm as u32) as u64, 0)),
-        Op::Addiw | Op::CAddiw => Ok((sext32(ops.s1.wrapping_add(uop.imm64()) as u32), 0)),
-        Op::Slliw => Ok((((ops.s1 as i32) << (uop.imm & 31) as u32) as u64, 0)),
-        Op::Srliw => Ok((sext32((ops.s1 as u32) >> (uop.imm & 31) as u32), 0)),
-        Op::Sraiw => Ok((((ops.s1 as i32) >> (uop.imm & 31) as u32) as u64, 0)),
-        Op::Addw | Op::CAddw => Ok((sext32(ops.s1.wrapping_add(ops.s2) as u32), 0)),
-        Op::Subw | Op::CSubw => Ok((sext32(ops.s1.wrapping_sub(ops.s2) as u32), 0)),
-        Op::Sllw => Ok((sext32((ops.s1 as u32).wrapping_shl(ops.s2 as u32)), 0)),
-        Op::Srlw => Ok((sext32((ops.s1 as u32).wrapping_shr(ops.s2 as u32)), 0)),
-        Op::Sraw => Ok(((ops.s1 as i32).wrapping_shr(ops.s2 as u32) as u64, 0)),
+        Op::Slli | Op::CSlli => ExecOut::ok(s1 << uop.imm as u32),
+        Op::Srli | Op::CSrli => ExecOut::ok(s1 >> uop.imm as u32),
+        Op::Srai | Op::CSrai => ExecOut::ok(((s1 as i64) >> uop.imm as u32) as u64),
+        Op::Addiw | Op::CAddiw => ExecOut::ok(sext32(s1.wrapping_add(uop.imm64()) as u32)),
+        Op::Slliw => ExecOut::ok(((s1 as i32) << (uop.imm & 31) as u32) as u64),
+        Op::Srliw => ExecOut::ok(sext32((s1 as u32) >> (uop.imm & 31) as u32)),
+        Op::Sraiw => ExecOut::ok(((s1 as i32) >> (uop.imm & 31) as u32) as u64),
+        Op::Addw | Op::CAddw => ExecOut::ok(sext32(s1.wrapping_add(s2) as u32)),
+        Op::Subw | Op::CSubw => ExecOut::ok(sext32(s1.wrapping_sub(s2) as u32)),
+        Op::Sllw => ExecOut::ok(sext32((s1 as u32).wrapping_shl(s2 as u32))),
+        Op::Srlw => ExecOut::ok(sext32((s1 as u32).wrapping_shr(s2 as u32))),
+        Op::Sraw => ExecOut::ok((s1 as i32).wrapping_shr(s2 as u32) as u64),
         // RV32/RV64 Zifencei
         Op::FenceI => {
             cpu.reservation = None;
             cpu.icache_flush = IcacheFlushKind::Full;
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         // RV32/RV64 Zicsr
         Op::Csrrw => {
             let res = if uop.rd.is_x0_dest() {
                 0
             } else {
-                cpu.read_csr(uop.imm as u16)?
+                etry!(cpu.read_csr(uop.imm as u16))
             };
-            cpu.write_csr(uop.imm as u16, ops.s1)?;
+            etry!(cpu.write_csr(uop.imm as u16, s1));
 
-            Ok((res, 0))
+            ExecOut::ok(res)
         }
         Op::Csrrs => {
-            let data = cpu.read_csr(uop.imm as u16)?;
+            let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() != 0 {
-                cpu.write_csr(uop.imm as u16, data | ops.s1)?;
+                etry!(cpu.write_csr(uop.imm as u16, data | s1));
             }
-            Ok((data, 0))
+            ExecOut::ok(data)
         }
         Op::Csrrc => {
-            let data = cpu.read_csr(uop.imm as u16)?;
+            let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() != 0 {
-                cpu.write_csr(uop.imm as u16, data & !ops.s1)?;
+                etry!(cpu.write_csr(uop.imm as u16, data & !s1));
             }
-            Ok((data, 0))
+            ExecOut::ok(data)
         }
         Op::Csrrwi => {
             let res = if uop.rd.is_x0_dest() {
                 0
             } else {
-                cpu.read_csr(uop.imm as u16)?
+                etry!(cpu.read_csr(uop.imm as u16))
             };
-            cpu.write_csr(uop.imm as u16, uop.rs1.get() as u64)?;
+            etry!(cpu.write_csr(uop.imm as u16, uop.rs1.get() as u64));
 
-            Ok((res, 0))
+            ExecOut::ok(res)
         }
         Op::Csrrsi => {
-            let data = cpu.read_csr(uop.imm as u16)?;
+            let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() != 0 {
-                cpu.write_csr(uop.imm as u16, data | uop.rs1.get() as u64)?;
+                etry!(cpu.write_csr(uop.imm as u16, data | uop.rs1.get() as u64));
             }
-            Ok((data, 0))
+            ExecOut::ok(data)
         }
         Op::Csrrci => {
-            let data = cpu.read_csr(uop.imm as u16)?;
+            let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() != 0 {
-                cpu.write_csr(uop.imm as u16, data & !(uop.rs1.get() as u64))?;
+                etry!(cpu.write_csr(uop.imm as u16, data & !(uop.rs1.get() as u64)));
             }
-            Ok((data, 0))
+            ExecOut::ok(data)
         }
         // RV32M
-        Op::Mul => Ok((ops.s1.wrapping_mul(ops.s2), 0)),
-        Op::Mulh => Ok((
-            ((i128::from(ops.s1 as i64) * i128::from(ops.s2 as i64)) >> 64) as u64,
-            0,
-        )),
-        Op::Mulhsu => Ok((
-            ((ops.s1 as i64 as u128).wrapping_mul(u128::from(ops.s2)) >> 64) as u64,
-            0,
-        )),
-        Op::Mulhu => Ok((
-            (u128::from(ops.s1).wrapping_mul(u128::from(ops.s2)) >> 64) as u64,
-            0,
-        )),
-        Op::Div => Ok((
-            if ops.s2 == 0 {
+        Op::Mul => ExecOut::ok(s1.wrapping_mul(s2)),
+        Op::Mulh => ExecOut::ok(((i128::from(s1 as i64) * i128::from(s2 as i64)) >> 64) as u64),
+        Op::Mulhsu => ExecOut::ok(((s1 as i64 as u128).wrapping_mul(u128::from(s2)) >> 64) as u64),
+        Op::Mulhu => ExecOut::ok((u128::from(s1).wrapping_mul(u128::from(s2)) >> 64) as u64),
+        Op::Div => ExecOut::ok(if s2 == 0 {
+            !0
+        } else if s1 as i64 == i64::MIN && s2 as i64 == -1 {
+            s1
+        } else {
+            (s1 as i64).wrapping_div(s2 as i64) as u64
+        }),
+        Op::Divu => ExecOut::ok(if s2 == 0 { !0 } else { s1.wrapping_div(s2) }),
+        Op::Rem => ExecOut::ok(if s2 == 0 {
+            s1
+        } else if s1 as i64 == i64::MIN && s2 as i64 == -1 {
+            0
+        } else {
+            (s1 as i64).wrapping_rem(s2 as i64) as u64
+        }),
+        Op::Remu => ExecOut::ok(match s2 {
+            0 => s1,
+            _ => s1.wrapping_rem(s2),
+        }),
+        // RV64M
+        Op::Mulw => ExecOut::ok((s1 as i32).wrapping_mul(s2 as i32) as u64),
+        Op::Divw => {
+            let (s1, s2) = (s1 as i32, s2 as i32);
+            ExecOut::ok(if s2 == 0 {
                 !0
-            } else if ops.s1 as i64 == i64::MIN && ops.s2 as i64 == -1 {
-                ops.s1
+            } else if s1 == i32::MIN && s2 == -1 {
+                s1 as u64
             } else {
-                (ops.s1 as i64).wrapping_div(ops.s2 as i64) as u64
-            },
-            0,
-        )),
-        Op::Divu => Ok((
-            if ops.s2 == 0 {
-                !0
-            } else {
-                ops.s1.wrapping_div(ops.s2)
-            },
-            0,
-        )),
-        Op::Rem => Ok((
-            if ops.s2 == 0 {
-                ops.s1
-            } else if ops.s1 as i64 == i64::MIN && ops.s2 as i64 == -1 {
+                s1.wrapping_div(s2) as u64
+            })
+        }
+        Op::Divuw => ExecOut::ok(if s2 as u32 == 0 {
+            !0
+        } else {
+            sext32((s1 as u32).wrapping_div(s2 as u32))
+        }),
+        Op::Remw => {
+            let (s1, s2) = (s1 as i32, s2 as i32);
+            ExecOut::ok(if s2 == 0 {
+                s1 as u64
+            } else if s1 == i32::MIN && s2 == -1 {
                 0
             } else {
-                (ops.s1 as i64).wrapping_rem(ops.s2 as i64) as u64
-            },
-            0,
-        )),
-        Op::Remu => Ok((
-            match ops.s2 {
-                0 => ops.s1,
-                _ => ops.s1.wrapping_rem(ops.s2),
-            },
-            0,
-        )),
-        // RV64M
-        Op::Mulw => Ok(((ops.s1 as i32).wrapping_mul(ops.s2 as i32) as u64, 0)),
-        Op::Divw => {
-            let (s1, s2) = (ops.s1 as i32, ops.s2 as i32);
-            Ok((
-                if s2 == 0 {
-                    !0
-                } else if s1 == i32::MIN && s2 == -1 {
-                    s1 as u64
-                } else {
-                    s1.wrapping_div(s2) as u64
-                },
-                0,
-            ))
+                s1.wrapping_rem(s2) as u64
+            })
         }
-        Op::Divuw => Ok((
-            if ops.s2 as u32 == 0 {
-                !0
-            } else {
-                sext32((ops.s1 as u32).wrapping_div(ops.s2 as u32))
-            },
-            0,
-        )),
-        Op::Remw => {
-            let (s1, s2) = (ops.s1 as i32, ops.s2 as i32);
-            Ok((
-                if s2 == 0 {
-                    s1 as u64
-                } else if s1 == i32::MIN && s2 == -1 {
-                    0
-                } else {
-                    s1.wrapping_rem(s2) as u64
-                },
-                0,
-            ))
-        }
-        Op::Remuw => Ok((
-            match ops.s2 as u32 {
-                0 => ops.s1 as i32 as u64,
-                _ => sext32((ops.s1 as u32).wrapping_rem(ops.s2 as u32)),
-            },
-            0,
-        )),
+        Op::Remuw => ExecOut::ok(match s2 as u32 {
+            0 => s1 as i32 as u64,
+            _ => sext32((s1 as u32).wrapping_rem(s2 as u32)),
+        }),
         // RV32A
         Op::LrW => {
-            let data = sext32(cpu.mmu.load_virt_u32(ops.s1)?);
-            let pa = cpu
-                .mmu
-                .translate_address(ops.s1, MemoryAccessType::Read, false)?;
+            let data = sext32(etry!(cpu.mmu.load_virt_u32(s1)));
+            let pa = etry!(cpu.mmu.translate_address(s1, MemoryAccessType::Read, false));
             cpu.reservation = Some(pa);
-            Ok((data, 0))
+            ExecOut::ok(data)
         }
         Op::ScW => {
-            let pa = cpu
-                .mmu
-                .translate_address(ops.s1, MemoryAccessType::Write, false)?;
+            let pa = etry!(
+                cpu.mmu
+                    .translate_address(s1, MemoryAccessType::Write, false)
+            );
             let res = if cpu.reservation == Some(pa) {
-                cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32)?;
+                etry!(cpu.mmu.store_virt_u32(s1, s2 as u32));
                 0
             } else {
                 1
             };
             cpu.reservation = None;
-            Ok((res, 0))
+            ExecOut::ok(res)
         }
         Op::AmoswapW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32)?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, s2 as u32));
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmoaddW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu
-                .store_virt_u32(ops.s1, tmp.wrapping_add(ops.s2 as u32))?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, tmp.wrapping_add(s2 as u32)));
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmoxorW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32 ^ tmp)?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, s2 as u32 ^ tmp));
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmoandW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32 & tmp)?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, s2 as u32 & tmp));
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmoorW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu.store_virt_u32(ops.s1, ops.s2 as u32 | tmp)?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, s2 as u32 | tmp));
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmominW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu
-                .store_virt_u32(ops.s1, (ops.s2 as i32).min(tmp as i32) as u32)?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(
+                cpu.mmu
+                    .store_virt_u32(s1, (s2 as i32).min(tmp as i32) as u32)
+            );
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmomaxW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu
-                .store_virt_u32(ops.s1, (ops.s2 as i32).max(tmp as i32) as u32)?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(
+                cpu.mmu
+                    .store_virt_u32(s1, (s2 as i32).max(tmp as i32) as u32)
+            );
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmominuW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu.store_virt_u32(ops.s1, (ops.s2 as u32).min(tmp))?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, (s2 as u32).min(tmp)));
+            ExecOut::ok(sext32(tmp))
         }
         Op::AmomaxuW => {
-            let tmp = cpu.mmu.load_virt_u32(ops.s1)?;
-            cpu.mmu.store_virt_u32(ops.s1, (ops.s2 as u32).max(tmp))?;
-            Ok((sext32(tmp), 0))
+            let tmp = etry!(cpu.mmu.load_virt_u32(s1));
+            etry!(cpu.mmu.store_virt_u32(s1, (s2 as u32).max(tmp)));
+            ExecOut::ok(sext32(tmp))
         }
         // RV64A
         Op::LrD => {
-            let data = cpu.mmu.load_virt_u64(ops.s1)?;
-            let pa = cpu
-                .mmu
-                .translate_address(ops.s1, MemoryAccessType::Read, false)?;
+            let data = etry!(cpu.mmu.load_virt_u64(s1));
+            let pa = etry!(cpu.mmu.translate_address(s1, MemoryAccessType::Read, false));
             cpu.reservation = Some(pa);
-            Ok((data, 0))
+            ExecOut::ok(data)
         }
         Op::ScD => {
-            let pa = cpu
-                .mmu
-                .translate_address(ops.s1, MemoryAccessType::Write, false)?;
+            let pa = etry!(
+                cpu.mmu
+                    .translate_address(s1, MemoryAccessType::Write, false)
+            );
             let res = if cpu.reservation == Some(pa) {
-                cpu.mmu.store_virt_u64(ops.s1, ops.s2)?;
+                etry!(cpu.mmu.store_virt_u64(s1, s2));
                 0
             } else {
                 1
             };
             cpu.reservation = None;
-            Ok((res, 0))
+            ExecOut::ok(res)
         }
         Op::AmoswapD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, ops.s2)?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, s2));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmoaddD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, tmp.wrapping_add(ops.s2))?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, tmp.wrapping_add(s2)));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmoxorD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, tmp ^ ops.s2)?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, tmp ^ s2));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmoandD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, tmp & ops.s2)?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, tmp & s2));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmoorD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, tmp | ops.s2)?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, tmp | s2));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmominD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu
-                .store_virt_u64(ops.s1, (ops.s2 as i64).min(tmp as i64) as u64)?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(
+                cpu.mmu
+                    .store_virt_u64(s1, (s2 as i64).min(tmp as i64) as u64)
+            );
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmomaxD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu
-                .store_virt_u64(ops.s1, (ops.s2 as i64).max(tmp as i64) as u64)?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(
+                cpu.mmu
+                    .store_virt_u64(s1, (s2 as i64).max(tmp as i64) as u64)
+            );
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmominuD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, ops.s2.min(tmp))?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, s2.min(tmp)));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         Op::AmomaxuD => {
-            let tmp = cpu.mmu.load_virt_u64(ops.s1)?;
-            cpu.mmu.store_virt_u64(ops.s1, ops.s2.max(tmp))?;
+            let tmp = etry!(cpu.mmu.load_virt_u64(s1));
+            etry!(cpu.mmu.store_virt_u64(s1, s2.max(tmp)));
             cpu.reservation = None;
-            Ok((tmp, 0))
+            ExecOut::ok(tmp)
         }
         // RV32F
         Op::Flw => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((cpu.memop_read(ops.s1, uop.imm64(), 4)? | fp::NAN_BOX_F32, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 4)) | fp::NAN_BOX_F32)
         }
         Op::Fsw => {
-            cpu.check_float_access_and_dirty(0)?;
-            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 4)?;
-            Ok((0, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 4));
+            ExecOut::ok(0)
         }
         Op::Flh => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((cpu.memop_read(ops.s1, uop.imm64(), 2)? | fp::NAN_BOX_F16, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2)) | fp::NAN_BOX_F16)
         }
         Op::Fsh => {
-            cpu.check_float_access_and_dirty(0)?;
-            cpu.memop_write(ops.s1, uop.imm64(), ops.s2, 2)?;
-            Ok((0, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 2));
+            ExecOut::ok(0)
         }
         Op::FmaddS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                a.mul_add(b, c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::map3(s1, s2, s3, f32::mul_add))
         }
         Op::FmsubS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                a.mul_add(b, -c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::map3(s1, s2, s3, |a, b, c| a.mul_add(b, -c)))
         }
         Op::FnmsubS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                -a.mul_add(b, -c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, -c)))
         }
         Op::FnmaddS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                -a.mul_add(b, c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, c)))
         }
         Op::FaddS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            //Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a + b))
-            Ok(Sf32::fadd(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            //ExecOut::from_wf(Sf32::map2(s1, s2, |a, b| a + b))
+            ExecOut::from_wf(Sf32::fadd(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FsubS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::fsub(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::fsub(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FmulS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a * b))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::map2(s1, s2, |a, b| a * b))
         }
         Op::FdivS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            if ops.s2 == 0 {
-                Ok((0xffffffff7f800000, DIVIDEZERO)) // INFINITY
-            } else if ops.s2 == 0x8000000000000000 {
-                Ok((0xffffffffff800000, DIVIDEZERO)) // NEG_INFINITY
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            if s2 == 0 {
+                ExecOut::ok_ff(0xffffffff7f800000, DIVIDEZERO) // INFINITY
+            } else if s2 == 0x8000000000000000 {
+                ExecOut::ok_ff(0xffffffffff800000, DIVIDEZERO) // NEG_INFINITY
             } else {
-                Ok(Sf32::map2(ops.s1, ops.s2, |a, b| a / b))
+                ExecOut::from_wf(Sf32::map2(s1, s2, |a, b| a / b))
             }
         }
         Op::FsqrtS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf32::map1(ops.s1, f32::sqrt))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf32::map1(s1, f32::sqrt))
         }
         Op::FsgnjS => {
-            cpu.check_float_access_and_dirty(0)?;
-            let rs1_bits = Sf32::unbox(ops.s1);
-            let rs2_bits = Sf32::unbox(ops.s2);
+            etry!(cpu.check_float_access_and_dirty(0));
+            let rs1_bits = Sf32::unbox(s1);
+            let rs2_bits = Sf32::unbox(s2);
             let sign_bit = rs2_bits & 0x80000000;
-            Ok((fp::NAN_BOX_F32 | sign_bit | rs1_bits & 0x7fffffff, 0))
+            ExecOut::ok(fp::NAN_BOX_F32 | sign_bit | rs1_bits & 0x7fffffff)
         }
         Op::FsgnjnS => {
-            cpu.check_float_access_and_dirty(0)?;
-            let rs1_bits = Sf32::unbox(ops.s1);
-            let rs2_bits = Sf32::unbox(ops.s2);
+            etry!(cpu.check_float_access_and_dirty(0));
+            let rs1_bits = Sf32::unbox(s1);
+            let rs2_bits = Sf32::unbox(s2);
             let sign_bit = !rs2_bits & 0x80000000;
-            Ok((fp::NAN_BOX_F32 | sign_bit | rs1_bits & 0x7fffffff, 0))
+            ExecOut::ok(fp::NAN_BOX_F32 | sign_bit | rs1_bits & 0x7fffffff)
         }
         Op::FsgnjxS => {
-            cpu.check_float_access_and_dirty(0)?;
-            let rs1_bits = Sf32::unbox(ops.s1);
-            let rs2_bits = Sf32::unbox(ops.s2);
+            etry!(cpu.check_float_access_and_dirty(0));
+            let rs1_bits = Sf32::unbox(s1);
+            let rs2_bits = Sf32::unbox(s2);
             let sign_bit = rs2_bits & 0x80000000;
-            Ok((fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits), 0))
+            ExecOut::ok(fp::NAN_BOX_F32 | (sign_bit ^ rs1_bits))
         }
         Op::FminS => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf32::min(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf32::min(s1, s2))
         }
         Op::FmaxS => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf32::max(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf32::max(s1, s2))
         }
         Op::FcvtWS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok((Sf32::to_float(ops.s1) as i32 as u64, 0))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::ok(Sf32::to_float(s1) as i32 as u64)
         }
         Op::FcvtWuS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok((u64::from(Sf32::to_float(ops.s1) as u32), 0))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::ok(u64::from(Sf32::to_float(s1) as u32))
         }
         Op::FmvXW => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((ops.s1 as i32 as u64, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(s1 as i32 as u64)
         }
         Op::FmvXH => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((Sf16::unbox(ops.s1) as i16 as u64, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(Sf16::unbox(s1) as i16 as u64)
         }
         Op::FeqS => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf32::feq(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf32::feq(s1, s2))
         }
         Op::FltS => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf32::flt(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf32::flt(s1, s2))
         }
         Op::FleS => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf32::fle(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf32::fle(s1, s2))
         }
         Op::FclassS => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((1 << Sf32::fclass(ops.s1) as usize, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(1 << Sf32::fclass(s1) as usize)
         }
         Op::FcvtSW => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(cvt_i32_sf32(ops.s1, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(cvt_i32_sf32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtSWu => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(cvt_u32_sf32(ops.s1, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(cvt_u32_sf32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvWX => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok((fp::NAN_BOX_F32 | ops.s1, 0))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::ok(fp::NAN_BOX_F32 | s1)
         }
         Op::FmvHX => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((fp::NAN_BOX_F16 | (ops.s1 & 0xFFFF), 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(fp::NAN_BOX_F16 | (s1 & 0xFFFF))
         }
         // RV64F
         Op::FcvtLS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok((Sf32::to_float(ops.s1) as i64 as u64, 0))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::ok(Sf32::to_float(s1) as i64 as u64)
         }
         Op::FcvtLuS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok((Sf32::to_float(ops.s1) as u64, 0))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::ok(Sf32::to_float(s1) as u64)
         }
         Op::FcvtSL => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(cvt_i64_sf32(ops.s1, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(cvt_i64_sf32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtSLu => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(cvt_u64_sf32(ops.s1, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(cvt_u64_sf32(s1, cpu.get_rm(uop.rm)))
         }
         // RV32D
         Op::Fld | Op::CFld | Op::CFldsp => {
-            cpu.check_float_access_and_dirty(0)?;
-            let v = cpu.memop_read(ops.s1, uop.imm64(), 8)?;
-            Ok((v, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            let v = etry!(cpu.memop_read(s1, uop.imm64(), 8));
+            ExecOut::ok(v)
         }
         Op::Fsd | Op::CFsd | Op::CFsdsp => {
-            cpu.check_float_access_and_dirty(0)?;
-            cpu.mmu.store64(ops.s1.wrapping_add(uop.imm64()), ops.s2)?;
-            Ok((0, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            etry!(cpu.mmu.store64(s1.wrapping_add(uop.imm64()), s2));
+            ExecOut::ok(0)
         }
         Op::FmaddD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                a.mul_add(b, c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::map3(s1, s2, s3, f64::mul_add))
         }
         Op::FmsubD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                a.mul_add(b, -c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::map3(s1, s2, s3, |a, b, c| a.mul_add(b, -c)))
         }
         Op::FnmsubD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                -a.mul_add(b, -c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, -c)))
         }
         Op::FnmaddD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::map3(ops.s1, ops.s2, ops.s3, |a, b, c| {
-                -a.mul_add(b, c)
-            }))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, c)))
         }
         Op::FaddD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::fadd(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::fadd(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FsubD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::fsub(ops.s1, ops.s2, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::fsub(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FmulD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::map2(ops.s1, ops.s2, |a, b| a * b))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::map2(s1, s2, |a, b| a * b))
         }
         Op::FdivD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            if ops.s2 == 0 {
-                Ok((f64::INFINITY as u64, DIVIDEZERO)) // XXX??
-            } else if ops.s2 == 0x8000000000000000 {
-                Ok((f64::NEG_INFINITY as u64, DIVIDEZERO)) // XXX??
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            if s2 == 0 {
+                ExecOut::ok_ff(f64::INFINITY as u64, DIVIDEZERO) // XXX??
+            } else if s2 == 0x8000000000000000 {
+                ExecOut::ok_ff(f64::NEG_INFINITY as u64, DIVIDEZERO) // XXX??
             } else {
-                Ok(Sf64::map2(ops.s1, ops.s2, |a, b| a / b))
+                ExecOut::from_wf(Sf64::map2(s1, s2, |a, b| a / b))
             }
         }
         Op::FsqrtD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(Sf64::map1(ops.s1, f64::sqrt))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(Sf64::map1(s1, f64::sqrt))
         }
         Op::FsgnjD => {
-            cpu.check_float_access_and_dirty(0)?;
-            let rs1_bits = ops.s1;
-            let rs2_bits = ops.s2;
+            etry!(cpu.check_float_access_and_dirty(0));
+            let rs1_bits = s1;
+            let rs2_bits = s2;
             let sign_bit = rs2_bits & 0x8000000000000000;
-            Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
+            ExecOut::ok(sign_bit | (rs1_bits & 0x7fffffffffffffff))
         }
         Op::FsgnjnD => {
-            cpu.check_float_access_and_dirty(0)?;
-            let rs1_bits = ops.s1;
-            let rs2_bits = ops.s2;
+            etry!(cpu.check_float_access_and_dirty(0));
+            let rs1_bits = s1;
+            let rs2_bits = s2;
             let sign_bit = !rs2_bits & 0x8000000000000000;
-            Ok((sign_bit | (rs1_bits & 0x7fffffffffffffff), 0))
+            ExecOut::ok(sign_bit | (rs1_bits & 0x7fffffffffffffff))
         }
         Op::FsgnjxD => {
-            cpu.check_float_access_and_dirty(0)?;
-            let rs1_bits = ops.s1;
-            let rs2_bits = ops.s2;
+            etry!(cpu.check_float_access_and_dirty(0));
+            let rs1_bits = s1;
+            let rs2_bits = s2;
             let sign_bit = rs2_bits & 0x8000000000000000;
-            Ok((sign_bit ^ rs1_bits, 0))
+            ExecOut::ok(sign_bit ^ rs1_bits)
         }
         Op::FminD => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf64::min(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf64::min(s1, s2))
         }
         Op::FmaxD => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf64::max(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf64::max(s1, s2))
         }
         Op::FcvtSD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(with_fflags(Sf32::from_float(Sf64::to_float(ops.s1) as f32)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(with_fflags(Sf32::from_float(Sf64::to_float(s1) as f32)))
         }
         Op::FcvtDS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(fp::fcvt_d_s(ops.s1))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fp::fcvt_d_s(s1))
         }
         Op::FcvtSH => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(fp::fcvt_s_h(ops.s1))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fp::fcvt_s_h(s1))
         }
         Op::FcvtHS => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(fp::fcvt_h_s(ops.s1, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fp::fcvt_h_s(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtDH => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(fp::fcvt_d_h(ops.s1))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fp::fcvt_d_h(s1))
         }
         Op::FcvtHD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(fp::fcvt_h_d(ops.s1, cpu.get_rm(uop.rm)))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fp::fcvt_h_d(s1, cpu.get_rm(uop.rm)))
         }
         Op::FeqD => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf64::feq(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf64::feq(s1, s2))
         }
         Op::FltD => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf64::flt(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf64::flt(s1, s2))
         }
         Op::FleD => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok(Sf64::fle(ops.s1, ops.s2))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(Sf64::fle(s1, s2))
         }
         Op::FclassD => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((1 << Sf64::fclass(ops.s1) as usize, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(1 << Sf64::fclass(s1) as usize)
         }
         Op::FcvtWD | Op::FcvtWuD => {
             // XXX They are not the same
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(with_fflags(Sf64::to_float(ops.s1) as i32 as u64))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(with_fflags(Sf64::to_float(s1) as i32 as u64))
         }
         Op::FcvtDW => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(with_fflags(Sf64::from_float(f64::from(ops.s1 as i32))))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(with_fflags(Sf64::from_float(f64::from(s1 as i32))))
         }
         Op::FcvtDWu => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(with_fflags(Sf64::from_float(f64::from(ops.s1 as u32))))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(with_fflags(Sf64::from_float(f64::from(s1 as u32))))
         }
         // RV64D
         Op::FcvtLD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(with_fflags(Sf64::to_float(ops.s1) as i64 as u64))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(with_fflags(Sf64::to_float(s1) as i64 as u64))
         }
         Op::FcvtLuD => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
-            Ok(with_fflags(Sf64::to_float(ops.s1) as u64))
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(with_fflags(Sf64::to_float(s1) as u64))
         }
         Op::FmvXD | Op::FmvDX => {
-            cpu.check_float_access_and_dirty(0)?;
-            Ok((ops.s1, 0))
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(s1)
         }
         Op::FcvtDL => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
             #[allow(clippy::cast_precision_loss)]
-            Ok(with_fflags(Sf64::from_float(ops.s1 as i64 as f64)))
+            ExecOut::from_wf(with_fflags(Sf64::from_float(s1 as i64 as f64)))
         }
         Op::FcvtDLu => {
-            cpu.check_float_access_and_dirty(uop.rm)?;
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
             #[allow(clippy::cast_precision_loss)]
-            Ok(with_fflags(Sf64::from_float(ops.s1 as f64)))
+            ExecOut::from_wf(with_fflags(Sf64::from_float(s1 as f64)))
         }
         // Remaining (all system-level) that weren't listed in the instr-table
         Op::Dret => todo!("Handling dret requires handling all of debug mode"),
         Op::Mret => {
-            cpu.pc = cpu.read_csr(Csr::Mepc as u16)?;
+            cpu.pc = etry!(cpu.read_csr(Csr::Mepc as u16));
             let status = cpu.read_csr_raw(Csr::Mstatus);
 
             let mpie = (status >> 7) & 1;
@@ -2433,19 +2567,16 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
             cpu.handle_interrupt();
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Sret => {
             if cpu.mmu.prv == PrivMode::U
                 || cpu.mmu.prv == PrivMode::S && cpu.mmu.mstatus & MSTATUS_TSR != 0
             {
-                return Err(Exception {
-                    trap: Trap::IllegalInstruction,
-                    tval: 0,
-                });
+                return ExecOut::err(Trap::IllegalInstruction, 0);
             }
 
-            cpu.pc = cpu.read_csr(Csr::Sepc as u16)?;
+            cpu.pc = etry!(cpu.read_csr(Csr::Sepc as u16));
             let status = cpu.read_csr_raw(Csr::Sstatus);
             let spie = (status >> 5) & 1;
             let spp = (status >> 8) & 1;
@@ -2459,16 +2590,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
             cpu.handle_interrupt();
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::SfenceVma | Op::SinvalVma => {
             if cpu.mmu.prv == PrivMode::U
                 || cpu.mmu.prv == PrivMode::S && cpu.mmu.mstatus & MSTATUS_TVM != 0
             {
-                return Err(Exception {
-                    trap: Trap::IllegalInstruction,
-                    tval: 0,
-                });
+                return ExecOut::err(Trap::IllegalInstruction, 0);
             }
 
             let rs1_val = cpu.read_x(uop.rs1);
@@ -2489,7 +2617,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
                 (false, true) => IcacheFlushKind::Asid(rs2_val as u16),
                 (true, true) => IcacheFlushKind::VpageAsid(rs1_val, rs2_val as u16),
             };
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         Op::Wfi => {
             /*
@@ -2501,117 +2629,102 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, ops: &Operands, insn_addr: u64) -> Exec
             if cpu.mmu.prv == PrivMode::U
                 || cpu.mmu.prv == PrivMode::S && cpu.mmu.mstatus & MSTATUS_TW != 0
             {
-                return Err(Exception {
-                    trap: Trap::IllegalInstruction,
-                    tval: 0,
-                });
+                return ExecOut::err(Trap::IllegalInstruction, 0);
             }
             cpu.wfi = true;
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         // Zba -- AKA, my only favorite extension
-        Op::AddUw => Ok((ops.s2.wrapping_add(ops.s1 & 0xffffffff), 0)),
-        Op::Sh1add => Ok((ops.s2.wrapping_add(ops.s1 << 1), 0)),
-        Op::Sh1addUw => Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 1), 0)),
-        Op::Sh2add => Ok((ops.s2.wrapping_add(ops.s1 << 2), 0)),
-        Op::Sh2addUw => Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 2), 0)),
-        Op::Sh3add => Ok((ops.s2.wrapping_add(ops.s1 << 3), 0)),
-        Op::Sh3addUw => Ok((ops.s2.wrapping_add((ops.s1 & 0xffffffff) << 3), 0)),
-        Op::SlliUw => Ok(((ops.s1 & 0xffffffff) << uop.imm as u32, 0)),
+        Op::AddUw => ExecOut::ok(s2.wrapping_add(s1 & 0xffffffff)),
+        Op::Sh1add => ExecOut::ok(s2.wrapping_add(s1 << 1)),
+        Op::Sh1addUw => ExecOut::ok(s2.wrapping_add((s1 & 0xffffffff) << 1)),
+        Op::Sh2add => ExecOut::ok(s2.wrapping_add(s1 << 2)),
+        Op::Sh2addUw => ExecOut::ok(s2.wrapping_add((s1 & 0xffffffff) << 2)),
+        Op::Sh3add => ExecOut::ok(s2.wrapping_add(s1 << 3)),
+        Op::Sh3addUw => ExecOut::ok(s2.wrapping_add((s1 & 0xffffffff) << 3)),
+        Op::SlliUw => ExecOut::ok((s1 & 0xffffffff) << uop.imm as u32),
         // Zicond extension
-        Op::CzeroEqz => Ok((if ops.s2 == 0 { 0 } else { ops.s1 }, 0)),
-        Op::CzeroNez => Ok((if ops.s2 != 0 { 0 } else { ops.s1 }, 0)),
+        Op::CzeroEqz => ExecOut::ok(if s2 == 0 { 0 } else { s1 }),
+        Op::CzeroNez => ExecOut::ok(if s2 != 0 { 0 } else { s1 }),
         // Zbb — base integer bit manipulation
-        Op::Andn => Ok((ops.s1 & !ops.s2, 0)),
-        Op::Orn => Ok((ops.s1 | !ops.s2, 0)),
-        Op::Xnor => Ok((!ops.s1 ^ ops.s2, 0)),
-        Op::Clz => Ok((ops.s1.leading_zeros() as u64, 0)),
-        Op::Clzw => Ok(((ops.s1 as u32).leading_zeros() as u64, 0)),
-        Op::Ctz => Ok((ops.s1.trailing_zeros() as u64, 0)),
-        Op::Ctzw => Ok(((ops.s1 as u32).trailing_zeros() as u64, 0)),
-        Op::Cpop => Ok((ops.s1.count_ones() as u64, 0)),
-        Op::Cpopw => Ok(((ops.s1 as u32).count_ones() as u64, 0)),
-        Op::Max => Ok(((ops.s1 as i64).max(ops.s2 as i64) as u64, 0)),
-        Op::Maxu => Ok((ops.s1.max(ops.s2), 0)),
-        Op::Min => Ok(((ops.s1 as i64).min(ops.s2 as i64) as u64, 0)),
-        Op::Minu => Ok((ops.s1.min(ops.s2), 0)),
+        Op::Andn => ExecOut::ok(s1 & !s2),
+        Op::Orn => ExecOut::ok(s1 | !s2),
+        Op::Xnor => ExecOut::ok(!s1 ^ s2),
+        Op::Clz => ExecOut::ok(s1.leading_zeros() as u64),
+        Op::Clzw => ExecOut::ok((s1 as u32).leading_zeros() as u64),
+        Op::Ctz => ExecOut::ok(s1.trailing_zeros() as u64),
+        Op::Ctzw => ExecOut::ok((s1 as u32).trailing_zeros() as u64),
+        Op::Cpop => ExecOut::ok(s1.count_ones() as u64),
+        Op::Cpopw => ExecOut::ok((s1 as u32).count_ones() as u64),
+        Op::Max => ExecOut::ok((s1 as i64).max(s2 as i64) as u64),
+        Op::Maxu => ExecOut::ok(s1.max(s2)),
+        Op::Min => ExecOut::ok((s1 as i64).min(s2 as i64) as u64),
+        Op::Minu => ExecOut::ok(s1.min(s2)),
         Op::OrcB => {
             let mut r = 0;
             for i in 0..8 {
-                if ops.s1 >> (i * 8) & 0xff != 0 {
+                if s1 >> (i * 8) & 0xff != 0 {
                     r |= 0xff << (i * 8);
                 }
             }
-            Ok((r, 0))
+            ExecOut::ok(r)
         }
-        Op::Rev8 => Ok((ops.s1.swap_bytes(), 0)),
-        Op::Rol => Ok((ops.s1.rotate_left((ops.s2 & 63) as u32), 0)),
-        Op::Rolw => Ok((
-            (ops.s1 as u32).rotate_left((ops.s2 & 31) as u32) as i32 as u64,
-            0,
-        )),
-        Op::Ror => Ok((ops.s1.rotate_right((ops.s2 & 63) as u32), 0)),
-        Op::Rori => Ok((ops.s1.rotate_right((uop.imm & 63) as u32), 0)),
-        Op::Roriw => Ok((
-            (ops.s1 as u32).rotate_right((uop.imm & 31) as u32) as i32 as u64,
-            0,
-        )),
-        Op::Rorw => Ok((
-            (ops.s1 as u32).rotate_right((ops.s2 & 31) as u32) as i32 as u64,
-            0,
-        )),
-        Op::SextB => Ok((ops.s1 as i8 as i64 as u64, 0)),
-        Op::SextH => Ok((ops.s1 as i16 as i64 as u64, 0)),
-        Op::ZextH => Ok((ops.s1 & 0xffff, 0)),
+        Op::Rev8 => ExecOut::ok(s1.swap_bytes()),
+        Op::Rol => ExecOut::ok(s1.rotate_left((s2 & 63) as u32)),
+        Op::Rolw => ExecOut::ok((s1 as u32).rotate_left((s2 & 31) as u32) as i32 as u64),
+        Op::Ror => ExecOut::ok(s1.rotate_right((s2 & 63) as u32)),
+        Op::Rori => ExecOut::ok(s1.rotate_right((uop.imm & 63) as u32)),
+        Op::Roriw => ExecOut::ok((s1 as u32).rotate_right((uop.imm & 31) as u32) as i32 as u64),
+        Op::Rorw => ExecOut::ok((s1 as u32).rotate_right((s2 & 31) as u32) as i32 as u64),
+        Op::SextB => ExecOut::ok(s1 as i8 as i64 as u64),
+        Op::SextH => ExecOut::ok(s1 as i16 as i64 as u64),
+        Op::ZextH => ExecOut::ok(s1 & 0xffff),
         // Zbs — single-bit instructions
-        Op::Bclr => Ok((ops.s1 & !(1 << (ops.s2 & 63)), 0)),
-        Op::Bclri => Ok((ops.s1 & !(1u64 << (uop.imm & 63) as u32), 0)),
-        Op::Bext => Ok(((ops.s1 >> (ops.s2 & 63)) & 1, 0)),
-        Op::Bexti => Ok(((ops.s1 >> (uop.imm & 63) as u32) & 1, 0)),
-        Op::Binv => Ok((ops.s1 ^ (1 << (ops.s2 & 63)), 0)),
-        Op::Binvi => Ok((ops.s1 ^ (1u64 << (uop.imm & 63) as u32), 0)),
-        Op::Bset => Ok((ops.s1 | (1 << (ops.s2 & 63)), 0)),
-        Op::Bseti => Ok((ops.s1 | (1u64 << (uop.imm & 63) as u32), 0)),
+        Op::Bclr => ExecOut::ok(s1 & !(1 << (s2 & 63))),
+        Op::Bclri => ExecOut::ok(s1 & !(1u64 << (uop.imm & 63) as u32)),
+        Op::Bext => ExecOut::ok((s1 >> (s2 & 63)) & 1),
+        Op::Bexti => ExecOut::ok((s1 >> (uop.imm & 63) as u32) & 1),
+        Op::Binv => ExecOut::ok(s1 ^ (1 << (s2 & 63))),
+        Op::Binvi => ExecOut::ok(s1 ^ (1u64 << (uop.imm & 63) as u32)),
+        Op::Bset => ExecOut::ok(s1 | (1 << (s2 & 63))),
+        Op::Bseti => ExecOut::ok(s1 | (1u64 << (uop.imm & 63) as u32)),
         Op::Clmul => {
             let mut r = 0;
             for i in 0..64 {
-                if (ops.s2 >> i) & 1 == 1 {
-                    r ^= ops.s1 << i;
+                if (s2 >> i) & 1 == 1 {
+                    r ^= s1 << i;
                 }
             }
-            Ok((r, 0))
+            ExecOut::ok(r)
         }
         Op::Clmulh => {
             let mut r = 0;
             for i in 1..64 {
-                if (ops.s2 >> i) & 1 == 1 {
-                    r ^= ops.s1 >> (64 - i);
+                if (s2 >> i) & 1 == 1 {
+                    r ^= s1 >> (64 - i);
                 }
             }
-            Ok((r, 0))
+            ExecOut::ok(r)
         }
         Op::Clmulr => {
             let mut r = 0;
             for i in 0..64 {
-                if (ops.s2 >> i) & 1 == 1 {
-                    r ^= ops.s1 >> (63 - i);
+                if (s2 >> i) & 1 == 1 {
+                    r ^= s1 >> (63 - i);
                 }
             }
-            Ok((r, 0))
+            ExecOut::ok(r)
         }
         // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
         Op::CboZero => {
-            let base = ops.s1 & !63;
+            let base = s1 & !63;
             for i in 0..8u64 {
-                cpu.memop_write(base, i * 8, 0, 8)?;
+                etry!(cpu.memop_write(base, i * 8, 0, 8));
             }
-            Ok((0, 0))
+            ExecOut::ok(0)
         }
         // End is the sentinel for unrecognised 32-bit instructions; CUnimp for compressed.
-        Op::End | Op::Unimp | Op::CUnimp => Err(Exception {
-            trap: Trap::IllegalInstruction,
-            tval: 0,
-        }),
+        Op::End | Op::Unimp | Op::CUnimp => ExecOut::err(Trap::IllegalInstruction, 0),
     }
 }
 
