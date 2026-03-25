@@ -99,7 +99,7 @@ pub struct DataAddr {
     pub mem_idx: u8,
     /// Byte offset of the start of the virtual page within
     /// `Mmu::memory[mem_idx].1`.  Only valid when `mem_idx != NO_RAM`.
-    pub page_byte_offset: u32,
+    pub page_byte_offset: u64,
 }
 
 impl DataAddr {
@@ -760,10 +760,10 @@ impl Mmu {
     /// region.start`, i.e. the byte offset of the start of the containing
     /// page within the region's backing `Vec<u8>`.
     #[allow(clippy::cast_possible_truncation)]
-    fn find_ram_for_pa(&self, pa: u64) -> Option<(u8, u32)> {
+    fn find_ram_for_pa(&self, pa: u64) -> Option<(u8, u64)> {
         for (i, (range, _)) in self.memory.iter().enumerate() {
             if range.contains(&pa) {
-                let page_byte_offset = (pa - range.start) as u32 & !0xfff;
+                let page_byte_offset = (pa - range.start) & !0xfff;
                 return Some((i as u8, page_byte_offset));
             }
         }
@@ -895,9 +895,8 @@ impl Mmu {
             let mxr = self.mstatus & MSTATUS_MXR != 0;
             if check_perm(perm, access_shift, prv_is_user, sum, mxr) {
                 // Reconstruct pa for the paranoid check and for callers that only need pa.
-                let pa = self.memory[mem_idx as usize].0.start
-                    + u64::from(page_byte_offset)
-                    + (address & 0xfff);
+                let pa =
+                    self.memory[mem_idx as usize].0.start + page_byte_offset + (address & 0xfff);
                 if cfg!(feature = "paranoid-tlb") {
                     let slow = self.translate_address_slow(address, access_type, true);
                     match slow {

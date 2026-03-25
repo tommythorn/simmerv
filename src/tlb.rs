@@ -27,7 +27,7 @@ pub struct Tlb<const SETS: usize> {
 pub struct DTlb<const SETS: usize> {
     vpage: [u32; SETS],
     mem_idx: [u8; SETS],
-    page_byte_offset: [u32; SETS],
+    page_byte_offset: [u64; SETS],
     perm: [u16; SETS],
     pub misses: u64,
 }
@@ -170,7 +170,7 @@ impl<const SETS: usize> DTlb<SETS> {
         Self {
             vpage: [INVALID_VPAGE; SETS],
             mem_idx: [0; SETS],
-            page_byte_offset: [0; SETS],
+            page_byte_offset: [0u64; SETS],
             perm: [INVALID_PERM; SETS],
             misses: 0,
         }
@@ -180,7 +180,7 @@ impl<const SETS: usize> DTlb<SETS> {
     /// perm)` on hit.
     #[must_use]
     #[inline(always)]
-    pub const fn lookup(&self, vpage: u32, asid: u16) -> Option<(u8, u32, u16)> {
+    pub const fn lookup(&self, vpage: u32, asid: u16) -> Option<(u8, u64, u16)> {
         let idx = vpage as usize & (SETS - 1);
         if self.vpage[idx] == vpage {
             let p = self.perm[idx];
@@ -198,7 +198,7 @@ impl<const SETS: usize> DTlb<SETS> {
         &mut self,
         vpage: u32,
         mem_idx: u8,
-        page_byte_offset: u32,
+        page_byte_offset: u64,
         perm: u16,
         _asid: u16,
     ) {
