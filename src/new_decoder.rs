@@ -860,9 +860,11 @@ impl RiscvDecoder for Decoder {
         decode_r_fff(a, insn, Op::FcvtHD)
     }
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        log::warn!("Unknown instruction: {a:016x} {insn:08x} -> unimp");
         decode_exceptional(a, insn, Op::Unimp)
     }
     fn end(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
+        log::warn!("Unknown instruction: {a:016x} {insn:08x} -> end");
         decode_exceptional(a, insn, Op::End)
     }
 }
