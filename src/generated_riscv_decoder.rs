@@ -9,6 +9,32 @@ use crate::riscv_decoding::RiscvDecoder;
 )]
 pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: &mut C) -> R {
     match (w >> 5 & 0x780) + (w & 0x7f) {
+        7 | 11 | 31 | 39 | 43 | 47 | 63 | 87 | 91 | 95 | 107 | 119 | 123 | 127 | 139 | 159
+        | 171 | 175 | 191 | 215 | 219 | 223 | 231 | 235 | 247 | 251 | 255 | 267 | 283 | 287
+        | 299 | 319 | 343 | 347 | 351 | 355 | 359 | 363 | 375 | 379 | 383 | 395 | 399 | 411
+        | 415 | 427 | 443 | 447 | 471 | 475 | 479 | 483 | 487 | 491 | 503 | 507 | 511 | 519
+        | 523 | 527 | 539 | 543 | 547 | 551 | 555 | 559 | 575 | 599 | 603 | 607 | 615 | 619
+        | 627 | 631 | 635 | 639 | 647 | 651 | 655 | 671 | 675 | 679 | 683 | 687 | 703 | 727
+        | 731 | 735 | 743 | 747 | 759 | 763 | 767 | 775 | 779 | 783 | 795 | 799 | 803 | 807
+        | 811 | 815 | 831 | 855 | 859 | 863 | 871 | 875 | 887 | 891 | 895 | 899 | 903 | 907
+        | 911 | 923 | 927 | 931 | 935 | 939 | 943 | 959 | 983 | 987 | 991 | 999 | 1003 | 1015
+        | 1019 | 1023 | 1024 | 1028 | 1031 | 1032 | 1035 | 1036 | 1040 | 1044 | 1048 | 1052
+        | 1055 | 1056 | 1060 | 1063 | 1064 | 1067 | 1068 | 1071 | 1072 | 1076 | 1080 | 1084
+        | 1087 | 1088 | 1092 | 1096 | 1100 | 1104 | 1108 | 1111 | 1112 | 1115 | 1116 | 1119
+        | 1120 | 1124 | 1128 | 1131 | 1132 | 1136 | 1140 | 1143 | 1144 | 1147 | 1148 | 1151
+        | 1152 | 1156 | 1160 | 1163 | 1164 | 1167 | 1168 | 1172 | 1176 | 1180 | 1183 | 1184
+        | 1188 | 1192 | 1195 | 1196 | 1199 | 1200 | 1204 | 1208 | 1212 | 1215 | 1216 | 1220
+        | 1224 | 1228 | 1232 | 1236 | 1239 | 1240 | 1243 | 1244 | 1247 | 1248 | 1252 | 1255
+        | 1256 | 1259 | 1260 | 1264 | 1268 | 1271 | 1272 | 1275 | 1276 | 1279 | 1291 | 1307
+        | 1311 | 1323 | 1343 | 1367 | 1371 | 1375 | 1379 | 1383 | 1387 | 1399 | 1403 | 1407
+        | 1419 | 1423 | 1435 | 1439 | 1451 | 1467 | 1471 | 1495 | 1499 | 1503 | 1507 | 1511
+        | 1515 | 1527 | 1531 | 1535 | 1543 | 1547 | 1551 | 1563 | 1567 | 1571 | 1575 | 1579
+        | 1583 | 1599 | 1623 | 1627 | 1631 | 1639 | 1643 | 1651 | 1655 | 1659 | 1663 | 1671
+        | 1675 | 1679 | 1695 | 1699 | 1703 | 1707 | 1711 | 1727 | 1751 | 1755 | 1759 | 1767
+        | 1771 | 1783 | 1787 | 1791 | 1799 | 1803 | 1807 | 1819 | 1823 | 1827 | 1831 | 1835
+        | 1839 | 1855 | 1879 | 1883 | 1887 | 1895 | 1899 | 1911 | 1915 | 1919 | 1923 | 1927
+        | 1931 | 1935 | 1947 | 1951 | 1955 | 1959 | 1963 | 1967 | 1983 | 2007 | 2011 | 2015
+        | 2023 | 2027 | 2039 | 2043 | 2047 => C::unimp(a, w, c),
         0 => {
             if (w >> 7) & 0x1f == 0x0 {
                 C::c_unimp(a, w, c)
@@ -87,6 +113,18 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::c_lui(a, w, c)
             }
         }
+        1217 | 1221 | 1225 | 1229 | 1233 | 1237 | 1241 | 1245 | 1249 | 1253 | 1257 | 1261
+        | 1265 | 1269 | 1273 | 1277 => {
+            if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
         1025 | 1029 | 1033 | 1037 | 1041 | 1045 | 1049 | 1053 => {
             if (w >> 10) & 0x3 == 0x3 {
                 C::c_sub(a, w, c)
@@ -97,7 +135,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 10) & 0x3 == 0x2 {
                 C::c_andi(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         1057 | 1061 | 1065 | 1069 | 1073 | 1077 | 1081 | 1085 => {
@@ -110,7 +148,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 10) & 0x3 == 0x2 {
                 C::c_andi(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         1089 | 1093 | 1097 | 1101 | 1105 | 1109 | 1113 | 1117 => {
@@ -123,7 +161,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 10) & 0x3 == 0x2 {
                 C::c_andi(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         1121 | 1125 | 1129 | 1133 | 1137 | 1141 | 1145 | 1149 => {
@@ -136,7 +174,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 10) & 0x3 == 0x2 {
                 C::c_andi(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         1153 | 1157 | 1161 | 1165 | 1169 | 1173 | 1177 | 1181 => {
@@ -149,7 +187,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 10) & 0x3 == 0x2 {
                 C::c_andi(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         1185 | 1189 | 1193 | 1197 | 1201 | 1205 | 1209 | 1213 => {
@@ -162,19 +200,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 10) & 0x3 == 0x2 {
                 C::c_andi(a, w, c)
             } else {
-                C::end(a, w, c)
-            }
-        }
-        1217 | 1221 | 1225 | 1229 | 1233 | 1237 | 1241 | 1245 | 1249 | 1253 | 1257 | 1261
-        | 1265 | 1269 | 1273 | 1277 => {
-            if (w >> 10) & 0x3 == 0x0 {
-                C::c_srli(a, w, c)
-            } else if (w >> 10) & 0x3 == 0x1 {
-                C::c_srai(a, w, c)
-            } else if (w >> 10) & 0x3 == 0x2 {
-                C::c_andi(a, w, c)
-            } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         1281 | 1285 | 1289 | 1293 | 1297 | 1301 | 1305 | 1309 | 1313 | 1317 | 1321 | 1325
@@ -292,7 +318,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x20 {
                 C::sub(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         179 | 1203 => {
@@ -311,7 +337,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x34 {
                 C::binv(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         307 | 1331 => {
@@ -324,7 +350,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x10 {
                 C::sh1add(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         435 | 1459 => {
@@ -335,7 +361,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x5 {
                 C::clmulh(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         563 | 1587 => {
@@ -350,7 +376,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x20 {
                 C::xnor(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         691 | 1715 => {
@@ -369,7 +395,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x30 {
                 C::ror(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         819 | 1843 => {
@@ -384,7 +410,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x20 {
                 C::orn(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         947 | 1971 => {
@@ -399,7 +425,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x20 {
                 C::andn(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         15 | 1039 => {
@@ -408,7 +434,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 28) == 0x8 {
                 C::fence_tso(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         115 => {
@@ -433,7 +459,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 7) & 0xfffc001f == 0x2c0000 {
                 C::sinval_vma(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         771 | 1795 => C::lwu(a, w, c),
@@ -459,7 +485,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffc0 == 0x680 {
                 C::binvi(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         659 | 1683 => {
@@ -476,7 +502,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffc0 == 0x600 {
                 C::rori(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         27 | 1051 => C::addiw(a, w, c),
@@ -492,7 +518,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffe0 == 0x80 {
                 C::slli_uw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         667 | 1691 => {
@@ -503,7 +529,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x30 {
                 C::roriw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         59 | 1083 => {
@@ -516,7 +542,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x20 {
                 C::subw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         187 | 1211 => {
@@ -525,7 +551,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x30 {
                 C::rolw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         699 | 1723 => {
@@ -538,14 +564,14 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x30 {
                 C::rorw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         143 => {
             if (w >> 7) & 0xfffffe1f == 0x0 {
                 C::fence_i(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         243 | 1267 => C::csrrw(a, w, c),
@@ -562,7 +588,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffe0 == 0x200 {
                 C::sh2add_uw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         827 | 1851 => {
@@ -571,14 +597,14 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) == 0x10 {
                 C::sh3add_uw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         955 | 1979 => {
             if (w >> 25) == 0x1 {
                 C::remuw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         303 | 1327 => {
@@ -605,7 +631,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffff80 == 0xe00 {
                 C::amomaxu_w(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         431 | 1455 => {
@@ -632,7 +658,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffff80 == 0xe00 {
                 C::amomaxu_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         263 | 1287 => C::flw(a, w, c),
@@ -644,7 +670,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) & 0x3 == 0x1 {
                 C::fmadd_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         71 | 199 | 327 | 455 | 583 | 711 | 839 | 967 | 1095 | 1223 | 1351 | 1479 | 1607 | 1735
@@ -654,7 +680,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) & 0x3 == 0x1 {
                 C::fmsub_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         75 | 203 | 331 | 459 | 587 | 715 | 843 | 971 | 1099 | 1227 | 1355 | 1483 | 1611 | 1739
@@ -664,7 +690,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) & 0x3 == 0x1 {
                 C::fnmsub_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         79 | 207 | 335 | 463 | 591 | 719 | 847 | 975 | 1103 | 1231 | 1359 | 1487 | 1615 | 1743
@@ -674,7 +700,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 25) & 0x3 == 0x1 {
                 C::fnmadd_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         83 | 1107 => {
@@ -767,7 +793,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
                 C::fdiv_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         211 | 1235 => {
@@ -852,7 +878,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
                 C::fdiv_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         339 | 1363 => {
@@ -929,7 +955,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
                 C::fdiv_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         467 | 595 | 723 | 851 | 979 | 1491 | 1619 | 1747 | 1875 | 2003 => {
@@ -998,7 +1024,7 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
                 C::fdiv_d(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         391 | 1415 => C::fld(a, w, c),
@@ -1009,14 +1035,14 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 7) & 0xfffc001f == 0x2c0000 {
                 C::sinval_vma(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         315 | 1339 => {
             if (w >> 25) == 0x10 {
                 C::sh1add_uw(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         271 | 1295 => {
@@ -1029,37 +1055,11 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             } else if (w >> 7) & 0xffffe01f == 0x8000 {
                 C::cbo_zero(a, w, c)
             } else {
-                C::end(a, w, c)
+                C::unimp(a, w, c)
             }
         }
         135 | 1159 => C::flh(a, w, c),
         167 | 1191 => C::fsh(a, w, c),
-        7 | 11 | 31 | 39 | 43 | 47 | 63 | 87 | 91 | 95 | 107 | 119 | 123 | 127 | 139 | 159
-        | 171 | 175 | 191 | 215 | 219 | 223 | 231 | 235 | 247 | 251 | 255 | 267 | 283 | 287
-        | 299 | 319 | 343 | 347 | 351 | 355 | 359 | 363 | 375 | 379 | 383 | 395 | 399 | 411
-        | 415 | 427 | 443 | 447 | 471 | 475 | 479 | 483 | 487 | 491 | 503 | 507 | 511 | 519
-        | 523 | 527 | 539 | 543 | 547 | 551 | 555 | 559 | 575 | 599 | 603 | 607 | 615 | 619
-        | 627 | 631 | 635 | 639 | 647 | 651 | 655 | 671 | 675 | 679 | 683 | 687 | 703 | 727
-        | 731 | 735 | 743 | 747 | 759 | 763 | 767 | 775 | 779 | 783 | 795 | 799 | 803 | 807
-        | 811 | 815 | 831 | 855 | 859 | 863 | 871 | 875 | 887 | 891 | 895 | 899 | 903 | 907
-        | 911 | 923 | 927 | 931 | 935 | 939 | 943 | 959 | 983 | 987 | 991 | 999 | 1003 | 1015
-        | 1019 | 1023 | 1024 | 1028 | 1031 | 1032 | 1035 | 1036 | 1040 | 1044 | 1048 | 1052
-        | 1055 | 1056 | 1060 | 1063 | 1064 | 1067 | 1068 | 1071 | 1072 | 1076 | 1080 | 1084
-        | 1087 | 1088 | 1092 | 1096 | 1100 | 1104 | 1108 | 1111 | 1112 | 1115 | 1116 | 1119
-        | 1120 | 1124 | 1128 | 1131 | 1132 | 1136 | 1140 | 1143 | 1144 | 1147 | 1148 | 1151
-        | 1152 | 1156 | 1160 | 1163 | 1164 | 1167 | 1168 | 1172 | 1176 | 1180 | 1183 | 1184
-        | 1188 | 1192 | 1195 | 1196 | 1199 | 1200 | 1204 | 1208 | 1212 | 1215 | 1216 | 1220
-        | 1224 | 1228 | 1232 | 1236 | 1239 | 1240 | 1243 | 1244 | 1247 | 1248 | 1252 | 1255
-        | 1256 | 1259 | 1260 | 1264 | 1268 | 1271 | 1272 | 1275 | 1276 | 1279 | 1291 | 1307
-        | 1311 | 1323 | 1343 | 1367 | 1371 | 1375 | 1379 | 1383 | 1387 | 1399 | 1403 | 1407
-        | 1419 | 1423 | 1435 | 1439 | 1451 | 1467 | 1471 | 1495 | 1499 | 1503 | 1507 | 1511
-        | 1515 | 1527 | 1531 | 1535 | 1543 | 1547 | 1551 | 1563 | 1567 | 1571 | 1575 | 1579
-        | 1583 | 1599 | 1623 | 1627 | 1631 | 1639 | 1643 | 1651 | 1655 | 1659 | 1663 | 1671
-        | 1675 | 1679 | 1695 | 1699 | 1703 | 1707 | 1711 | 1727 | 1751 | 1755 | 1759 | 1767
-        | 1771 | 1783 | 1787 | 1791 | 1799 | 1803 | 1807 | 1819 | 1823 | 1827 | 1831 | 1835
-        | 1839 | 1855 | 1879 | 1883 | 1887 | 1895 | 1899 | 1911 | 1915 | 1919 | 1923 | 1927
-        | 1931 | 1935 | 1947 | 1951 | 1955 | 1959 | 1963 | 1967 | 1983 | 2007 | 2011 | 2015
-        | 2023 | 2027 | 2039 | 2043 | 2047 => C::end(a, w, c),
         _ => C::unimp(a, w, c),
     }
 }

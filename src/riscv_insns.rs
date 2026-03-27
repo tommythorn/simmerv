@@ -278,7 +278,7 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 264] = [
     (0xfff0007f, 0x44000053, "fcvt.h.s"),
     (0xfff0007f, 0x42200053, "fcvt.d.h"),
     (0xfff0007f, 0x44100053, "fcvt.h.d"),
-    (0x00000000, 0x00000000, "end"), // sentinel — never matches a real instruction
+    (0xffffffff, 0x00100073, "end"), // sentinel — should match (overlap ebreak)
 ];
 
 fn to_pascal_case(s: &str) -> String {
