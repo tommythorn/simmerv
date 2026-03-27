@@ -1,0 +1,115 @@
+/dts-v1/;
+
+/ {
+        #address-cells = <0x2>;
+        #size-cells = <0x2>;
+        compatible = "riscv-virtio";
+        model = "riscv-virtio,qemu";
+
+        chosen {
+                bootargs = "root=/dev/vda rw ttyS0";
+                stdout-path = "/uart@10000000";
+        };
+
+        uart@10000000 {
+                interrupts = <0xa>;
+                interrupt-parent = <0x3>;
+                clock-frequency = <0x384000>;
+                reg = <0x0 0x10000000 0x0 0x100>;
+                compatible = "ns16550a";
+        };
+
+        virtio_mmio@10001000 {
+                interrupts = <0x1>;
+                interrupt-parent = <0x3>;
+                reg = <0x0 0x10001000 0x0 0x1000>;
+                compatible = "virtio,mmio";
+        };
+
+        virtio_mmio@10002000 {
+                interrupts = <0x02>;
+                interrupt-parent = <0x03>;
+                reg = <0x00 0x10002000 0x00 0x1000>;
+                compatible = "virtio,mmio";
+        };
+
+        syscon@100000 {
+                phandle = <0x12>;
+                reg = <0x0 0x100000 0x0 0x1000>;
+                compatible = "syscon";
+        };
+
+        poweroff {
+                value = <0x5555>;
+                offset = <0x00>;
+                regmap = <0x12>;
+                compatible = "syscon-poweroff";
+        };
+
+        reboot {
+                value = <0x7777>;
+                offset = <0x00>;
+                regmap = <0x12>;
+                compatible = "syscon-reboot";
+        };
+
+        cpus {
+                #address-cells = <0x1>;
+                #size-cells = <0x0>;
+                timebase-frequency = <1000000>; // 1 MHz
+
+                cpu-map {
+                        cluster0 {
+                                core0 {
+                                        cpu = <0x1>;
+                                };
+                        };
+                };
+
+                cpu@0 {
+                        phandle = <0x1>;
+                        device_type = "cpu";
+                        reg = <0x0>;
+                        status = "okay";
+                        compatible = "riscv";
+                        riscv,isa = "rv64imafdcsu";
+                        mmu-type = "riscv,sv39";
+
+                        interrupt-controller {
+                                #interrupt-cells = <0x1>;
+                                interrupt-controller;
+                                compatible = "riscv,cpu-intc";
+                                phandle = <0x2>;
+                        };
+                };
+        };
+
+        soc {
+                #address-cells = <0x2>;
+                #size-cells = <0x2>;
+                compatible = "simple-bus";
+                ranges;
+
+                interrupt-controller@c000000 {
+                        phandle = <0x3>;
+                        riscv,ndev = <0x35>;
+                        reg = <0x0 0xc000000 0x0 0x4000000>;
+                        interrupts-extended = <0x2 0xb 0x2 0x9>;
+                        interrupt-controller;
+                        compatible = "riscv,plic0";
+                        #interrupt-cells = <0x1>;
+                        #address-cells = <0x0>;
+                };
+
+                clint@2000000 {
+                        interrupts-extended = <0x2 0x3 0x2 0x7>;
+                        reg = <0x0 0x2000000 0x0 0x10000>;
+                        compatible = "riscv,clint0";
+                };
+        };
+
+        memory@80000000 {
+                device_type = "memory";
+                reg = <0x00 0x80000000 0x01 0xc0000000>;
+        };
+};
