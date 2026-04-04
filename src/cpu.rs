@@ -311,6 +311,9 @@ pub struct Cpu {
     pub speedometer: Speedometer,
     pub speedometer_flag: Arc<AtomicBool>,
     speedometer_next_cycle: u64,
+
+    /// Physical address of the device tree blob, passed to firmware in a1.
+    pub dtb_base: u64,
 }
 
 pub const CONFIG_SW_MANAGED_A_AND_D: bool = true;
@@ -355,10 +358,17 @@ impl Cpu {
             speedometer: Speedometer::new(),
             speedometer_flag: Arc::new(AtomicBool::new(false)),
             speedometer_next_cycle: 0,
+            dtb_base: 0,
         };
         cpu.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
-        cpu.write_x(x(11), Mmu::DTB_BASE); // start of DTB
         cpu
+    }
+
+    /// Updates the DTB base address and writes it to a1 (x11) as firmware
+    /// expects.
+    pub fn set_dtb_base(&mut self, base: u64) {
+        self.dtb_base = base;
+        self.write_x(x(11), base);
     }
 
     /// Resets CPU architectural state as if the machine were rebooted.
@@ -378,7 +388,7 @@ impl Cpu {
         self.mmu.satp = 0;
         self.mmu.mstatus = 2 << MSTATUS_UXL_SHIFT | 2 << MSTATUS_SXL_SHIFT | 3 << MSTATUS_MPP_SHIFT;
         self.mmu.flush_tlb();
-        self.write_x(x(11), Mmu::DTB_BASE);
+        self.write_x(x(11), self.dtb_base);
     }
 
     #[allow(clippy::inline_always)]

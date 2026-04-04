@@ -39,6 +39,14 @@ use std::sync::atomic::Ordering;
 use xmas_elf::sections::SectionData;
 use xmas_elf::symbol_table::Entry;
 
+/// Returns the physical base address for a DTB placed at the end of RAM,
+/// padded to a 4 KiB page boundary.
+const fn dtb_end_of_ram(ram_base: u64, ram_size: usize, dtb_len: usize) -> u64 {
+    const PAGE: usize = 4096;
+    let padded = (dtb_len + PAGE - 1) & !(PAGE - 1);
+    ram_base + ram_size as u64 - padded as u64
+}
+
 /// Patch the `reg` property of the `memory@80000000` node in a Flattened Device
 /// Tree (DTB) blob so that its size matches `memory_bytes`.
 ///
@@ -228,13 +236,12 @@ impl Emulator {
         mmu.add_memory(0x7000_0000, 1024 * 1024);
         mmu.attach_uart(backend);
 
-        #[allow(clippy::cast_possible_truncation)]
-        mmu.add_memory(Mmu::DTB_BASE, (Mmu::DTB_END - Mmu::DTB_BASE) as usize);
         let mut dtb = include_bytes!("./device/dtb.dtb").to_vec();
-
+        let dtb_base = dtb_end_of_ram(0x8000_0000, capacity, dtb.len());
+        let usable = dtb_base - 0x8000_0000;
         #[allow(clippy::expect_used)]
-        patch_dtb_memory(&mut dtb, capacity as u64).expect("can't patch dtb");
-        mmu.write_memory_at(Mmu::DTB_BASE, &dtb);
+        patch_dtb_memory(&mut dtb, usable).expect("can't patch dtb");
+        mmu.write_memory_at(dtb_base, &dtb);
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
             Box::new(VirtioBlockDisk::new(Mmu::VIRTIO_IRQ)),
@@ -252,7 +259,7 @@ impl Emulator {
                 Arc::clone(&reset_flag),
             )),
         );
-        Self {
+        let mut emulator = Self {
             cpu: Cpu::new(mmu),
 
             symbol_map: FnvHashMap::default(),
@@ -269,7 +276,9 @@ impl Emulator {
             reset_flag,
             tracing_flag: Arc::new(AtomicBool::new(false)),
             verbose: Arc::new(AtomicBool::new(false)),
-        }
+        };
+        emulator.cpu.set_dtb_base(dtb_base);
+        emulator
     }
 
     /// Runs program set by `load_image()`. Calls `run_test()` if the program
@@ -747,8 +756,12 @@ impl Emulator {
     /// Failing to patch the dtb will result in an error
     pub fn setup_dtb(&mut self, content: &[u8]) -> anyhow::Result<()> {
         let mut dtb = content.to_vec();
-        patch_dtb_memory(&mut dtb, self.memory_bytes)?;
-        self.cpu.get_mut_mmu().write_memory_at(Mmu::DTB_BASE, &dtb);
+        #[allow(clippy::cast_possible_truncation)]
+        let dtb_base = dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len());
+        let usable = dtb_base - 0x8000_0000;
+        patch_dtb_memory(&mut dtb, usable)?;
+        self.cpu.get_mut_mmu().write_memory_at(dtb_base, &dtb);
+        self.cpu.set_dtb_base(dtb_base);
         Ok(())
     }
 

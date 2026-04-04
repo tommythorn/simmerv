@@ -131,8 +131,6 @@ impl Mmu {
     pub const CLINT_END: u64 = 0x0201_0000;
     pub const PLIC_BASE: u64 = 0x0c00_0000;
     pub const PLIC_END: u64 = 0x1000_0000;
-    pub const DTB_BASE: u64 = 0x1_0000_0000;
-    pub const DTB_END: u64 = 0x1_0004_0000; // 256 KiB
     pub const VIRTIO_BASE: u64 = 0x1000_1000;
     pub const VIRTIO_END: u64 = 0x1000_2000;
     pub const VIRTIO_IRQ: u32 = 1;
