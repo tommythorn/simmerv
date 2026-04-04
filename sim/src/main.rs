@@ -34,7 +34,7 @@ struct Args {
     #[argh(switch, short = 'n')]
     no_terminal: bool,
 
-    /// memory size in megabytes (doesn't yet update the device tree)
+    /// memory size in megabytes
     #[argh(option, short = 'm')]
     memory_megs: Option<usize>,
 
@@ -261,7 +261,7 @@ fn main() -> anyhow::Result<()> {
         let mut file = File::open(&path).with_context(|| path.to_string())?;
         let mut contents = vec![];
         file.read_to_end(&mut contents)?;
-        emulator.setup_dtb(&contents);
+        emulator.setup_dtb(&contents)?;
     }
 
     for path in args.fs {

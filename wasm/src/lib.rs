@@ -99,7 +99,7 @@ impl WasmRiscv {
     ///
     /// # Arguments
     /// * `content` DTB content binary
-    pub fn setup_dtb(&mut self, content: Vec<u8>) { self.emulator.setup_dtb(&content); }
+    pub fn setup_dtb(&mut self, content: Vec<u8>) { self.emulator.setup_dtb(&content).unwrap(); }
 
     /// Runs program set by `load_image()`. The emulator won't stop forever
     /// unless [`riscv-tests`](https://github.com/riscv/riscv-tests) programs.

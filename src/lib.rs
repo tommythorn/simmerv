@@ -39,6 +39,127 @@ use std::sync::atomic::Ordering;
 use xmas_elf::sections::SectionData;
 use xmas_elf::symbol_table::Entry;
 
+/// Patch the `reg` property of the `memory@80000000` node in a Flattened Device
+/// Tree (DTB) blob so that its size matches `memory_bytes`.
+///
+/// The DTB is expected to use two 32-bit cells for both address and size
+/// (`#address-cells = <2>`, `#size-cells = <2>`), which is the format used by
+/// all device trees in this project.  The function is a no-op on any blob that
+/// does not match the expected structure.
+#[allow(clippy::cast_possible_truncation)]
+fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
+    fn read_u32(data: &[u8], off: usize) -> u32 {
+        let bytes: [u8; 4] = data[off..off + 4].try_into().unwrap_or([0; 4]);
+        u32::from_be_bytes(bytes)
+    }
+    fn write_u32(data: &mut [u8], off: usize, val: u32) {
+        data[off..off + 4].copy_from_slice(&val.to_be_bytes());
+    }
+
+    if dtb.len() < 40 {
+        bail!("too short");
+    }
+    if read_u32(dtb, 0) != 0xd00d_feed {
+        bail!("bad magic");
+    }
+
+    let mut old = None;
+    let off_dt_struct = read_u32(dtb, 8) as usize;
+    let off_dt_strings = read_u32(dtb, 12) as usize;
+
+    // Find the offset of the string "reg" in the strings block.
+    let reg_nameoff = {
+        let strings = &dtb[off_dt_strings..];
+        let mut found = None;
+        let mut i = 0;
+        while i + 4 <= strings.len() {
+            if strings[i..].starts_with(b"reg\0") {
+                found = Some(i);
+                break;
+            }
+            // Skip to next string.
+            while i < strings.len() && strings[i] != 0 {
+                i += 1;
+            }
+            i += 1;
+        }
+        match found {
+            Some(off) => off,
+            None => {
+                bail!("found no reg");
+            }
+        }
+    };
+
+    // Walk the structure block looking for a node whose name starts with "memory".
+    let mut pos = off_dt_struct;
+    let mut depth = 0u32;
+    let mut memory_depth = 0u32;
+    let mut in_memory_node = false;
+
+    loop {
+        if pos + 4 > dtb.len() {
+            bail!("found not reg here");
+        }
+        let token = read_u32(dtb, pos);
+        pos += 4;
+        match token {
+            1 => {
+                // FDT_BEGIN_NODE: null-terminated name follows, aligned to 4 bytes.
+                let name_start = pos;
+                while pos < dtb.len() && dtb[pos] != 0 {
+                    pos += 1;
+                }
+                let name = &dtb[name_start..pos];
+                pos += 1; // skip null
+                pos = (pos + 3) & !3; // align
+                depth += 1;
+                if name.starts_with(b"memory") {
+                    in_memory_node = true;
+                    memory_depth = depth;
+                }
+            }
+            2 => {
+                // FDT_END_NODE
+                if in_memory_node && depth == memory_depth {
+                    in_memory_node = false;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            3 => {
+                // FDT_PROP: len (u32), nameoff (u32), value (len bytes, aligned).
+                if pos + 8 > dtb.len() {
+                    bail!("found not reg here");
+                }
+                let len = read_u32(dtb, pos) as usize;
+                let nameoff = read_u32(dtb, pos + 4) as usize;
+                pos += 8;
+                // Patch: memory node, "reg" property, 2-cell address + 2-cell size = 16 bytes.
+                if in_memory_node && nameoff == reg_nameoff && len == 16 {
+                    if old.is_some() {
+                        bail!("multiple memory entries");
+                    }
+
+                    let hi = read_u32(dtb, pos + 8);
+                    let lo = read_u32(dtb, pos + 12);
+                    old = Some(u64::from(hi) << 32 | u64::from(lo));
+                    write_u32(dtb, pos + 8, (memory_bytes >> 32) as u32);
+                    write_u32(dtb, pos + 12, memory_bytes as u32);
+                }
+                pos += (len + 3) & !3;
+            }
+            4 => {} // FDT_NOP
+            _ => {
+                // FDT_END (9) or unknown
+                match old {
+                    None => bail!("didn't find memory"),
+                    Some(old) => return Ok(old),
+                }
+            }
+        }
+    }
+}
+
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
 /// Sample code to run the emulator.
@@ -62,6 +183,9 @@ pub struct Emulator {
 
     /// The address where data will be sent to terminal
     pub tohost_addr: u64,
+
+    /// RAM size in bytes (used to patch the device tree)
+    memory_bytes: u64,
 
     /// Set to `true` to break out of the run loop (e.g. from the exit menu).
     pub exit_flag: Arc<AtomicBool>,
@@ -87,6 +211,9 @@ impl Emulator {
     /// * `capacity` — RAM size in bytes
     /// * `cache_entries` — total uop cache entries
     /// * `cache_mode` — direct-mapped or 2-way skew-associative
+    ///
+    /// # Panics
+    /// Will panic if we couldn't patch the memory property of the dtb
     #[must_use]
     pub fn new(
         backend: Box<dyn SerialBackend>,
@@ -103,7 +230,11 @@ impl Emulator {
 
         #[allow(clippy::cast_possible_truncation)]
         mmu.add_memory(Mmu::DTB_BASE, (Mmu::DTB_END - Mmu::DTB_BASE) as usize);
-        mmu.write_memory_at(Mmu::DTB_BASE, include_bytes!("./device/dtb.dtb"));
+        let mut dtb = include_bytes!("./device/dtb.dtb").to_vec();
+
+        #[allow(clippy::expect_used)]
+        patch_dtb_memory(&mut dtb, capacity as u64).expect("can't patch dtb");
+        mmu.write_memory_at(Mmu::DTB_BASE, &dtb);
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
             Box::new(VirtioBlockDisk::new(Mmu::VIRTIO_IRQ)),
@@ -130,6 +261,8 @@ impl Emulator {
 
             // These can be updated in load_image()
             tohost_addr: 0, // assuming tohost_addr is non-zero if exists
+
+            memory_bytes: capacity as u64,
 
             exit_flag: Arc::new(AtomicBool::new(false)),
             poweroff_flag,
@@ -609,10 +742,14 @@ impl Emulator {
     ///
     /// # Arguments
     /// * `content` DTB content binary
-    pub fn setup_dtb(&mut self, content: &[u8]) {
-        self.cpu
-            .get_mut_mmu()
-            .write_memory_at(Mmu::DTB_BASE, content);
+    ///
+    /// # Errors
+    /// Failing to patch the dtb will result in an error
+    pub fn setup_dtb(&mut self, content: &[u8]) -> anyhow::Result<()> {
+        let mut dtb = content.to_vec();
+        patch_dtb_memory(&mut dtb, self.memory_bytes)?;
+        self.cpu.get_mut_mmu().write_memory_at(Mmu::DTB_BASE, &dtb);
+        Ok(())
     }
 
     /// Set up the `fw_dynamic_info` struct for `OpenSBI` `fw_dynamic` firmware
