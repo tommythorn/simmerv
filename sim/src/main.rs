@@ -26,7 +26,8 @@ struct Args {
     #[argh(option, short = 'f')]
     fs: Vec<String>,
 
-    /// device Tree Binary
+    /// device Tree Binary, optionally followed by a comma and the "0x"-prefixed
+    /// load address in hex (disables memory-size patching when given)
     #[argh(option, short = 'd')]
     dtb: Option<String>,
 
@@ -257,11 +258,29 @@ fn main() -> anyhow::Result<()> {
         load_addr = None;
     }
 
-    if let Some(path) = args.dtb {
-        let mut file = File::open(&path).with_context(|| path.to_string())?;
+    if let Some(dtb_arg) = args.dtb {
+        let mut parts_iter = dtb_arg.split(',');
+        let filename = parts_iter.next().unwrap_or("");
         let mut contents = vec![];
-        file.read_to_end(&mut contents)?;
-        emulator.setup_dtb(&contents)?;
+        File::open(filename)
+            .with_context(|| filename.to_string())?
+            .read_to_end(&mut contents)?;
+        let mut dtb_addr = None;
+        for part in parts_iter {
+            if let Some(hex) = part.strip_prefix("0x") {
+                dtb_addr = Some(
+                    u64::from_str_radix(hex, 16)
+                        .with_context(|| format!("invalid dtb address: {part}"))?,
+                );
+            } else {
+                bail!("Unsupported dtb option {part}");
+            }
+        }
+        if let Some(addr) = dtb_addr {
+            emulator.setup_dtb_at(&contents, addr);
+        } else {
+            emulator.setup_dtb(&contents)?;
+        }
     }
 
     for path in args.fs {

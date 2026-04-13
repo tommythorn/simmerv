@@ -765,6 +765,13 @@ impl Emulator {
         Ok(())
     }
 
+    /// Load a DTB at an explicit address without patching its memory-size
+    /// property.
+    pub fn setup_dtb_at(&mut self, content: &[u8], addr: u64) {
+        self.cpu.get_mut_mmu().write_memory_at(addr, content);
+        self.cpu.set_dtb_base(addr);
+    }
+
     /// Set up the `fw_dynamic_info` struct for `OpenSBI` `fw_dynamic` firmware
     /// and place a pointer to it in a2, as required by the `fw_dynamic`
     /// ABI.
