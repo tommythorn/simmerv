@@ -34,6 +34,12 @@ const LSR_TEMT: u8 = 0x40; // Transmitter Empty (shift register also empty)
 /// NS16550A-compatible UART.
 pub struct Uart {
     pub regs: [u8; 8],
+    // DLL (offset 0) and DLM (offset 1) alias RBR and IER through the DLAB
+    // bit in LCR, but they are *separate* latches in real 16550 hardware.
+    // Store them in their own fields so writing the baud divisor (DLAB=1)
+    // doesn't overwrite the RBR/IER view that reads (DLAB=0) depend on.
+    pub dll: u8,
+    pub dlm: u8,
     pub rx_fifo: VecDeque<u8>,
     pub ier_prev: u8,
     pub thre_ip: bool,
@@ -49,6 +55,8 @@ impl Uart {
         regs[LSR] = LSR_THR_EMPTY | LSR_TEMT;
         Self {
             regs,
+            dll: 0,
+            dlm: 0,
             rx_fifo: VecDeque::new(),
             ier_prev: 0,
             thre_ip: false,
@@ -86,6 +94,8 @@ impl MemoryMapped for Uart {
 
     fn save_state(&self, w: &mut Pack) {
         w.raw(&self.regs);
+        w.u8(self.dll);
+        w.u8(self.dlm);
         w.u8(self.rx_fifo.len() as u8);
         for &b in &self.rx_fifo {
             w.u8(b);
@@ -98,6 +108,8 @@ impl MemoryMapped for Uart {
 
     fn restore_state(&mut self, r: &mut Unpack) -> Result<(), ()> {
         self.regs.copy_from_slice(r.raw(8)?);
+        self.dll = r.u8()?;
+        self.dlm = r.u8()?;
         let fifo_len = r.u8()? as usize;
         self.rx_fifo.clear();
         for _ in 0..fifo_len {
@@ -111,10 +123,15 @@ impl MemoryMapped for Uart {
     }
 
     fn read(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &mut [u8]) {
-        data[..size].copy_from_slice(&self.regs[offset..offset + size]);
-        // RBR (offset 0) is a destructive read when DLAB=0
+        let dlab = self.dlab();
         for i in offset..offset + size {
-            if i == 0 && !self.dlab() {
+            data[i - offset] = match (i, dlab) {
+                (0, true) => self.dll,
+                (1, true) => self.dlm,
+                _ => self.regs[i],
+            };
+            // RBR (offset 0, DLAB=0) is a destructive read
+            if i == 0 && !dlab {
                 self.rx_fifo.pop_front();
                 self.regs[RBR_THR] = self.rx_fifo.front().copied().unwrap_or(0);
                 if self.rx_fifo.is_empty() {
@@ -127,29 +144,31 @@ impl MemoryMapped for Uart {
     }
 
     fn write(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
-        self.regs[offset..offset + size].copy_from_slice(&data[..size]);
         let dlab = self.dlab();
         for i in offset..offset + size {
+            let byte = data[i - offset];
             match (i, dlab) {
+                (0, true) => self.dll = byte,
+                (1, true) => self.dlm = byte,
                 (0, false) => {
-                    // THR write: transmit then restore RBR view
+                    // THR write: transmit. Keep regs[RBR_THR] synced to FIFO front.
                     if let Some(b) = &mut self.backend {
-                        b.put_byte(self.regs[RBR_THR]);
+                        b.put_byte(byte);
                     }
                     self.regs[RBR_THR] = self.rx_fifo.front().copied().unwrap_or(0);
-                    // We transmit instantly so both THRE and TEMT stay set
+                    // Instant transmit → THRE/TEMT stay set
                     self.regs[LSR] |= LSR_THR_EMPTY | LSR_TEMT;
                 }
                 (1, false) => {
                     // IER write: rising edge of THREINT_BIT fires THRE interrupt
-                    let new_ier = self.regs[IER];
-                    if self.ier_prev & IER_THREINT_BIT == 0 && new_ier & IER_THREINT_BIT != 0 {
+                    self.regs[IER] = byte;
+                    if self.ier_prev & IER_THREINT_BIT == 0 && byte & IER_THREINT_BIT != 0 {
                         self.thre_ip = true;
                     }
-                    self.ier_prev = new_ier;
+                    self.ier_prev = byte;
                     self.update_iir();
                 }
-                _ => {}
+                _ => self.regs[i] = byte,
             }
         }
         ctx.asserted_irq = self.interrupting.then_some(self.irq);
