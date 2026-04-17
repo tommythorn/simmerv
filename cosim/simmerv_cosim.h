@@ -24,6 +24,7 @@ typedef struct {
     uint64_t trap_tval;   // trap value
     uint64_t mtime;       // mtime observed at retirement
     uint64_t seqno;       // retirement sequence number
+    uint64_t mepc;        // DEBUG: mepc after retire
 } SimmervRetire;
 
 typedef struct SimmervCtx SimmervCtx;

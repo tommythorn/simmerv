@@ -94,6 +94,8 @@ pub struct RetireCapture {
     pub mtime: u64,
     /// Retirement sequence number (simmerv's `seqno` before increment).
     pub seqno: u64,
+    /// DEBUG: mepc after retire (for chasing an mepc divergence).
+    pub mepc: u64,
 }
 
 pub type ExecResult = Result<(u64, u8), Exception>;
@@ -333,6 +335,11 @@ pub struct Cpu {
     // XXX needn't be part of CPU state; is part of fetch
     wfi: bool,
 
+    // Skip the interrupt check for exactly one retire. Set by xRET so the
+    // MRET/SRET-target instruction retires before any newly-enabled pending
+    // interrupt fires. Matches smolrv64's interrupt-acceptance timing.
+    defer_interrupt: bool,
+
     // Giving each instruction a unique sequence number in program order is
     // especially helpful when dealing with out-of-order execution.
     // We can derive instret by maintaining an offset from seqno (as minstret
@@ -389,6 +396,7 @@ impl Cpu {
             seqno: 0,
             cycle: 0,
             wfi: false,
+            defer_interrupt: false,
             pc: 0,
             csr: CsrFile::new(),
             mmu,
@@ -817,7 +825,11 @@ impl Cpu {
     /// (either an instruction or a taken interrupt) and returns a
     /// [`RetireCapture`] describing it. Must be paired with externally
     /// driven mtime (see [`Mmu::freeze_clint`]).
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
     pub fn step_retire(&mut self) -> RetireCapture {
         let mut cap = RetireCapture {
             pc: self.pc,
@@ -837,7 +849,12 @@ impl Cpu {
         }
 
         let pc_before_int = self.pc;
-        self.handle_interrupt();
+        // xRET defers interrupt acceptance by one retire (matches smolrv64).
+        if self.defer_interrupt {
+            self.defer_interrupt = false;
+        } else {
+            self.handle_interrupt();
+        }
         if self.pc != pc_before_int {
             cap.trapped = 1;
             cap.trap_cause = match self.mmu.prv {
@@ -849,6 +866,7 @@ impl Cpu {
                 PrivMode::S | PrivMode::U => self.csr.stval,
             };
             cap.next_pc = self.pc;
+            cap.mepc = self.csr.mepc;
             return cap;
         }
 
@@ -860,6 +878,7 @@ impl Cpu {
                 self.wfi = false;
             }
             cap.next_pc = self.pc;
+            cap.mepc = self.csr.mepc;
             return cap;
         }
 
@@ -872,6 +891,7 @@ impl Cpu {
                 cap.trap_tval = exc.tval;
                 self.handle_exception(&exc, insn_addr);
                 cap.next_pc = self.pc;
+                cap.mepc = self.csr.mepc;
                 return cap;
             }
         };
@@ -888,6 +908,7 @@ impl Cpu {
             cap.trap_tval = exc.tval;
             self.handle_exception(&exc, insn_addr);
             cap.next_pc = self.pc;
+            cap.mepc = self.csr.mepc;
             return cap;
         }
         self.seqno = self.seqno.wrapping_add(1);
@@ -902,6 +923,7 @@ impl Cpu {
             cap.trap_tval = exc.tval;
             self.handle_exception(&exc, insn_addr);
             cap.next_pc = self.pc;
+            cap.mepc = self.csr.mepc;
             return cap;
         }
         self.write_x(uop.rd, result.val);
@@ -924,6 +946,7 @@ impl Cpu {
         }
         cap.fflags = u32::from(self.fflags);
         cap.next_pc = self.pc;
+        cap.mepc = self.csr.mepc;
         cap
     }
 
@@ -2730,7 +2753,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
-            cpu.handle_interrupt();
+            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::Sret => {
@@ -2753,7 +2776,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
-            cpu.handle_interrupt();
+            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::SfenceVma | Op::SinvalVma => {
