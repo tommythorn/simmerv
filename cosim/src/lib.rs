@@ -119,3 +119,15 @@ pub unsafe extern "C" fn simmerv_zero_registers(ctx: *mut SimmervCtx) {
         }
     }
 }
+
+/// Set an architectural register by bank index: 0..31 = integer, 32..63 = FP.
+/// `idx == 0` is ignored (x0 is hardwired zero).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_write_register(ctx: *mut SimmervCtx, idx: u32, val: u64) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        use simmerv::bounded::Bounded;
+        if idx > 0 && idx < 64 {
+            ctx.emu.cpu.write_register(Bounded::<65>::new(idx), val);
+        }
+    }
+}

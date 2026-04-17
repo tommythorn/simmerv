@@ -37,6 +37,8 @@ int32_t     simmerv_write_memory(SimmervCtx*, uint64_t phys_addr,
                                  const uint8_t* data, size_t len);
 void        simmerv_set_pc(SimmervCtx*, uint64_t pc);
 void        simmerv_zero_registers(SimmervCtx*);
+// 0..31 = integer register, 32..63 = fp register; idx==0 is ignored.
+void        simmerv_write_register(SimmervCtx*, uint32_t idx, uint64_t val);
 
 // Per-retirement: drive mtime then step.
 void        simmerv_set_mtime(SimmervCtx*, uint64_t value);
