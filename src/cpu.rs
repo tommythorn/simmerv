@@ -1331,7 +1331,7 @@ impl Cpu {
             Csr::Misa => self.csr.misa,
             Csr::Mscratch => self.csr.mscratch,
             Csr::Mstatus => {
-                let mut mstatus = self.mmu.mstatus;
+                let mut mstatus = self.mmu.mstatus & !(1u64 << 63);
                 mstatus &= !MSTATUS_FS;
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
                 if self.fs == 3 {
@@ -1350,7 +1350,7 @@ impl Cpu {
             Csr::Sip => self.mmu.mip & self.csr.mideleg,
             Csr::Sscratch => self.csr.sscratch,
             Csr::Sstatus => {
-                let mut mstatus = self.mmu.mstatus;
+                let mut mstatus = self.mmu.mstatus & !(1u64 << 63);
                 mstatus &= !MSTATUS_FS;
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
                 mstatus &= 0x8000_0003_000d_e162;
