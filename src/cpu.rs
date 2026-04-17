@@ -2818,7 +2818,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             {
                 return ExecOut::err(Trap::IllegalInstruction, 0);
             }
-            cpu.wfi = true;
+            // WFI retires as a NOP in cosim — smolrv64 does the same (see
+            // smolrv64.v S_RF: "treat as NOP (no real sleep in simulation)").
+            // Keeping a wfi-pause here would desync cosim, and mtime is driven
+            // externally anyway so pausing buys nothing.
             ExecOut::ok(0)
         }
         // Zba -- AKA, my only favorite extension
