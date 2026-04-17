@@ -57,6 +57,45 @@ pub struct Exception {
     pub tval: u64,
 }
 
+/// One retirement from [`Cpu::step_retire`].
+///
+/// Covers three cases: an instruction executed successfully, an instruction
+/// that trapped, or an interrupt delivered between instructions. Layout is
+/// `#[repr(C)]` so the cosim FFI can memcpy it.
+#[repr(C)]
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RetireCapture {
+    /// PC of the retiring instruction (trap vector source on trap).
+    pub pc: u64,
+    /// PC after retire: next instruction, or trap vector if trapped.
+    pub next_pc: u64,
+    /// Raw instruction word (16 or 32 bits, zero-extended). 0 if no insn
+    /// (interrupt-only retire, fetch fault).
+    pub insn: u32,
+    _pad: u32,
+    /// 0 = no writeback, 1 = int register, 2 = fp register.
+    pub rd_kind: u8,
+    /// 0..31 within `rd_kind`'s register bank. Meaningful only if `rd_kind !=
+    /// 0`.
+    pub rd_idx: u8,
+    /// Privilege mode BEFORE this retirement.
+    pub prv: u8,
+    /// 1 if this retirement was a trap (instruction exception or interrupt).
+    pub trapped: u8,
+    /// fcsr[4:0] snapshot AFTER retirement.
+    pub fflags: u32,
+    /// Writeback value: raw 64 bits. FP single values must be NaN-boxed.
+    pub rd_val: u64,
+    /// Trap cause register value if `trapped`.
+    pub trap_cause: u64,
+    /// Trap tval if `trapped`.
+    pub trap_tval: u64,
+    /// mtime observed at retirement (should match DUT's driven value).
+    pub mtime: u64,
+    /// Retirement sequence number (simmerv's `seqno` before increment).
+    pub seqno: u64,
+}
+
 pub type ExecResult = Result<(u64, u8), Exception>;
 
 /// 16-byte execution result returned in `(rax, rdx)` on x86-64.
@@ -772,6 +811,120 @@ impl Cpu {
             self.add_to_fflags(ff);
         }
         Ok(())
+    }
+
+    /// Cosim sibling of [`Cpu::step_single`]: advances exactly one retirement
+    /// (either an instruction or a taken interrupt) and returns a
+    /// [`RetireCapture`] describing it. Must be paired with externally
+    /// driven mtime (see [`Mmu::freeze_clint`]).
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn step_retire(&mut self) -> RetireCapture {
+        let mut cap = RetireCapture {
+            pc: self.pc,
+            prv: u64::from(self.mmu.prv) as u8,
+            mtime: self.mmu.read_mtime_csr(),
+            seqno: self.seqno as u64,
+            ..RetireCapture::default()
+        };
+
+        self.mmu.service(self.cycle);
+        if self.csr.menvcfg & MENVCFG_STCE != 0 {
+            if self.mmu.read_mtime_csr() >= self.csr.stimecmp {
+                self.mmu.mip |= MIP_STIP;
+            } else {
+                self.mmu.mip &= !MIP_STIP;
+            }
+        }
+
+        let pc_before_int = self.pc;
+        self.handle_interrupt();
+        if self.pc != pc_before_int {
+            cap.trapped = 1;
+            cap.trap_cause = match self.mmu.prv {
+                PrivMode::M => self.csr.mcause,
+                PrivMode::S | PrivMode::U => self.csr.scause,
+            };
+            cap.trap_tval = match self.mmu.prv {
+                PrivMode::M => self.csr.mtval,
+                PrivMode::S | PrivMode::U => self.csr.stval,
+            };
+            cap.next_pc = self.pc;
+            return cap;
+        }
+
+        self.icache_flush = IcacheFlushKind::None;
+        self.cycle = self.cycle.wrapping_add(1);
+
+        if self.wfi {
+            if self.mmu.mip & self.csr.mie != 0 {
+                self.wfi = false;
+            }
+            cap.next_pc = self.pc;
+            return cap;
+        }
+
+        let insn_addr = self.pc;
+        let insn = match self.memop_code(insn_addr) {
+            Ok(w) => w as u32,
+            Err(exc) => {
+                cap.trapped = 1;
+                cap.trap_cause = get_trap_cause(&exc);
+                cap.trap_tval = exc.tval;
+                self.handle_exception(&exc, insn_addr);
+                cap.next_pc = self.pc;
+                return cap;
+            }
+        };
+        cap.insn = insn;
+        self.pc += if insn & 3 == 3 { 4 } else { 2 };
+        let uop = decode(insn_addr, insn);
+        if matches!(uop.op, Op::CUnimp | Op::End) {
+            let exc = Exception {
+                trap: Trap::IllegalInstruction,
+                tval: u64::from(insn),
+            };
+            cap.trapped = 1;
+            cap.trap_cause = get_trap_cause(&exc);
+            cap.trap_tval = exc.tval;
+            self.handle_exception(&exc, insn_addr);
+            cap.next_pc = self.pc;
+            return cap;
+        }
+        self.seqno = self.seqno.wrapping_add(1);
+        let s1 = self.read_x(uop.rs1);
+        let s2 = self.read_x(uop.rs2);
+        let s3 = self.read_x(uop.rs3);
+        let result = new_execute(self, &uop, s1, s2, s3, insn_addr);
+        if result.is_err() {
+            let exc = result.to_exception();
+            cap.trapped = 1;
+            cap.trap_cause = get_trap_cause(&exc);
+            cap.trap_tval = exc.tval;
+            self.handle_exception(&exc, insn_addr);
+            cap.next_pc = self.pc;
+            return cap;
+        }
+        self.write_x(uop.rd, result.val);
+        let ff = result.fflags();
+        if ff != 0 {
+            self.add_to_fflags(ff);
+        }
+
+        let rd = uop.rd;
+        if !rd.is_x0_dest() {
+            let idx = rd.get();
+            if idx < 32 {
+                cap.rd_kind = 1;
+                cap.rd_idx = idx;
+            } else {
+                cap.rd_kind = 2;
+                cap.rd_idx = idx - 32;
+            }
+            cap.rd_val = self.read_x(rd);
+        }
+        cap.fflags = u32::from(self.fflags);
+        cap.next_pc = self.pc;
+        cap
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -1709,7 +1862,8 @@ impl Cpu {
 #[must_use]
 pub const fn sext32(x: u32) -> u64 { x as i32 as u64 }
 
-const fn get_trap_cause(exc: &Exception) -> u64 {
+#[must_use]
+pub const fn get_trap_cause(exc: &Exception) -> u64 {
     let interrupt_bit = 0x8000_0000_0000_0000_u64;
     if (exc.trap as u64) < (Trap::UserSoftwareInterrupt as u64) {
         exc.trap as u64

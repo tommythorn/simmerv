@@ -24,6 +24,9 @@ pub struct Clint {
     pub mtimecmp: u64,
     pub mtime_delta: u64,
     t0: Instant,
+    /// When true, `read_mtime` ignores wall-clock and returns `mtime_delta`
+    /// directly. Used by cosim so the driver can pin mtime to the DUT's value.
+    pub frozen: bool,
 }
 
 impl Default for Clint {
@@ -38,6 +41,7 @@ impl Clint {
             mtimecmp: 0,
             mtime_delta: 0,
             t0: Instant::now(),
+            frozen: false,
         }
     }
 
@@ -66,11 +70,21 @@ impl Clint {
 
     /// Reads `mtime` register content
     #[must_use]
-    pub fn read_mtime(&self) -> u64 { self.now_micros().wrapping_add(self.mtime_delta) }
+    pub fn read_mtime(&self) -> u64 {
+        if self.frozen {
+            self.mtime_delta
+        } else {
+            self.now_micros().wrapping_add(self.mtime_delta)
+        }
+    }
 
     /// Writes to `mtime` register content
     pub fn write_mtime(&mut self, mtime: u64) {
-        self.mtime_delta = mtime.wrapping_sub(self.now_micros());
+        if self.frozen {
+            self.mtime_delta = mtime;
+        } else {
+            self.mtime_delta = mtime.wrapping_sub(self.now_micros());
+        }
     }
 }
 

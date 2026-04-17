@@ -15,7 +15,7 @@ exclude = [
 
 [workspace]
 resolver = "3"
-members = [".", "sim", "gendecoder", "wasm"]
+members = [".", "sim", "gendecoder", "wasm", "cosim"]
 default-members = ["sim"]
 
 [lints.clippy]

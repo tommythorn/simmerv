@@ -258,6 +258,14 @@ impl Mmu {
     /// Write the mtime CSR via CLINT.
     pub fn write_mtime_csr(&mut self, mtime: u64) { self.clint.1.write_mtime(mtime); }
 
+    /// Put CLINT's mtime in frozen mode (cosim): `read_mtime` no longer
+    /// advances with wall clock, only with explicit `write_mtime_csr`
+    /// calls.
+    pub const fn freeze_clint(&mut self, mtime: u64) {
+        self.clint.1.frozen = true;
+        self.clint.1.mtime_delta = mtime;
+    }
+
     /// Runs one cycle of MMU and peripheral devices.
     ///
     /// # Panics

@@ -1,0 +1,13 @@
+[package]
+name = "simmerv-cosim"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI for driving simmerv as a cosim reference model"
+license = "MIT"
+
+[lib]
+name = "simmerv_cosim"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+simmerv = { path = ".." }
