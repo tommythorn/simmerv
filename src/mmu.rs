@@ -77,6 +77,11 @@ pub struct Mmu {
     pub itlb: Tlb<512>,
     pub dtlb: DTlb<1024>,
 
+    /// Cosim mode: when true, PLIC service no longer drives MIP.SEIP/MEIP.
+    /// The bits are instead forced externally via `write_seip` to mirror the
+    /// DUT's independent PLIC/UART state.
+    pub cosim_ext_irq_driven: bool,
+
     /// TLB flush counters (shared — both TLBs are always flushed together).
     pub flush_full: u64,
     pub flush_asid: u64,
@@ -158,6 +163,7 @@ impl Mmu {
             cycle: 0,
             itlb: Tlb::<512>::new(),
             dtlb: DTlb::<1024>::new(),
+            cosim_ext_irq_driven: false,
             flush_full: 0,
             flush_asid: 0,
             flush_vpage: 0,
@@ -270,6 +276,25 @@ impl Mmu {
         }
     }
 
+    /// Overwrite MIP.SEIP (cosim). Mirrors PLIC→SEIP wiring: set or clear
+    /// the bit so cosim can force simmerv's supervisor-external-interrupt
+    /// state to match the DUT's independent PLIC/UART state.
+    /// Cosim: force a specific IRQ bit into the PLIC's pending (ips) mask,
+    /// so PLIC claim reads return the same IRQ as the DUT.
+    pub const fn write_plic_ip(&mut self, irq: u32, asserted: bool) {
+        self.plic.1.cosim_force_ip(irq, asserted);
+    }
+
+    pub const fn write_seip(&mut self, asserted: bool) {
+        use crate::csr::MIP_SEIP;
+        self.cosim_ext_irq_driven = true;
+        if asserted {
+            self.mip |= MIP_SEIP;
+        } else {
+            self.mip &= !MIP_SEIP;
+        }
+    }
+
     /// Put CLINT's mtime in frozen mode (cosim): `read_mtime` no longer
     /// advances with wall clock, only with explicit `write_mtime_csr`
     /// calls.
@@ -318,7 +343,15 @@ impl Mmu {
             }
         }
 
-        self.plic.1.process_irqs(&all_irqs[..n_irqs], &mut self.mip);
+        if self.cosim_ext_irq_driven {
+            // In cosim: discard simmerv-side PLIC's opinion of MEIP/SEIP; the
+            // DUT drives those bits via `write_seip`. Feed a scratch mip to
+            // keep PLIC state machine (dirty/best_irq) updated anyway.
+            let mut scratch = 0u64;
+            self.plic.1.process_irqs(&all_irqs[..n_irqs], &mut scratch);
+        } else {
+            self.plic.1.process_irqs(&all_irqs[..n_irqs], &mut self.mip);
+        }
     }
 
     /// Updates privilege mode. With permission bits stored in TLB entries

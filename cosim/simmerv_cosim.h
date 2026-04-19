@@ -1,6 +1,7 @@
 #ifndef SIMMERV_COSIM_H
 #define SIMMERV_COSIM_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -44,6 +45,8 @@ void        simmerv_write_register(SimmervCtx*, uint32_t idx, uint64_t val);
 // Per-retirement: drive mtime then step.
 void        simmerv_set_mtime(SimmervCtx*, uint64_t value);
 void        simmerv_set_mtimecmp(SimmervCtx*, uint64_t value);
+void        simmerv_set_seip(SimmervCtx*, bool asserted);
+void        simmerv_set_plic_ip(SimmervCtx*, uint32_t irq, bool asserted);
 int32_t     simmerv_step_retire(SimmervCtx*, SimmervRetire* out);
 
 #ifdef __cplusplus

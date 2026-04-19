@@ -89,6 +89,38 @@ pub unsafe extern "C" fn simmerv_set_mtimecmp(ctx: *mut SimmervCtx, value: u64) 
     }
 }
 
+/// Drive simmerv's `mip.SEIP` bit directly. Called on every retirement so
+/// supervisor-external-interrupt state tracks the DUT's PLIC output rather
+/// than simmerv's own (independent) UART/PLIC state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_seip(ctx: *mut SimmervCtx, asserted: bool) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.mmu.write_seip(asserted);
+    }
+}
+
+/// Cosim: force IRQ `irq`'s pending bit in simmerv's PLIC, so claim/pending
+/// reads match the DUT whose PLIC is driven by its own Verilog UART.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_plic_ip(ctx: *mut SimmervCtx, irq: u32, asserted: bool) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.mmu.write_plic_ip(irq, asserted);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_debug_dump(ctx: *mut SimmervCtx, out: *mut u64) {
+    if let (Some(ctx), Some(out)) = (unsafe { ctx.as_mut() }, unsafe { out.as_mut() }) {
+        let p = out as *mut u64;
+        unsafe {
+            *p.add(0) = ctx.emu.cpu.mmu.mip;
+            *p.add(1) = ctx.emu.cpu.debug_mie();
+            *p.add(2) = ctx.emu.cpu.debug_mideleg();
+            *p.add(3) = ctx.emu.cpu.debug_menvcfg();
+        }
+    }
+}
+
 /// Step one retirement and fill `out` with the observed state.
 /// Returns 0 on success, -1 on NULL ctx or NULL out.
 #[unsafe(no_mangle)]

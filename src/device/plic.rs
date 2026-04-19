@@ -88,6 +88,16 @@ impl Plic {
         self.dirty = true;
     }
 
+    /// Cosim: directly force an IRQ's pending bit so PLIC claim reads return
+    /// the same value as the DUT's PLIC.
+    pub const fn cosim_force_ip(&mut self, irq: u32, asserted: bool) {
+        if asserted {
+            self.set_ip(irq);
+        } else {
+            self.clear_ip(irq);
+        }
+    }
+
     const fn clear_ip(&mut self, irq: u32) {
         let index = (irq >> 3) as usize;
         self.ips[index] &= !(1 << (irq & 7));

@@ -466,6 +466,15 @@ impl Cpu {
     /// * `reg` Register number. Must be 0-31
     #[must_use]
     pub fn read_register(&self, reg: Reg) -> u64 { self.rf[reg] }
+
+    #[must_use]
+    pub const fn debug_mie(&self) -> u64 { self.csr.mie }
+    #[must_use]
+    pub const fn debug_mideleg(&self) -> u64 { self.csr.mideleg }
+    #[must_use]
+    pub const fn debug_menvcfg(&self) -> u64 { self.csr.menvcfg }
+    #[must_use]
+    pub const fn debug_stimecmp(&self) -> u64 { self.csr.stimecmp }
     pub fn write_register(&mut self, reg: Reg, value: u64) { self.write_x(reg, value); }
 
     /// Checks that float instructions are enabled and
