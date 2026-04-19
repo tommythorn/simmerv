@@ -80,6 +80,15 @@ pub unsafe extern "C" fn simmerv_set_mtime(ctx: *mut SimmervCtx, value: u64) {
     }
 }
 
+/// Drive simmerv's `mtimecmp` to `value`. Called alongside `simmerv_set_mtime`
+/// on every retirement so MTIP computation stays aligned with the DUT.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_mtimecmp(ctx: *mut SimmervCtx, value: u64) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.mmu.write_mtimecmp(value);
+    }
+}
+
 /// Step one retirement and fill `out` with the observed state.
 /// Returns 0 on success, -1 on NULL ctx or NULL out.
 #[unsafe(no_mangle)]

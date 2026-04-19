@@ -258,6 +258,18 @@ impl Mmu {
     /// Write the mtime CSR via CLINT.
     pub fn write_mtime_csr(&mut self, mtime: u64) { self.clint.1.write_mtime(mtime); }
 
+    /// Overwrite CLINT's mtimecmp (cosim). Mirrors the MMIO path: clear
+    /// MIP.MTIP and re-raise it iff mtime>=mtimecmp, so cosim gating can
+    /// both suppress and force timer interrupts.
+    pub fn write_mtimecmp(&mut self, v: u64) {
+        use crate::csr::MIP_MTIP;
+        self.clint.1.mtimecmp = v;
+        self.mip &= !MIP_MTIP;
+        if v > 0 && self.clint.1.read_mtime() >= v {
+            self.mip |= MIP_MTIP;
+        }
+    }
+
     /// Put CLINT's mtime in frozen mode (cosim): `read_mtime` no longer
     /// advances with wall clock, only with explicit `write_mtime_csr`
     /// calls.
