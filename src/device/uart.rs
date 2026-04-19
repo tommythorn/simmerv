@@ -25,7 +25,8 @@ const IER_THREINT_BIT: u8 = 0x02;
 
 const IIR_THR_EMPTY: u8 = 0x02;
 const IIR_RD_AVAILABLE: u8 = 0x04;
-const IIR_NO_INTERRUPT: u8 = 0x07;
+// smolrv64 DUT convention: bit 0=1 (no interrupt pending), code=000; not 0x07.
+const IIR_NO_INTERRUPT: u8 = 0x01;
 
 const LSR_DATA_AVAILABLE: u8 = 0x01;
 const LSR_THR_EMPTY: u8 = 0x20;
@@ -43,6 +44,7 @@ pub struct Uart {
     pub rx_fifo: VecDeque<u8>,
     pub ier_prev: u8,
     pub thre_ip: bool,
+    pub fcr_fifo: bool,
     pub interrupting: bool,
     pub backend: Option<Box<dyn SerialBackend>>,
     pub irq: u32,
@@ -60,6 +62,7 @@ impl Uart {
             rx_fifo: VecDeque::new(),
             ier_prev: 0,
             thre_ip: false,
+            fcr_fifo: false,
             interrupting: false,
             backend: Some(backend),
             irq,
@@ -73,13 +76,16 @@ impl Uart {
     fn update_iir(&mut self) {
         let rx_ip = self.regs[IER] & IER_RXINT_BIT != 0 && !self.rx_fifo.is_empty();
         let thre_ip = self.regs[IER] & IER_THREINT_BIT != 0;
-        self.regs[IIR] = if rx_ip {
+        let code = if rx_ip {
             IIR_RD_AVAILABLE
         } else if thre_ip {
             IIR_THR_EMPTY
         } else {
             IIR_NO_INTERRUPT
         };
+        // smolrv64 DUT mirrors FCR bit 0 into IIR[7:6].
+        let fifo_bits = if self.fcr_fifo { 0xC0 } else { 0x00 };
+        self.regs[IIR] = fifo_bits | code;
     }
 }
 
@@ -102,6 +108,7 @@ impl MemoryMapped for Uart {
         }
         w.u8(self.ier_prev);
         w.bool(self.thre_ip);
+        w.bool(self.fcr_fifo);
         w.bool(self.interrupting);
         w.u32(self.irq);
     }
@@ -117,6 +124,7 @@ impl MemoryMapped for Uart {
         }
         self.ier_prev = r.u8()?;
         self.thre_ip = r.bool()?;
+        self.fcr_fifo = r.bool()?;
         self.interrupting = r.bool()?;
         self.irq = r.u32()?;
         Ok(())
@@ -125,9 +133,11 @@ impl MemoryMapped for Uart {
     fn read(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &mut [u8]) {
         let dlab = self.dlab();
         for i in offset..offset + size {
+            // smolrv64 DUT: returns 0 for DLL/DLM reads (divisor ignored) and
+            // a constant 0xB0 for MSR (CTS+DSR+CD asserted).
             data[i - offset] = match (i, dlab) {
-                (0, true) => self.dll,
-                (1, true) => self.dlm,
+                (0 | 1, true) => 0,
+                (6, _) => 0xB0,
                 _ => self.regs[i],
             };
             // RBR (offset 0, DLAB=0) is a destructive read
@@ -160,12 +170,24 @@ impl MemoryMapped for Uart {
                     self.regs[LSR] |= LSR_THR_EMPTY | LSR_TEMT;
                 }
                 (1, false) => {
-                    // IER write: rising edge of THREINT_BIT fires THRE interrupt
+                    // IER write: DUT masks to bits [3:0].  Rising edge of
+                    // THREINT_BIT still fires THRE interrupt.
+                    let byte = byte & 0x0F;
                     self.regs[IER] = byte;
                     if self.ier_prev & IER_THREINT_BIT == 0 && byte & IER_THREINT_BIT != 0 {
                         self.thre_ip = true;
                     }
                     self.ier_prev = byte;
+                    self.update_iir();
+                }
+                (2, _) => {
+                    // FCR write (DUT): bit 0 sets fcr_fifo (surfaces in
+                    // IIR[7:6]); bit 1 resets RX FIFO.  IIR is read-only.
+                    self.fcr_fifo = byte & 0x01 != 0;
+                    if byte & 0x02 != 0 {
+                        self.rx_fifo.clear();
+                        self.regs[LSR] &= !LSR_DATA_AVAILABLE;
+                    }
                     self.update_iir();
                 }
                 _ => self.regs[i] = byte,
