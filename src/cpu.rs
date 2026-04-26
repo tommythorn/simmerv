@@ -1357,6 +1357,11 @@ impl Cpu {
             Csr::Medeleg => self.csr.medeleg,
             Csr::Mepc => self.csr.mepc,
             Csr::Mhartid => self.csr.mhartid,
+            // Match smolrv64's hardwired implementation IDs. These are
+            // implementation-defined; simmerv adopts the DUT's values so
+            // cosim doesn't diverge on reads of marchid/mimpid.
+            Csr::Marchid => 9,
+            Csr::Mimpid => 0x2025_0907,
             Csr::Mideleg => self.csr.mideleg,
             Csr::Mie => self.csr.mie,
             Csr::Mip => self.mmu.mip,
