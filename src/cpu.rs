@@ -340,6 +340,13 @@ pub struct Cpu {
     // interrupt fires. Matches smolrv64's interrupt-acceptance timing.
     defer_interrupt: bool,
 
+    // Cosim CSR-read override. When `Some((csrno, value))`, the next
+    // CSR read of `csrno` returns `value` and the override is consumed.
+    // Used by cosim glue to force the model's read result for CSRs
+    // that depend on hardware state (counters, hardwired IDs, externally-
+    // driven mip bits) instead of recomputing them in the model.
+    pub armed_csr_read: Option<(u16, u64)>,
+
     // Giving each instruction a unique sequence number in program order is
     // especially helpful when dealing with out-of-order execution.
     // We can derive instret by maintaining an offset from seqno (as minstret
@@ -397,6 +404,7 @@ impl Cpu {
             cycle: 0,
             wfi: false,
             defer_interrupt: false,
+            armed_csr_read: None,
             pc: 0,
             csr: CsrFile::new(),
             mmu,
@@ -1193,13 +1201,22 @@ impl Cpu {
     // review each CSR.  Do Not Blanket allow reads and writes from unsupported
     // CSRs
     #[allow(clippy::cast_sign_loss)]
-    fn read_csr(&self, csrno: u16) -> Result<u64, Exception> {
+    fn read_csr(&mut self, csrno: u16) -> Result<u64, Exception> {
         use PrivMode::S;
 
         let illegal = Err(Exception {
             trap: Trap::IllegalInstruction,
             tval: 0,
         });
+
+        // Cosim override: if the DUT armed a value for this CSR's next
+        // read, return it (after privilege checks below) and consume
+        // the entry. Privilege checks still apply so behavioral traps
+        // remain consistent with the model.
+        let armed = match self.armed_csr_read {
+            Some((c, _)) if c == csrno => self.armed_csr_read.take().map(|(_, v)| v),
+            _ => None,
+        };
 
         // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode only,
         // hardwired to zero (0 PMP entries implemented).
@@ -1258,7 +1275,7 @@ impl Cpu {
             }
             _ => {}
         }
-        Ok(self.read_csr_raw(csr))
+        Ok(armed.unwrap_or_else(|| self.read_csr_raw(csr)))
     }
 
     #[allow(clippy::cast_sign_loss)]

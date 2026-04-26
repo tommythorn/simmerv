@@ -108,6 +108,22 @@ pub unsafe extern "C" fn simmerv_set_plic_ip(ctx: *mut SimmervCtx, irq: u32, ass
     }
 }
 
+/// Cosim: arm the model so the next CSR read of `csrno` returns `value`
+/// instead of computing it. One-shot — consumed when matched. Use this
+/// for CSRs whose value depends on hardware state the model doesn't
+/// reproduce exactly (e.g. `time`, `cycle`, `instret`, externally-driven
+/// `mip` bits) so the DUT's read result authoritatively wins.
+///
+/// Call this from the cosim glue *before* `simmerv_step_retire` whenever
+/// the DUT is about to retire a CSRRW/CSRRS/CSRRC/I targeting one of the
+/// "external" CSRs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_arm_csr_read(ctx: *mut SimmervCtx, csrno: u16, value: u64) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.armed_csr_read = Some((csrno, value));
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn simmerv_debug_dump(ctx: *mut SimmervCtx, out: *mut u64) {
     if let (Some(ctx), Some(out)) = (unsafe { ctx.as_mut() }, unsafe { out.as_mut() }) {
@@ -135,6 +151,9 @@ pub unsafe extern "C" fn simmerv_step_retire(
         return -1;
     }
     let cap = ctx.emu.cpu.step_retire();
+    // Drop any unconsumed CSR-read override so it can't bleed into a
+    // later retire whose arming the glue legitimately skipped.
+    ctx.emu.cpu.armed_csr_read = None;
     unsafe {
         *out = cap;
     }

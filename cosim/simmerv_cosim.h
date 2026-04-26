@@ -47,6 +47,13 @@ void        simmerv_set_mtime(SimmervCtx*, uint64_t value);
 void        simmerv_set_mtimecmp(SimmervCtx*, uint64_t value);
 void        simmerv_set_seip(SimmervCtx*, bool asserted);
 void        simmerv_set_plic_ip(SimmervCtx*, uint32_t irq, bool asserted);
+// Arm a one-shot CSR-read override: the next read of `csrno` returns
+// `value`. Consumed on first matching read, and unconditionally cleared
+// at the end of simmerv_step_retire so a stale arming can't bleed into
+// later retires. Use for CSRs whose value is implementation/hardware-
+// dependent (counters, externally-driven mip bits) so the DUT's read
+// authoritatively wins.
+void        simmerv_arm_csr_read(SimmervCtx*, uint16_t csrno, uint64_t value);
 int32_t     simmerv_step_retire(SimmervCtx*, SimmervRetire* out);
 
 #ifdef __cplusplus
