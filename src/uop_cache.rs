@@ -220,9 +220,9 @@ impl BbCache {
     /// regardless of ASID.
     pub fn flush_vpage(&mut self, page_addr: u64) {
         self.flush_vpage += 1;
-        let page_base = page_addr & !0xFFF_u64;
         // Mask out ASID bits [63:48] and page-offset bits [11:0] for comparison.
         let va_mask = !(0xFFFF_u64 << 48) & !0xFFF_u64;
+        let page_base = page_addr & va_mask;
         for tag in &mut self.tags {
             if *tag & 1 == 0 && *tag & va_mask == page_base {
                 *tag = INVALID_TAG;
@@ -234,8 +234,8 @@ impl BbCache {
     /// Flush the single S-mode entry matching both a specific VA page and ASID.
     pub fn flush_vpage_asid(&mut self, page_addr: u64, asid: u16) {
         self.flush_vpage_asid += 1;
-        let page_base = page_addr & !0xFFF_u64;
         let va_mask = !(0xFFFF_u64 << 48) & !0xFFF_u64;
+        let page_base = page_addr & va_mask;
         let asid_bits = u64::from(asid) << 48;
         let asid_mask = 0xFFFF_u64 << 48;
         for tag in &mut self.tags {
@@ -283,3 +283,35 @@ pub struct UopCacheStats {
 }
 // [Uop; 16]=192 + _cache_align_pad(4) = 196
 const _: () = assert!(std::mem::size_of::<BasicBlock>() == 196);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flush_vpage_matches_high_canonical_kernel_pages() {
+        let mut cache = BbCache::new(MAX_BLOCK_LEN * 4, CacheMode::Direct);
+        let va = 0xffff_ffc0_1234_5678;
+        let key = va;
+
+        cache.insert(key, &BasicBlock::default());
+        assert!(cache.probe(key).is_some());
+
+        cache.flush_vpage(va & !0xfff);
+        assert!(cache.probe(key).is_none());
+    }
+
+    #[test]
+    fn flush_vpage_asid_masks_asid_bits_from_requested_page() {
+        let mut cache = BbCache::new(MAX_BLOCK_LEN * 4, CacheMode::Direct);
+        let va = 0x0000_1234_5678;
+        let asid = 0x42;
+        let key = va | (u64::from(asid) << 48);
+
+        cache.insert(key, &BasicBlock::default());
+        assert!(cache.probe(key).is_some());
+
+        cache.flush_vpage_asid(va & !0xfff, asid);
+        assert!(cache.probe(key).is_none());
+    }
+}
