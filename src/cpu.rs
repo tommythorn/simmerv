@@ -991,7 +991,7 @@ impl Cpu {
         ] {
             let trap = Exception {
                 trap: trap_type,
-                tval: self.pc,
+                tval: 0,
             };
             if minterrupt & intr != 0 && self.handle_trap(&trap, self.pc, true) {
                 self.wfi = false;
@@ -1147,7 +1147,7 @@ impl Cpu {
 
         self.write_csr_raw(csr_epc_address, insn_addr);
         self.write_csr_raw(csr_cause_address, cause);
-        self.write_csr_raw(csr_tval_address, exc.tval);
+        self.write_csr_raw(csr_tval_address, if is_interrupt { 0 } else { exc.tval });
 
         // Add 4 * cause if tvec has vector type address
         if self.pc & 3 != 0 {
@@ -3065,6 +3065,7 @@ mod test_cpu {
 
         // CSR Cause register holds the reason what caused the interrupt
         assert_eq!(0x8000000000000007, cpu.read_csr_raw(Csr::Mcause));
+        assert_eq!(0, cpu.read_csr_raw(Csr::Mtval));
 
         // @TODO: Test post CSR status register
         // @TODO: Test xIE bit in CSR status register
