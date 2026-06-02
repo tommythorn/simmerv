@@ -934,7 +934,14 @@ impl Cpu {
         let s3 = self.read_x(uop.rs3);
         let result = new_execute(self, &uop, s1, s2, s3, insn_addr);
         if result.is_err() {
-            let exc = result.to_exception();
+            let mut exc = result.to_exception();
+            // Match smolrv64's mtval convention: on IllegalInstruction the
+            // trapping instruction encoding goes into mtval. new_execute's
+            // runtime-illegal checks pass tval=0 because they don't have the
+            // raw insn in scope; patch it here.
+            if matches!(exc.trap, Trap::IllegalInstruction) && exc.tval == 0 {
+                exc.tval = u64::from(insn);
+            }
             cap.trapped = 1;
             cap.trap_cause = get_trap_cause(&exc);
             cap.trap_tval = exc.tval;
@@ -1228,7 +1235,9 @@ impl Cpu {
         }
 
         // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
-        // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode) — all return 0.
+        // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode). These count at a
+        // model-specific rate, so in cosim the DUT arms its read value and the
+        // two models agree; otherwise they read as 0.
         if matches!(csrno, 0xC03..=0xC1F) {
             if self.mmu.prv != PrivMode::M {
                 let bit = 1u32 << (csrno - 0xC00);
@@ -1239,13 +1248,13 @@ impl Cpu {
                     return illegal;
                 }
             }
-            return Ok(0);
+            return Ok(armed.unwrap_or(0));
         }
         if matches!(csrno, 0xB03..=0xB1F | 0x323..=0x33F) {
             if u64::from(self.mmu.prv) < 3 {
                 return illegal;
             }
-            return Ok(0);
+            return Ok(armed.unwrap_or(0));
         }
 
         let Some(csr) = self.has_csr_access_privilege(csrno) else {
