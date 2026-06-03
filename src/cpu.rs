@@ -1453,6 +1453,7 @@ impl Cpu {
             Csr::Stvec => self.csr.stvec,
             Csr::Stimecmp => self.csr.stimecmp,
             Csr::Mcounteren => u64::from(self.csr.mcounteren),
+            Csr::Mcountinhibit => self.csr.mcountinhibit,
             Csr::Scounteren => u64::from(self.csr.scounteren),
             Csr::Senvcfg => self.csr.senvcfg,
             Csr::Menvcfg => self.csr.menvcfg,
@@ -1508,6 +1509,9 @@ impl Cpu {
                 self.mmu.mip &= !MIP_STIP;
             }
             Csr::Mcounteren => self.csr.mcounteren = (value & 0xFFFF_FFFF) as u32,
+            // smolrv64 implements 13 HPM counters; mcountinhibit is WARL masked
+            // to those (bit 1/TM hardwired 0): HPM_INHIBIT_MASK = 0xfffd.
+            Csr::Mcountinhibit => self.csr.mcountinhibit = value & 0xfffd,
             Csr::Scounteren => self.csr.scounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Menvcfg => self.csr.menvcfg = value,
             Csr::Senvcfg => self.csr.senvcfg = value,
@@ -2093,7 +2097,10 @@ fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: 
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
-    clippy::cast_lossless
+    clippy::cast_lossless,
+    // EBREAK and C.EBREAK intentionally share the same Breakpoint{tval:0} body
+    // but live in the compressed- and base-op sections respectively.
+    clippy::match_same_arms
 )]
 fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u64) -> ExecOut {
     match uop.op {
@@ -2106,7 +2113,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         | Op::PrefetchI
         | Op::PrefetchR
         | Op::PrefetchW => ExecOut::ok(0),
-        Op::CEbreak => ExecOut::err(Trap::Breakpoint, 0x9002),
+        Op::CEbreak => ExecOut::err(Trap::Breakpoint, 0),
 
         Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
         Op::Auipc => ExecOut::ok(insn_addr.wrapping_add(uop.imm64())),
@@ -2218,7 +2225,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             },
             uop.imm64(),
         ),
-        Op::Ebreak => ExecOut::err(Trap::Breakpoint, 0x00100073),
+        // Breakpoint mtval is 0 or the pc per spec (never the instruction
+        // word); smolrv64 reports 0, so match it.
+        Op::Ebreak => ExecOut::err(Trap::Breakpoint, 0),
         // RV64I
         Op::Lwu => {
             let v = etry!(cpu.memop_read(s1, uop.imm64(), 4));

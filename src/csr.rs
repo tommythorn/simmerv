@@ -38,6 +38,7 @@ pub enum Csr {
     Mtvec = 0x305,
     Mcounteren = 0x306,
     Menvcfg = 0x30a,
+    Mcountinhibit = 0x320,
     Mscratch = 0x340,
     Mepc = 0x341,
     Mcause = 0x342,
@@ -153,6 +154,7 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Marchid
             | Csr::Mcause
             | Csr::Mcounteren
+            | Csr::Mcountinhibit
             | Csr::Mcycle
             | Csr::Minstret
             | Csr::Medeleg
@@ -218,6 +220,7 @@ pub struct CsrFile {
     pub ustatus: u64,
     pub mcounteren: u32,
     pub scounteren: u32,
+    pub mcountinhibit: u64,
     pub senvcfg: u64,
 }
 
@@ -256,6 +259,7 @@ impl CsrFile {
             ustatus: 0,
             mcounteren: 0,
             scounteren: 0,
+            mcountinhibit: 0,
             senvcfg: 0,
         }
     }
