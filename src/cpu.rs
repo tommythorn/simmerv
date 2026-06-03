@@ -343,6 +343,14 @@ pub struct Cpu {
     // match) — only the *taking* is gated. Defaults true for standalone runs.
     pub cosim_stip_armed: bool,
 
+    // Cosim: same DUT-follow gate for the supervisor external interrupt
+    // (SEIP). The DUT suppresses interrupts for one instruction after a write
+    // to an interrupt-control CSR (sstatus/sie/mstatus/mie/mip/mideleg — its
+    // `just_xret` flag), so SEIP enabled by such a write vectors one retire
+    // later than simmerv would. Set each retirement to "DUT is taking SEIP
+    // now". `mip.SEIP` (mirrored from the DUT PLIC) stays set for sip reads.
+    pub cosim_seip_armed: bool,
+
     // Cosim CSR-read override. When `Some((csrno, value))`, the next
     // CSR read of `csrno` returns `value` and the override is consumed.
     // Used by cosim glue to force the model's read result for CSRs
@@ -407,6 +415,7 @@ impl Cpu {
             cycle: 0,
             wfi: false,
             cosim_stip_armed: true,
+            cosim_seip_armed: true,
             armed_csr_read: None,
             pc: 0,
             csr: CsrFile::new(),
@@ -988,6 +997,9 @@ impl Cpu {
         // set, so sip/stimecmp reads still match).
         if !self.cosim_stip_armed {
             minterrupt &= !MIP_STIP;
+        }
+        if !self.cosim_seip_armed {
+            minterrupt &= !MIP_SEIP;
         }
         if minterrupt == 0 {
             return;

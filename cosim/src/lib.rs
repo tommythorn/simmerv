@@ -113,6 +113,19 @@ pub unsafe extern "C" fn simmerv_set_stip_armed(ctx: *mut SimmervCtx, asserted: 
     }
 }
 
+/// Cosim: gate simmerv's *taking* of the supervisor external interrupt (SEIP)
+/// on the DUT taking it this retirement. The DUT suppresses interrupts for one
+/// instruction after an interrupt-control CSR write (`just_xret`), so SEIP
+/// unmasked by such a write vectors a retire later than simmerv would. Call
+/// every retirement with `asserted = (DUT trapped with supervisor-external
+/// cause)`; `mip.SEIP` (mirrored via `simmerv_set_seip`) stays set for reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_seip_armed(ctx: *mut SimmervCtx, asserted: bool) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.cosim_seip_armed = asserted;
+    }
+}
+
 /// Cosim: force IRQ `irq`'s pending bit in simmerv's PLIC, so claim/pending
 /// reads match the DUT whose PLIC is driven by its own Verilog UART.
 #[unsafe(no_mangle)]
