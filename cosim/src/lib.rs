@@ -99,6 +99,20 @@ pub unsafe extern "C" fn simmerv_set_seip(ctx: *mut SimmervCtx, asserted: bool) 
     }
 }
 
+/// Cosim: gate simmerv's *taking* of the supervisor timer interrupt (STIP) on
+/// the DUT taking it this retirement. The DUT's `pre_intr_pending` is a
+/// registered (1-cycle-stale) signal, so it vectors STIP a retire later than
+/// simmerv's `mtime>=stimecmp` would. Call every retirement with
+/// `asserted = (DUT trapped this retire with supervisor-timer cause)`; simmerv
+/// keeps `mip.STIP`/`sip.STIP` computed normally (reads still match) and only
+/// withholds the interrupt until the DUT vectors it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_stip_armed(ctx: *mut SimmervCtx, asserted: bool) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.cosim_stip_armed = asserted;
+    }
+}
+
 /// Cosim: force IRQ `irq`'s pending bit in simmerv's PLIC, so claim/pending
 /// reads match the DUT whose PLIC is driven by its own Verilog UART.
 #[unsafe(no_mangle)]

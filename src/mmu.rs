@@ -384,6 +384,11 @@ impl Mmu {
                 8 => self.load_phys_u64(pa),
                 _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
             })
+        } else if self.page_cross_access_traps() {
+            Err(Exception {
+                trap: Trap::LoadAddressMisaligned,
+                tval: va,
+            })
         } else {
             let mut data = 0_u64;
             for i in 0..width {
@@ -467,6 +472,11 @@ impl Mmu {
             };
             r.map_err(|()| Exception {
                 trap: Trap::StoreAccessFault,
+                tval: va,
+            })
+        } else if self.page_cross_access_traps() {
+            Err(Exception {
+                trap: Trap::StoreAddressMisaligned,
                 tval: va,
             })
         } else {
@@ -897,6 +907,23 @@ impl Mmu {
             self.itlb.insert(vpage, ppage, perm, asid);
         }
         Ok(pa)
+    }
+
+    /// smolrv64 performs a single dTLB translation per data access, so a
+    /// load/store whose byte range crosses a 4 KiB page boundary cannot be
+    /// serviced in hardware and traps as address-misaligned (M-mode firmware
+    /// then emulates it byte-by-byte). This only applies with Sv39 paging
+    /// active and effective privilege below M — mirrors smolrv64.v's
+    /// `csr_satp[63:60]==8 && eff_prv!=M && mem_addr[11:0]+bytes>4096` check.
+    #[must_use]
+    pub fn page_cross_access_traps(&self) -> bool {
+        let effective_prv = if self.mstatus & MSTATUS_MPRV != 0 {
+            priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
+        } else {
+            self.prv
+        };
+        effective_prv != PrivMode::M
+            && (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Sv39 as u64
     }
 
     /// Translate a load or store address. Handles MPRV, uses dTLB.

@@ -335,10 +335,13 @@ pub struct Cpu {
     // XXX needn't be part of CPU state; is part of fetch
     wfi: bool,
 
-    // Skip the interrupt check for exactly one retire. Set by xRET so the
-    // MRET/SRET-target instruction retires before any newly-enabled pending
-    // interrupt fires. Matches smolrv64's interrupt-acceptance timing.
-    defer_interrupt: bool,
+    // Cosim: gate on taking the supervisor timer interrupt (STIP). The DUT's
+    // STIP latches as soon as mtime>=stimecmp but it only vectors at the next
+    // fetch boundary (registered `pre_intr_pending`, 1 cycle stale); simmerv
+    // would otherwise take it a retire early. Set each retirement to "DUT is
+    // taking STIP now". `mip.STIP`/`sip.STIP` stay computed normally (so reads
+    // match) — only the *taking* is gated. Defaults true for standalone runs.
+    pub cosim_stip_armed: bool,
 
     // Cosim CSR-read override. When `Some((csrno, value))`, the next
     // CSR read of `csrno` returns `value` and the override is consumed.
@@ -403,7 +406,7 @@ impl Cpu {
             seqno: 0,
             cycle: 0,
             wfi: false,
-            defer_interrupt: false,
+            cosim_stip_armed: true,
             armed_csr_read: None,
             pc: 0,
             csr: CsrFile::new(),
@@ -866,12 +869,7 @@ impl Cpu {
         }
 
         let pc_before_int = self.pc;
-        // xRET defers interrupt acceptance by one retire (matches smolrv64).
-        if self.defer_interrupt {
-            self.defer_interrupt = false;
-        } else {
-            self.handle_interrupt();
-        }
+        self.handle_interrupt();
         if self.pc != pc_before_int {
             cap.trapped = 1;
             cap.trap_cause = match self.mmu.prv {
@@ -982,7 +980,15 @@ impl Cpu {
         use self::Trap::SupervisorExternalInterrupt;
         use self::Trap::SupervisorSoftwareInterrupt;
         use self::Trap::SupervisorTimerInterrupt;
-        let minterrupt = self.mmu.mip & self.csr.mie;
+        let mut minterrupt = self.mmu.mip & self.csr.mie;
+        // Cosim: follow the DUT on supervisor-timer-interrupt *timing*. The DUT
+        // registers its pending signal (1 cycle stale) so it vectors STIP a
+        // retire later than simmerv's mtime>=stimecmp would. Suppress taking
+        // STIP unless the DUT is taking it this retire (mip.STIP itself stays
+        // set, so sip/stimecmp reads still match).
+        if !self.cosim_stip_armed {
+            minterrupt &= !MIP_STIP;
+        }
         if minterrupt == 0 {
             return;
         }
@@ -1351,6 +1357,13 @@ impl Cpu {
                     return Ok(());
                 }
 
+                // satp.ASID is WARL; this hart implements 10 ASID bits (matches
+                // smolrv64 TLB_ASID_BITS=10). Zero the unimplemented high ASID
+                // bits so reads-back match the DUT (Linux probes ASID width by
+                // writing all-1s and reading back).
+                let impl_asid_bits = 10u64;
+                let asid_keep = ((1u64 << impl_asid_bits) - 1) << SATP_ASID_SHIFT;
+                let value = value & !((SATP_ASID_MASK << SATP_ASID_SHIFT) & !asid_keep);
                 let old_satp = self.mmu.satp;
                 self.mmu.satp = value;
                 // Only flush TLBs if MODE or PPN changed (not on ASID-only changes)
@@ -1365,9 +1378,11 @@ impl Cpu {
         }
 
         self.write_csr_raw(csr, value);
-        if matches!(csr, Csr::Sstatus | Csr::Sie | Csr::Mstatus | Csr::Mie) {
-            self.handle_interrupt();
-        }
+        // Do NOT take a newly-unmasked interrupt inline here. Interrupts are
+        // delivered between instructions, at the step_retire boundary; taking
+        // one mid-instruction (during the csrXX that enables it) fires it a
+        // whole instruction too early and diverges from smolrv64, which takes
+        // it at the next fetch boundary.
         Ok(())
     }
 
@@ -1466,8 +1481,11 @@ impl Cpu {
             Csr::Sip => self.mmu.mip = value & 0x222 | self.mmu.mip & !0x222,
             Csr::Sscratch => self.csr.sscratch = value,
             Csr::Sstatus => {
-                self.mmu.mstatus &= !0x8000_0003_000d_e162;
-                self.mmu.mstatus |= value & 0x8000_0003_000d_e162;
+                // UXL[33:32] is read-only WARL (=2 on this RV64 hart): writable
+                // sstatus mask excludes it, matching the Mstatus-write masking.
+                let mask = 0x8000_0003_000d_e162 & !MSTATUS_UXL_MASK;
+                self.mmu.mstatus &= !mask;
+                self.mmu.mstatus |= value & mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
             }
             Csr::Stval => self.csr.stval = value,
@@ -1779,6 +1797,15 @@ impl Cpu {
         let va = baseva.wrapping_add(offset);
 
         if va & 0xfff > 0x1000 - size {
+            // smolrv64 traps page-crossing data accesses (single dTLB xlate)
+            // as misaligned when paging is active below M-mode; firmware
+            // emulates them. Match that instead of silently byte-splitting.
+            if self.mmu.page_cross_access_traps() {
+                return Err(Exception {
+                    trap: Trap::LoadAddressMisaligned,
+                    tval: va,
+                });
+            }
             return self.memop_slow(Read, va, 0, size, false);
         }
 
@@ -1830,6 +1857,12 @@ impl Cpu {
         let va = baseva.wrapping_add(offset);
 
         if va & 0xfff > 0x1000 - size {
+            if self.mmu.page_cross_access_traps() {
+                return Err(Exception {
+                    trap: Trap::StoreAddressMisaligned,
+                    tval: va,
+                });
+            }
             self.memop_slow(Write, va, v, size, false)?;
             return Ok(());
         }
@@ -2793,7 +2826,6 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
-            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::Sret => {
@@ -2816,7 +2848,6 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
-            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::SfenceVma | Op::SinvalVma => {
