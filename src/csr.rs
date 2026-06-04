@@ -51,6 +51,7 @@ pub enum Csr {
     Cycle = 0xc00,
     Time = 0xc01,
     Instret = 0xc02,
+    Scountovf = 0xda0, // Sscofpmf supervisor count-overflow (read-only)
     Mhartid = 0xf14,
     Mimpid = 0xf13,
     Marchid = 0xf12,
@@ -155,6 +156,7 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Mcause
             | Csr::Mcounteren
             | Csr::Mcountinhibit
+            | Csr::Scountovf
             | Csr::Mcycle
             | Csr::Minstret
             | Csr::Medeleg

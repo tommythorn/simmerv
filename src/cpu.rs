@@ -1454,6 +1454,9 @@ impl Cpu {
             Csr::Stimecmp => self.csr.stimecmp,
             Csr::Mcounteren => u64::from(self.csr.mcounteren),
             Csr::Mcountinhibit => self.csr.mcountinhibit,
+            // Scountovf (Sscofpmf) reads 0 via the `_ => 0` fallthrough below;
+            // the legal() entry stops the illegal trap. simmerv raises no HPM
+            // overflows, matching smolrv64 at boot (derived from mhpmevent.OF).
             Csr::Scounteren => u64::from(self.csr.scounteren),
             Csr::Senvcfg => self.csr.senvcfg,
             Csr::Menvcfg => self.csr.menvcfg,
