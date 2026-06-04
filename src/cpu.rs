@@ -1454,6 +1454,8 @@ impl Cpu {
             Csr::Stimecmp => self.csr.stimecmp,
             Csr::Mcounteren => u64::from(self.csr.mcounteren),
             Csr::Mcountinhibit => self.csr.mcountinhibit,
+            Csr::Mcyclecfg => self.csr.mcyclecfg,
+            Csr::Minstretcfg => self.csr.minstretcfg,
             // Scountovf (Sscofpmf) reads 0 via the `_ => 0` fallthrough below;
             // the legal() entry stops the illegal trap. simmerv raises no HPM
             // overflows, matching smolrv64 at boot (derived from mhpmevent.OF).
@@ -1478,7 +1480,10 @@ impl Cpu {
             Csr::Medeleg => self.csr.medeleg = value,
             Csr::Mepc => self.csr.mepc = value,
             Csr::Mhartid => self.csr.mhartid = value,
-            Csr::Mideleg => self.csr.mideleg = value & 0x222,
+            // Sscofpmf: bit 13 (LCOFIP) is delegatable in addition to the
+            // standard SSIP/STIP/SEIP (0x222). The DUT stores mideleg unmasked
+            // and the firmware writes 0x2222.
+            Csr::Mideleg => self.csr.mideleg = value & 0x2222,
             Csr::Mie => self.csr.mie = value,
             Csr::Mip => self.mmu.mip = value,
             Csr::Mscratch => self.csr.mscratch = value,
@@ -1493,7 +1498,8 @@ impl Cpu {
             Csr::Sedeleg => self.csr.sedeleg = value,
             Csr::Sepc => self.csr.sepc = value,
             Csr::Sideleg => self.csr.sideleg = value,
-            Csr::Sie => self.csr.mie = self.csr.mie & !0x222 | value & 0x222,
+            // SIE mask includes LCOFIE (bit 13) to match the DUT (csr_mie & 0x2222).
+            Csr::Sie => self.csr.mie = self.csr.mie & !0x2222 | value & 0x2222,
             Csr::Sip => self.mmu.mip = value & 0x222 | self.mmu.mip & !0x222,
             Csr::Sscratch => self.csr.sscratch = value,
             Csr::Sstatus => {
@@ -1515,6 +1521,10 @@ impl Cpu {
             // smolrv64 implements 13 HPM counters; mcountinhibit is WARL masked
             // to those (bit 1/TM hardwired 0): HPM_INHIBIT_MASK = 0xfffd.
             Csr::Mcountinhibit => self.csr.mcountinhibit = value & 0xfffd,
+            // Smcntrpmf: mcyclecfg/minstretcfg store the privilege-inhibit
+            // filter bits; the DUT keeps them as plain 64-bit RW registers.
+            Csr::Mcyclecfg => self.csr.mcyclecfg = value,
+            Csr::Minstretcfg => self.csr.minstretcfg = value,
             Csr::Scounteren => self.csr.scounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Menvcfg => self.csr.menvcfg = value,
             Csr::Senvcfg => self.csr.senvcfg = value,

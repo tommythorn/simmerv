@@ -39,6 +39,8 @@ pub enum Csr {
     Mcounteren = 0x306,
     Menvcfg = 0x30a,
     Mcountinhibit = 0x320,
+    Mcyclecfg = 0x321,
+    Minstretcfg = 0x322,
     Mscratch = 0x340,
     Mepc = 0x341,
     Mcause = 0x342,
@@ -56,8 +58,14 @@ pub enum Csr {
     Mimpid = 0xf13,
     Marchid = 0xf12,
     Mvendorid = 0xf11,
-    Mtopi = 0xfb0,   // Unsupported Highest Priority Pending And Enabled Interrupt
-    Tselect = 0x7a0, // UNSUPPORTED Debug/Trace trigger register select
+    Mtopi = 0xfb0, // Unsupported Highest Priority Pending And Enabled Interrupt
+    // Debug/Trace triggers: the DUT implements these as read-0 / write-ignored
+    // (no triggers present). Match it so OpenSBI's CSR probe doesn't diverge.
+    Tselect = 0x7a0,
+    Tdata1 = 0x7a1,
+    Tdata2 = 0x7a2,
+    Tdata3 = 0x7a3,
+    Tinfo = 0x7a4,
 }
 
 impl Display for Csr {
@@ -156,6 +164,8 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Mcause
             | Csr::Mcounteren
             | Csr::Mcountinhibit
+            | Csr::Mcyclecfg
+            | Csr::Minstretcfg
             | Csr::Scountovf
             | Csr::Mcycle
             | Csr::Minstret
@@ -188,6 +198,11 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Stval
             | Csr::Stvec
             | Csr::Time
+            | Csr::Tselect
+            | Csr::Tdata1
+            | Csr::Tdata2
+            | Csr::Tdata3
+            | Csr::Tinfo
             | Csr::Ucause
             | Csr::Uepc
             | Csr::Uie
@@ -223,6 +238,8 @@ pub struct CsrFile {
     pub mcounteren: u32,
     pub scounteren: u32,
     pub mcountinhibit: u64,
+    pub mcyclecfg: u64,
+    pub minstretcfg: u64,
     pub senvcfg: u64,
 }
 
@@ -262,6 +279,8 @@ impl CsrFile {
             mcounteren: 0,
             scounteren: 0,
             mcountinhibit: 0,
+            mcyclecfg: 0,
+            minstretcfg: 0,
             senvcfg: 0,
         }
     }
