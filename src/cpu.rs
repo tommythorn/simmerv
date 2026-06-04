@@ -1783,9 +1783,17 @@ impl Cpu {
     #[inline(always)]
     fn memop_code(&mut self, va: u64) -> Result<u64, Exception> {
         // A 4-byte instruction can straddle a page boundary only if the low
-        // 12 bits are 0xFFE or 0xFFF.  Handle that (rare) case via the slow path.
+        // 12 bits are 0xFFE.  Fetch the low halfword first: a compressed
+        // instruction (bits[1:0] != 0b11) needs no more, so we must NOT touch
+        // (and possibly fault on) the next page.  Only a genuine 32-bit
+        // instruction reads the upper halfword, which may legitimately fault.
         if va & 0xfff > 0x1000 - 4 {
-            return self.memop_slow(Execute, va, 0, 4, false);
+            let lo = self.memop_slow(Execute, va, 0, 2, false)?;
+            if lo & 3 != 3 {
+                return Ok(lo);
+            }
+            let hi = self.memop_slow(Execute, va + 2, 0, 2, false)?;
+            return Ok(lo | (hi << 16));
         }
 
         let pa = self.mmu.translate_code_address(va)?;
