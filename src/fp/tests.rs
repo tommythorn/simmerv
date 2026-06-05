@@ -26,6 +26,14 @@ fn test_bool(f: impl Fn(u64, u64) -> (u64, u8), f1: u64, f2: u64, wantr: bool, w
     );
 }
 
+fn test_wf(got: (u64, u8), want: (u64, u8)) {
+    assert_eq!(
+        want, got,
+        "got ({:016x}, {:02x}) want ({:016x}, {:02x})",
+        got.0, got.1, want.0, want.1
+    );
+}
+
 // Convert John's representation to RISC-V NaN-boxed floats
 const fn fp32(sign: u64, exp: u64, mant: u64) -> u64 {
     NAN_BOX_F32 | (sign << 31) | (exp << 23) | mant
@@ -177,4 +185,74 @@ fn test_fadd() {
         0xbca0000000000000,
         1,
     );
+}
+
+#[test]
+fn test_translated_mul_div_sqrt_fma32() {
+    test_wf(
+        Sf32::fmul(
+            Sf32::from_float(2.0),
+            Sf32::from_float(3.0),
+            RoundingMode::RoundNearestEven,
+        ),
+        (Sf32::from_float(6.0), 0),
+    );
+    test_wf(
+        Sf32::fdiv(
+            Sf32::from_float(1.0),
+            Sf32::from_float(0.0),
+            RoundingMode::RoundNearestEven,
+        ),
+        (fp32(0, 0xff, 0), fflag::DIVIDEZERO),
+    );
+    test_wf(
+        Sf32::fsqrt(Sf32::from_float(-1.0), RoundingMode::RoundNearestEven),
+        (NAN_BOX_F32 | Sf32::QNAN, fflag::INVALIDOP),
+    );
+    test_wf(
+        Sf32::fma(
+            Sf32::from_float(2.0),
+            Sf32::from_float(3.0),
+            Sf32::from_float(4.0),
+            RoundingMode::RoundNearestEven,
+        ),
+        (Sf32::from_float(10.0), 0),
+    );
+}
+
+#[test]
+fn test_translated_conversions() {
+    test_wf(
+        cvt_i64_sf32(16_777_217, RoundingMode::RoundNearestEven),
+        (Sf32::from_float(16_777_216.0), fflag::INEXACT),
+    );
+    test_wf(
+        cvt_i64_sf32(16_777_217, RoundingMode::RoundNearestMagnitude),
+        (Sf32::from_float(16_777_218.0), fflag::INEXACT),
+    );
+    test_wf(
+        cvt_sf32_i32(NAN_BOX_F32 | Sf32::QNAN, RoundingMode::RoundNearestEven),
+        (0x7fff_ffff, fflag::INVALIDOP),
+    );
+    test_wf(
+        fcvt_s_d(f64::MAX.to_bits(), RoundingMode::RoundNearestEven),
+        (fp32(0, 0xff, 0), fflag::OVERFLOW | fflag::INEXACT),
+    );
+}
+
+#[test]
+fn test_min_max_nanbox_zero32() {
+    test_wf(
+        Sf32::min(Sf32::from_float(0.0), Sf32::from_float(-0.0)),
+        (Sf32::from_float(-0.0), 0),
+    );
+    test_wf(
+        Sf32::max(Sf32::from_float(0.0), Sf32::from_float(-0.0)),
+        (Sf32::from_float(0.0), 0),
+    );
+}
+
+#[test]
+fn test_fclass_unboxed32_is_qnan() {
+    assert_eq!(Sf32::fclass(0), Fclass::Qnan);
 }

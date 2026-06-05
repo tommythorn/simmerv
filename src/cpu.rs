@@ -10,7 +10,6 @@ use crate::csr;
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::fp;
-use crate::fp::fflag::DIVIDEZERO;
 use crate::generated_riscv_decoder::Op;
 use crate::generated_riscv_decoder::decoder;
 use crate::mmu::DataAddr;
@@ -34,9 +33,21 @@ use fp::Sf16;
 use fp::Sf32;
 use fp::Sf64;
 use fp::cvt_i32_sf32;
+use fp::cvt_i32_sf64;
 use fp::cvt_i64_sf32;
+use fp::cvt_i64_sf64;
+use fp::cvt_sf32_i32;
+use fp::cvt_sf32_i64;
+use fp::cvt_sf32_u32;
+use fp::cvt_sf32_u64;
+use fp::cvt_sf64_i32;
+use fp::cvt_sf64_i64;
+use fp::cvt_sf64_u32;
+use fp::cvt_sf64_u64;
 use fp::cvt_u32_sf32;
+use fp::cvt_u32_sf64;
 use fp::cvt_u64_sf32;
+use fp::cvt_u64_sf64;
 use log;
 use num_traits::FromPrimitive;
 use riscv::MemoryAccessType;
@@ -2038,8 +2049,6 @@ pub fn decode(a: u64, word: u32) -> Uop {
     uop
 }
 
-fn with_fflags<A>(a: A) -> (A, u8) { (a, native_fp::fflags_raised()) }
-
 /// Inline fast path for the most common ops (integer ALU, branches, jumps).
 /// Avoids the function-call overhead of `new_execute` for ~70% of instructions.
 #[allow(clippy::inline_always)]
@@ -2582,23 +2591,27 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FmaddS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf32::map3(s1, s2, s3, f32::mul_add))
+            ExecOut::from_wf(Sf32::fma(s1, s2, s3, cpu.get_rm(uop.rm)))
         }
         Op::FmsubS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf32::map3(s1, s2, s3, |a, b, c| a.mul_add(b, -c)))
+            ExecOut::from_wf(Sf32::fma(s1, s2, s3 ^ Sf32::SIGN_MASK, cpu.get_rm(uop.rm)))
         }
         Op::FnmsubS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf32::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, -c)))
+            ExecOut::from_wf(Sf32::fma(s1 ^ Sf32::SIGN_MASK, s2, s3, cpu.get_rm(uop.rm)))
         }
         Op::FnmaddS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf32::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, c)))
+            ExecOut::from_wf(Sf32::fma(
+                s1 ^ Sf32::SIGN_MASK,
+                s2,
+                s3 ^ Sf32::SIGN_MASK,
+                cpu.get_rm(uop.rm),
+            ))
         }
         Op::FaddS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            //ExecOut::from_wf(Sf32::map2(s1, s2, |a, b| a + b))
             ExecOut::from_wf(Sf32::fadd(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FsubS => {
@@ -2607,21 +2620,15 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FmulS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf32::map2(s1, s2, |a, b| a * b))
+            ExecOut::from_wf(Sf32::fmul(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FdivS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            if s2 == 0 {
-                ExecOut::ok_ff(0xffffffff7f800000, DIVIDEZERO) // INFINITY
-            } else if s2 == 0x8000000000000000 {
-                ExecOut::ok_ff(0xffffffffff800000, DIVIDEZERO) // NEG_INFINITY
-            } else {
-                ExecOut::from_wf(Sf32::map2(s1, s2, |a, b| a / b))
-            }
+            ExecOut::from_wf(Sf32::fdiv(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FsqrtS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf32::map1(s1, f32::sqrt))
+            ExecOut::from_wf(Sf32::fsqrt(s1, cpu.get_rm(uop.rm)))
         }
         Op::FsgnjS => {
             etry!(cpu.check_float_access_and_dirty(0));
@@ -2654,11 +2661,11 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FcvtWS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::ok(Sf32::to_float(s1) as i32 as u64)
+            ExecOut::from_wf(cvt_sf32_i32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtWuS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::ok(u64::from(Sf32::to_float(s1) as u32))
+            ExecOut::from_wf(cvt_sf32_u32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvXW => {
             etry!(cpu.check_float_access_and_dirty(0));
@@ -2703,11 +2710,11 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         // RV64F
         Op::FcvtLS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::ok(Sf32::to_float(s1) as i64 as u64)
+            ExecOut::from_wf(cvt_sf32_i64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtLuS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::ok(Sf32::to_float(s1) as u64)
+            ExecOut::from_wf(cvt_sf32_u64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtSL => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
@@ -2730,19 +2737,24 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FmaddD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf64::map3(s1, s2, s3, f64::mul_add))
+            ExecOut::from_wf(Sf64::fma(s1, s2, s3, cpu.get_rm(uop.rm)))
         }
         Op::FmsubD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf64::map3(s1, s2, s3, |a, b, c| a.mul_add(b, -c)))
+            ExecOut::from_wf(Sf64::fma(s1, s2, s3 ^ Sf64::SIGN_MASK, cpu.get_rm(uop.rm)))
         }
         Op::FnmsubD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf64::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, -c)))
+            ExecOut::from_wf(Sf64::fma(s1 ^ Sf64::SIGN_MASK, s2, s3, cpu.get_rm(uop.rm)))
         }
         Op::FnmaddD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf64::map3(s1, s2, s3, |a, b, c| -a.mul_add(b, c)))
+            ExecOut::from_wf(Sf64::fma(
+                s1 ^ Sf64::SIGN_MASK,
+                s2,
+                s3 ^ Sf64::SIGN_MASK,
+                cpu.get_rm(uop.rm),
+            ))
         }
         Op::FaddD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
@@ -2754,21 +2766,15 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FmulD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf64::map2(s1, s2, |a, b| a * b))
+            ExecOut::from_wf(Sf64::fmul(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FdivD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            if s2 == 0 {
-                ExecOut::ok_ff(f64::INFINITY as u64, DIVIDEZERO) // XXX??
-            } else if s2 == 0x8000000000000000 {
-                ExecOut::ok_ff(f64::NEG_INFINITY as u64, DIVIDEZERO) // XXX??
-            } else {
-                ExecOut::from_wf(Sf64::map2(s1, s2, |a, b| a / b))
-            }
+            ExecOut::from_wf(Sf64::fdiv(s1, s2, cpu.get_rm(uop.rm)))
         }
         Op::FsqrtD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(Sf64::map1(s1, f64::sqrt))
+            ExecOut::from_wf(Sf64::fsqrt(s1, cpu.get_rm(uop.rm)))
         }
         Op::FsgnjD => {
             etry!(cpu.check_float_access_and_dirty(0));
@@ -2801,7 +2807,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FcvtSD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(with_fflags(Sf32::from_float(Sf64::to_float(s1) as f32)))
+            ExecOut::from_wf(fp::fcvt_s_d(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtDS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
@@ -2840,26 +2846,29 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(1 << Sf64::fclass(s1) as usize)
         }
         Op::FcvtWD | Op::FcvtWuD => {
-            // XXX They are not the same
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(with_fflags(Sf64::to_float(s1) as i32 as u64))
+            if uop.op == Op::FcvtWD {
+                ExecOut::from_wf(cvt_sf64_i32(s1, cpu.get_rm(uop.rm)))
+            } else {
+                ExecOut::from_wf(cvt_sf64_u32(s1, cpu.get_rm(uop.rm)))
+            }
         }
         Op::FcvtDW => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(with_fflags(Sf64::from_float(f64::from(s1 as i32))))
+            ExecOut::from_wf(cvt_i32_sf64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtDWu => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(with_fflags(Sf64::from_float(f64::from(s1 as u32))))
+            ExecOut::from_wf(cvt_u32_sf64(s1, cpu.get_rm(uop.rm)))
         }
         // RV64D
         Op::FcvtLD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(with_fflags(Sf64::to_float(s1) as i64 as u64))
+            ExecOut::from_wf(cvt_sf64_i64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtLuD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(with_fflags(Sf64::to_float(s1) as u64))
+            ExecOut::from_wf(cvt_sf64_u64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvXD | Op::FmvDX => {
             etry!(cpu.check_float_access_and_dirty(0));
@@ -2867,13 +2876,11 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FcvtDL => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            #[allow(clippy::cast_precision_loss)]
-            ExecOut::from_wf(with_fflags(Sf64::from_float(s1 as i64 as f64)))
+            ExecOut::from_wf(cvt_i64_sf64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtDLu => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            #[allow(clippy::cast_precision_loss)]
-            ExecOut::from_wf(with_fflags(Sf64::from_float(s1 as f64)))
+            ExecOut::from_wf(cvt_u64_sf64(s1, cpu.get_rm(uop.rm)))
         }
         // Remaining (all system-level) that weren't listed in the instr-table
         Op::Dret => todo!("Handling dret requires handling all of debug mode"),
