@@ -1,4 +1,6 @@
 #!/bin/bash
+shopt -s nullglob
+
 for class in passes fails
 do echo
    echo "$class:"

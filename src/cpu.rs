@@ -174,6 +174,26 @@ impl ExecOut {
             flags: wf.1 as u64,
         }
     }
+
+    /// Convert a 32-bit word result plus fflags to `ExecOut`.
+    ///
+    /// RV64 word-result instructions write a sign-extended 32-bit value to the
+    /// integer register, even when the source conversion is unsigned.
+    #[inline(always)]
+    #[must_use]
+    #[allow(clippy::cast_lossless)]
+    pub const fn from_wf_w(wf: (u64, u8)) -> Self {
+        let word = wf.0 & 0xffff_ffff;
+        let val = if word & 0x8000_0000 != 0 {
+            word | 0xffff_ffff_0000_0000
+        } else {
+            word
+        };
+        Self {
+            val,
+            flags: wf.1 as u64,
+        }
+    }
 }
 
 /// Like `?` but for functions returning `ExecOut`.
@@ -2661,11 +2681,11 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         Op::FcvtWS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(cvt_sf32_i32(s1, cpu.get_rm(uop.rm)))
+            ExecOut::from_wf_w(cvt_sf32_i32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FcvtWuS => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
-            ExecOut::from_wf(cvt_sf32_u32(s1, cpu.get_rm(uop.rm)))
+            ExecOut::from_wf_w(cvt_sf32_u32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvXW => {
             etry!(cpu.check_float_access_and_dirty(0));
@@ -2848,9 +2868,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         Op::FcvtWD | Op::FcvtWuD => {
             etry!(cpu.check_float_access_and_dirty(uop.rm));
             if uop.op == Op::FcvtWD {
-                ExecOut::from_wf(cvt_sf64_i32(s1, cpu.get_rm(uop.rm)))
+                ExecOut::from_wf_w(cvt_sf64_i32(s1, cpu.get_rm(uop.rm)))
             } else {
-                ExecOut::from_wf(cvt_sf64_u32(s1, cpu.get_rm(uop.rm)))
+                ExecOut::from_wf_w(cvt_sf64_u32(s1, cpu.get_rm(uop.rm)))
             }
         }
         Op::FcvtDW => {

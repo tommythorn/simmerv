@@ -5,7 +5,7 @@ For an up-to-date view, look at the current issues on github*.
 
 ## Correctness
 
-- Pass all of riscv-test (status: debug, svnapot, and lots of FP.
+- Pass all of riscv-test (status: debug and svnapot.
   Might punt on debug and svnapot for now)
 
 - ~~Pass all of riscof~~ Done (107/107 RV64IMC tests pass)

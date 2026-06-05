@@ -33,7 +33,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 ### RVA22 profile (complete)
 
 - [x] RV64IMAC
-- [x] RV64FD (*PARTIALLY*: flags/rounding modes not complete for all insns)
+- [x] RV64FD
 - [x] RV64Zifencei
 - [x] RV64Zicsr
 - [x] Zba, Zbb, Zbc, Zbs ("B" extension)
@@ -49,8 +49,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 - [ ] Svnapot
 - [-] PMP enforcement (0 entries implemented; all accesses permitted)
 
-The emulator supports all instructions listed above but some (like
-many FP instructions) are not 100% to the spec.
+The emulator supports all instructions listed above.
 
 - Passes all riscof (RISC-V Architectural Tests) for RV64IMC
 - Boots Buildroot, Debian Trixie, Ubuntu
