@@ -3,6 +3,7 @@
 use crate::device::Context;
 use crate::device::MemoryMapped;
 use crate::device::MemoryMappedInfo;
+use crate::device::MmioError;
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::device::dma_read_u16;
@@ -327,7 +328,7 @@ impl MemoryMapped for VirtioNet {
         offset: usize,
         size: usize,
         data: &mut [u8],
-    ) {
+    ) -> Result<(), MmioError> {
         if offset == 0 {
             debug!("virtio-net: probed by kernel (magic read)");
         }
@@ -361,7 +362,7 @@ impl MemoryMapped for VirtioNet {
             0x010..=0x013 => {
                 let word =
                     (self.device_features >> (u64::from(self.device_features_sel) * 32)) as u32;
-                read_u32(offset, size, word, data);
+                read_u32(offset, size, word, data)
             }
             0x034..=0x037 => read_u32(offset, size, MAX_QUEUE_SIZE, data),
             0x044..=0x047 => read_u32(offset, size, u32::from(self.queue_ready[q]), data),
@@ -376,21 +377,32 @@ impl MemoryMapped for VirtioNet {
                 for (j, slot) in data[..size].iter_mut().enumerate() {
                     *slot = cfg.get(i + j).copied().unwrap_or(0);
                 }
+                Ok(())
             }
-            _ => data[..size].fill(0),
+            _ => {
+                data[..size].fill(0);
+                Ok(())
+            }
         }
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn write(&mut self, _ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
+    fn write(
+        &mut self,
+        _ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &[u8],
+    ) -> Result<(), MmioError> {
         let q = self.q();
         match offset {
-            0x014..=0x017 => write_u32(offset, size, &mut self.device_features_sel, data),
+            0x014..=0x017 => write_u32(offset, size, &mut self.device_features_sel, data)?,
             0x020..=0x023 => {
                 // DriverFeatures word selected by DriverFeaturesSel (0 = low 32 bits, 1 = high)
                 let sel = self.driver_features_sel;
                 let mut word = (self.driver_features >> (u64::from(sel) * 32)) as u32;
-                write_u32(offset, size, &mut word, data);
+                write_u32(offset, size, &mut word, data)?;
                 if sel == 0 {
                     self.driver_features =
                         (self.driver_features & 0xffff_ffff_0000_0000) | u64::from(word);
@@ -399,10 +411,10 @@ impl MemoryMapped for VirtioNet {
                         (self.driver_features & 0x0000_0000_ffff_ffff) | (u64::from(word) << 32);
                 }
             }
-            0x024..=0x027 => write_u32(offset, size, &mut self.driver_features_sel, data),
-            0x030..=0x033 => write_u32(offset, size, &mut self.queue_select, data),
+            0x024..=0x027 => write_u32(offset, size, &mut self.driver_features_sel, data)?,
+            0x030..=0x033 => write_u32(offset, size, &mut self.queue_select, data)?,
             0x038..=0x03b => {
-                write_u32(offset, size, &mut self.queue_size[q], data);
+                write_u32(offset, size, &mut self.queue_size[q], data)?;
                 debug!("virtio-net: queue[{q}] size={}", self.queue_size[q]);
             }
             0x044 => {
@@ -411,7 +423,7 @@ impl MemoryMapped for VirtioNet {
             }
             // 0x045..=0x047: upper bytes of QueueReady — handled by wildcard
             0x050..=0x053 => {
-                write_u32(offset, size, &mut self.queue_notify, data);
+                write_u32(offset, size, &mut self.queue_notify, data)?;
                 let notified_q = self.queue_notify as usize & 1;
                 debug!("virtio-net: QueueNotify q={notified_q}");
                 if notified_q == TXQ && self.queue_ready[TXQ] {
@@ -420,11 +432,11 @@ impl MemoryMapped for VirtioNet {
             }
             0x064..=0x067 => {
                 let mut v = 0u32;
-                write_u32(offset, size, &mut v, data);
+                write_u32(offset, size, &mut v, data)?;
                 self.interrupt_status &= !v;
             }
             0x070..=0x073 => {
-                write_u32(offset, size, &mut self.status, data);
+                write_u32(offset, size, &mut self.status, data)?;
                 debug!(
                     "virtio-net: Status={:#04x} ({}{}{}{}{})",
                     self.status,
@@ -459,11 +471,12 @@ impl MemoryMapped for VirtioNet {
                     self.reset();
                 }
             }
-            0x080..=0x087 => write_u64(offset, size, &mut self.queue_desc_addr[q], data),
-            0x090..=0x097 => write_u64(offset, size, &mut self.queue_driver_addr[q], data),
-            0x0a0..=0x0a7 => write_u64(offset, size, &mut self.queue_device_addr[q], data),
+            0x080..=0x087 => write_u64(offset, size, &mut self.queue_desc_addr[q], data)?,
+            0x090..=0x097 => write_u64(offset, size, &mut self.queue_driver_addr[q], data)?,
+            0x0a0..=0x0a7 => write_u64(offset, size, &mut self.queue_device_addr[q], data)?,
             _ => {}
         }
+        Ok(())
     }
 
     fn service(&mut self, ctx: &mut Context, memory: &mut [(Range<u64>, Vec<u8>)]) {

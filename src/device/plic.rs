@@ -3,6 +3,7 @@
 use super::Context;
 use super::MemoryMapped;
 use super::MemoryMappedInfo;
+use super::MmioError;
 use super::Pack;
 use super::Unpack;
 use super::read_u32;
@@ -119,7 +120,7 @@ impl MemoryMapped for Plic {
         offset: usize,
         size: usize,
         data: &mut [u8],
-    ) {
+    ) -> Result<(), MmioError> {
         match offset {
             0x000000..=0x000fff => read_u32(offset, size, self.priorities[offset / 4], data),
             0x001000..=0x00107f => {
@@ -128,31 +129,42 @@ impl MemoryMapped for Plic {
                 let copy_len = src.len().min(size);
                 data[..copy_len].copy_from_slice(&src[..copy_len]);
                 data[copy_len..size].fill(0);
+                Ok(())
             }
             0x002080..=0x002087 => read_u64(offset, size, self.enabled, data),
             0x201000..=0x201003 => read_u32(offset, size, self.threshold, data),
             0x201004..=0x201007 => read_u32(offset, size, self.irq, data),
-            _ => data[..size].fill(0),
+            _ => {
+                data[..size].fill(0);
+                Ok(())
+            }
         }
     }
 
-    fn write(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
+    fn write(
+        &mut self,
+        ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &[u8],
+    ) -> Result<(), MmioError> {
         match offset {
             0x000000..=0x000fff => {
-                write_u32(offset, size, &mut self.priorities[offset / 4], data);
+                write_u32(offset, size, &mut self.priorities[offset / 4], data)?;
                 self.dirty = true;
             }
             0x002080..=0x002087 => {
-                write_u64(offset, size, &mut self.enabled, data);
+                write_u64(offset, size, &mut self.enabled, data)?;
                 self.dirty = true;
             }
             0x201000..=0x201003 => {
-                write_u32(offset, size, &mut self.threshold, data);
+                write_u32(offset, size, &mut self.threshold, data)?;
                 self.dirty = true;
             }
             0x201004..=0x201007 => {
                 let mut claimed_irq = 0;
-                write_u32(offset, size, &mut claimed_irq, data);
+                write_u32(offset, size, &mut claimed_irq, data)?;
                 if 0 < claimed_irq && claimed_irq < 64 {
                     self.clear_ip(claimed_irq);
                 }
@@ -160,6 +172,7 @@ impl MemoryMapped for Plic {
             _ => {}
         }
         self.update_irq(&mut ctx.mip);
+        Ok(())
     }
 
     fn service(&mut self, _ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {}

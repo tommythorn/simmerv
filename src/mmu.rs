@@ -4,6 +4,7 @@ use crate::cpu;
 use crate::csr;
 use crate::device::Context;
 use crate::device::MemoryMapped;
+use crate::device::MmioError;
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::device::clint::Clint;
@@ -144,6 +145,21 @@ impl Mmu {
     pub const NET_IRQ: u32 = 2;
     pub const SYSCON_BASE: u64 = 0x0010_0000;
     pub const SYSCON_END: u64 = 0x0010_1000;
+
+    fn log_mmio_error(
+        access: &str,
+        device: &str,
+        pa: u64,
+        base: u64,
+        offset: usize,
+        size: u64,
+        error: MmioError,
+    ) {
+        warn!(
+            "MMIO {access} fault on {device}: pa={pa:#x} base={base:#x} offset={offset:#x} \
+             size={size}: {error}"
+        );
+    }
 
     /// Creates a new `Mmu` with CLINT and PLIC; no RAM or `VirtIO`.
     /// Call `add_memory` and `add_device` (for `VirtIO`), and `attach_uart`
@@ -365,7 +381,12 @@ impl Mmu {
     /// Returns an `Exception` if the address translation fails.
     pub fn load_virt_u8(&mut self, va: u64) -> Result<u8, Exception> {
         let pa = self.translate_address(va, MemoryAccessType::Read, false)?;
-        Ok(self.load_phys_u8(pa))
+        self.load_mmio(pa, 1)
+            .map(|v| v.to_le_bytes()[0])
+            .map_err(|()| Exception {
+                trap: Trap::LoadAccessFault,
+                tval: va,
+            })
     }
 
     /// Loads multiple bytes. This method takes virtual address and translates
@@ -377,12 +398,9 @@ impl Mmu {
         );
         if va & 0xfff <= 0x1000 - width {
             let pa = self.translate_address(va, MemoryAccessType::Read, false)?;
-            Ok(match width {
-                1 => u64::from(self.load_phys_u8(pa)),
-                2 => u64::from(self.load_phys_u16(pa)),
-                4 => u64::from(self.load_phys_u32(pa)),
-                8 => self.load_phys_u64(pa),
-                _ => panic!("Width must be 1, 2, 4, or 8. {width:X}"),
+            self.load_mmio(pa, width).map_err(|()| Exception {
+                trap: Trap::LoadAccessFault,
+                tval: va,
             })
         } else if self.page_cross_access_traps() {
             Err(Exception {
@@ -583,13 +601,17 @@ impl Mmu {
                 next_service_in: None,
                 cycle: self.cycle,
             };
-            self.clint.1.read(
+            if let Err(error) = self.clint.1.read(
                 &mut ctx,
                 base,
                 offset,
                 size as usize,
                 &mut buf[..size as usize],
-            );
+            ) {
+                let device = self.clint.1.info().name;
+                Self::log_mmio_error("read", &device, pa, base, offset, size, error);
+                return Err(());
+            }
             self.mip = ctx.mip;
             return Ok(u64::from_le_bytes(buf));
         }
@@ -613,13 +635,17 @@ impl Mmu {
                 next_service_in: None,
                 cycle: self.cycle,
             };
-            self.plic.1.read(
+            if let Err(error) = self.plic.1.read(
                 &mut ctx,
                 base,
                 offset,
                 size as usize,
                 &mut buf[..size as usize],
-            );
+            ) {
+                let device = self.plic.1.info().name;
+                Self::log_mmio_error("read", &device, pa, base, offset, size, error);
+                return Err(());
+            }
             self.mip = ctx.mip;
             return Ok(u64::from_le_bytes(buf));
         }
@@ -645,13 +671,17 @@ impl Mmu {
                     next_service_in: None,
                     cycle: self.cycle,
                 };
-                self.devices[i].1.read(
+                if let Err(error) = self.devices[i].1.read(
                     &mut ctx,
                     base,
                     offset,
                     size as usize,
                     &mut buf[..size as usize],
-                );
+                ) {
+                    let device = self.devices[i].1.info().name;
+                    Self::log_mmio_error("read", &device, pa, base, offset, size, error);
+                    return Err(());
+                }
                 self.mip = ctx.mip;
                 if let Some(n) = ctx.next_service_in {
                     self.service_queue.push(Reverse((self.cycle + n as u64, i)));
@@ -661,9 +691,6 @@ impl Mmu {
         }
         Err(())
     }
-
-    #[allow(clippy::cast_possible_truncation)]
-    fn load_phys_u16(&mut self, pa: u64) -> u16 { self.load_mmio(pa, 2).unwrap_or(0) as u16 }
 
     #[allow(clippy::cast_possible_truncation)]
     pub fn load_phys_u32(&mut self, pa: u64) -> u32 { self.load_mmio(pa, 4).unwrap_or(0) as u32 }
@@ -686,7 +713,11 @@ impl Mmu {
     ///
     /// # Errors
     /// Returns `Err(())` if no device covers `pa`.
-    #[allow(clippy::result_unit_err, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::result_unit_err,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
     pub fn store_mmio(&mut self, pa: u64, value: u64, size: u64) -> Result<(), ()> {
         // RAM fast path
         for (range, mem) in &mut self.memory {
@@ -724,9 +755,15 @@ impl Mmu {
                 next_service_in: None,
                 cycle: self.cycle,
             };
-            self.clint
-                .1
-                .write(&mut ctx, base, offset, size as usize, &buf[..size as usize]);
+            if let Err(error) =
+                self.clint
+                    .1
+                    .write(&mut ctx, base, offset, size as usize, &buf[..size as usize])
+            {
+                let device = self.clint.1.info().name;
+                Self::log_mmio_error("write", &device, pa, base, offset, size, error);
+                return Err(());
+            }
             self.mip = ctx.mip;
             return Ok(());
         }
@@ -748,9 +785,15 @@ impl Mmu {
                 next_service_in: None,
                 cycle: self.cycle,
             };
-            self.plic
-                .1
-                .write(&mut ctx, base, offset, size as usize, &buf[..size as usize]);
+            if let Err(error) =
+                self.plic
+                    .1
+                    .write(&mut ctx, base, offset, size as usize, &buf[..size as usize])
+            {
+                let device = self.plic.1.info().name;
+                Self::log_mmio_error("write", &device, pa, base, offset, size, error);
+                return Err(());
+            }
             self.mip = ctx.mip;
             return Ok(());
         }
@@ -774,13 +817,17 @@ impl Mmu {
                     next_service_in: None,
                     cycle: self.cycle,
                 };
-                self.devices[i].1.write(
+                if let Err(error) = self.devices[i].1.write(
                     &mut ctx,
                     base,
                     offset,
                     size as usize,
                     &buf[..size as usize],
-                );
+                ) {
+                    let device = self.devices[i].1.info().name;
+                    Self::log_mmio_error("write", &device, pa, base, offset, size, error);
+                    return Err(());
+                }
                 self.mip = ctx.mip;
                 if let Some(n) = ctx.next_service_in {
                     self.service_queue.push(Reverse((self.cycle + n as u64, i)));

@@ -3,6 +3,7 @@
 use super::Context;
 use super::MemoryMapped;
 use super::MemoryMappedInfo;
+use super::MmioError;
 use super::Pack;
 use super::Unpack;
 use super::read_u32;
@@ -93,20 +94,37 @@ impl MemoryMapped for Clint {
     ///   0x00000..=0x00003: MSIP (u32)
     ///   0x04000..=0x04007: MTIMECMP (u64)
     ///   0x0bff8..=0x0bfff: MTIME (u64)
-    fn read(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &mut [u8]) {
+    fn read(
+        &mut self,
+        ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &mut [u8],
+    ) -> Result<(), MmioError> {
         match offset {
             0x00000..=0x00003 => read_u32(offset, size, u32::from(ctx.mip & MIP_MSIP != 0), data),
             0x04000..=0x04007 => read_u64(offset, size, self.mtimecmp, data),
             0x0bff8..=0x0bfff => read_u64(offset, size, self.read_mtime(), data),
-            _ => data[..size].fill(0),
+            _ => {
+                data[..size].fill(0);
+                Ok(())
+            }
         }
     }
 
-    fn write(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
+    fn write(
+        &mut self,
+        ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &[u8],
+    ) -> Result<(), MmioError> {
         match offset {
             0x00000..=0x00003 => {
                 let mut msip = 0u32;
-                write_u32(offset, size, &mut msip, data);
+                write_u32(offset, size, &mut msip, data)?;
                 if msip & 1 != 0 {
                     ctx.mip |= MIP_MSIP;
                 } else {
@@ -114,7 +132,7 @@ impl MemoryMapped for Clint {
                 }
             }
             0x04000..=0x04007 => {
-                write_u64(offset, size, &mut self.mtimecmp, data);
+                write_u64(offset, size, &mut self.mtimecmp, data)?;
                 ctx.mip &= !MIP_MTIP;
                 if self.mtimecmp > 0 && self.read_mtime() >= self.mtimecmp {
                     ctx.mip |= MIP_MTIP;
@@ -122,11 +140,12 @@ impl MemoryMapped for Clint {
             }
             0x0bff8..=0x0bfff => {
                 let mut new_mtime = self.read_mtime();
-                write_u64(offset, size, &mut new_mtime, data);
+                write_u64(offset, size, &mut new_mtime, data)?;
                 self.write_mtime(new_mtime);
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn service(&mut self, ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {

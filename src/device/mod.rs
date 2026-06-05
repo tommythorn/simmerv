@@ -2,6 +2,7 @@
 
 use crate::network_backend::NetworkBackend;
 use crate::serial_backend::SerialBackend;
+use std::fmt;
 use std::ops::Range;
 
 pub mod clint;
@@ -153,6 +154,10 @@ pub trait MemoryMapped {
     }
 
     /// Read `size` bytes starting at `base + offset` into `data`.
+    ///
+    /// # Errors
+    /// Returns `Err` when the requested MMIO access is not valid for the
+    /// target device register.
     fn read(
         &mut self,
         _ctx: &mut Context,
@@ -160,11 +165,16 @@ pub trait MemoryMapped {
         _offset: usize,
         size: usize,
         data: &mut [u8],
-    ) {
+    ) -> Result<(), MmioError> {
         data[..size].fill(0);
+        Ok(())
     }
 
     /// Write `size` bytes from `data` to `base + offset`.
+    ///
+    /// # Errors
+    /// Returns `Err` when the requested MMIO access is not valid for the
+    /// target device register.
     fn write(
         &mut self,
         _ctx: &mut Context,
@@ -172,7 +182,8 @@ pub trait MemoryMapped {
         _offset: usize,
         _size: usize,
         _data: &[u8],
-    ) {
+    ) -> Result<(), MmioError> {
+        Ok(())
     }
 
     /// Advance the device by one tick.  Sets `ctx.asserted_irq` if the device
@@ -184,6 +195,54 @@ pub trait MemoryMapped {
 
 pub struct MemoryMappedInfo {
     pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MmioError {
+    CrossesRegister {
+        offset: usize,
+        size: usize,
+        register_width: usize,
+    },
+    BufferTooSmall {
+        size: usize,
+        len: usize,
+    },
+    OutOfRange {
+        offset: usize,
+        size: usize,
+        device_len: usize,
+    },
+}
+
+impl fmt::Display for MmioError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CrossesRegister {
+                offset,
+                size,
+                register_width,
+            } => write!(
+                f,
+                "access at register byte offset {:#x} with size {} crosses {}-byte register",
+                offset & (register_width - 1),
+                size,
+                register_width
+            ),
+            Self::BufferTooSmall { size, len } => {
+                write!(f, "MMIO buffer is too small: need {size} bytes, got {len}")
+            }
+            Self::OutOfRange {
+                offset,
+                size,
+                device_len,
+            } => write!(
+                f,
+                "access at offset {offset:#x} with size {size} exceeds device register space \
+                 length {device_len:#x}"
+            ),
+        }
+    }
 }
 
 /// Passed to every device on `read` / `write` / `service`.
@@ -202,38 +261,80 @@ pub struct Context {
 // MMIO register helpers — sub-word-aligned reads and writes.
 // ---------------------------------------------------------------------------
 
-/// Read `size` bytes of `value` starting at byte `offset & (align-1)` into
-/// `data`.
-#[allow(clippy::missing_panics_doc)]
-pub fn read_u32(offset: usize, size: usize, value: u32, data: &mut [u8]) {
-    let byte_off = offset & 3;
-    assert!(byte_off + size <= 4);
-    data[..size].copy_from_slice(&value.to_le_bytes()[byte_off..byte_off + size]);
+const fn check_register_access(
+    offset: usize,
+    size: usize,
+    register_width: usize,
+    buffer_len: usize,
+) -> Result<usize, MmioError> {
+    if size > buffer_len {
+        return Err(MmioError::BufferTooSmall {
+            size,
+            len: buffer_len,
+        });
+    }
+    let byte_off = offset & (register_width - 1);
+    if byte_off + size > register_width {
+        return Err(MmioError::CrossesRegister {
+            offset,
+            size,
+            register_width,
+        });
+    }
+    Ok(byte_off)
 }
 
-#[allow(clippy::missing_panics_doc)]
-pub fn write_u32(offset: usize, size: usize, value: &mut u32, data: &[u8]) {
-    let byte_off = offset & 3;
-    assert!(byte_off + size <= 4);
+/// Read `size` bytes of `value` starting at byte `offset & (align-1)` into
+/// `data`.
+///
+/// # Errors
+/// Returns `Err` if the access crosses the end of the 32-bit register or the
+/// destination buffer is too small.
+pub fn read_u32(offset: usize, size: usize, value: u32, data: &mut [u8]) -> Result<(), MmioError> {
+    let byte_off = check_register_access(offset, size, 4, data.len())?;
+    data[..size].copy_from_slice(&value.to_le_bytes()[byte_off..byte_off + size]);
+    Ok(())
+}
+
+/// # Errors
+/// Returns `Err` if the access crosses the end of the 32-bit register or the
+/// source buffer is too small.
+pub fn write_u32(
+    offset: usize,
+    size: usize,
+    value: &mut u32,
+    data: &[u8],
+) -> Result<(), MmioError> {
+    let byte_off = check_register_access(offset, size, 4, data.len())?;
     let mut bytes = value.to_le_bytes();
     bytes[byte_off..byte_off + size].copy_from_slice(&data[..size]);
     *value = u32::from_le_bytes(bytes);
+    Ok(())
 }
 
-#[allow(clippy::missing_panics_doc)]
-pub fn read_u64(offset: usize, size: usize, value: u64, data: &mut [u8]) {
-    let byte_off = offset & 7;
-    assert!(byte_off + size <= 8);
+/// # Errors
+/// Returns `Err` if the access crosses the end of the 64-bit register or the
+/// destination buffer is too small.
+pub fn read_u64(offset: usize, size: usize, value: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    let byte_off = check_register_access(offset, size, 8, data.len())?;
     data[..size].copy_from_slice(&value.to_le_bytes()[byte_off..byte_off + size]);
+    Ok(())
 }
 
-#[allow(clippy::missing_panics_doc)]
-pub fn write_u64(offset: usize, size: usize, value: &mut u64, data: &[u8]) {
-    let byte_off = offset & 7;
-    assert!(byte_off + size <= 8);
+/// # Errors
+/// Returns `Err` if the access crosses the end of the 64-bit register or the
+/// source buffer is too small.
+pub fn write_u64(
+    offset: usize,
+    size: usize,
+    value: &mut u64,
+    data: &[u8],
+) -> Result<(), MmioError> {
+    let byte_off = check_register_access(offset, size, 8, data.len())?;
     let mut bytes = value.to_le_bytes();
     bytes[byte_off..byte_off + size].copy_from_slice(&data[..size]);
     *value = u64::from_le_bytes(bytes);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +398,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn read_u32_reports_cross_register_access() {
+        let mut data = [0; 4];
+
+        let err = read_u32(2, 4, 0x1234_5678, &mut data).unwrap_err();
+
+        assert_eq!(err, MmioError::CrossesRegister {
+            offset: 2,
+            size: 4,
+            register_width: 4
+        });
+    }
+
+    #[test]
+    fn write_u64_reports_short_source_buffer() {
+        let mut value = 0;
+
+        let err = write_u64(0, 8, &mut value, &[1, 2, 3, 4]).unwrap_err();
+
+        assert_eq!(err, MmioError::BufferTooSmall { size: 8, len: 4 });
+    }
+
     /// Save `device` at `base`, restore a fresh instance, save again, assert
     /// equal.
     fn round_trip<D: MemoryMapped>(base: u64, end: u64, device: &mut D, fresh: impl Fn() -> D) {
@@ -317,9 +440,9 @@ mod tests {
         let end = base + 8;
         let mut uart = uart::Uart::new(Box::new(DummySerialBackend::new()), 10);
         // Enable THRE interrupt (rising edge sets thre_ip internally)
-        uart.write(&mut mk_ctx(), base, 1, 1, &[0x02]);
+        uart.write(&mut mk_ctx(), base, 1, 1, &[0x02]).unwrap();
         // Set LCR to a non-default value (8N1)
-        uart.write(&mut mk_ctx(), base, 3, 1, &[0x03]);
+        uart.write(&mut mk_ctx(), base, 3, 1, &[0x03]).unwrap();
         round_trip(base, end, &mut uart, || {
             uart::Uart::new(Box::new(DummySerialBackend::new()), 10)
         });
@@ -330,15 +453,17 @@ mod tests {
         let base = 0x0200_0000;
         let mut clint = clint::Clint::new();
         // Set MSIP = 1
-        clint.write(&mut mk_ctx(), base, 0, 1, &[0x01]);
+        clint.write(&mut mk_ctx(), base, 0, 1, &[0x01]).unwrap();
         // Set MTIMECMP = 0x12345678
-        clint.write(
-            &mut mk_ctx(),
-            base,
-            0x4000,
-            4,
-            &0x1234_5678u32.to_le_bytes(),
-        );
+        clint
+            .write(
+                &mut mk_ctx(),
+                base,
+                0x4000,
+                4,
+                &0x1234_5678u32.to_le_bytes(),
+            )
+            .unwrap();
 
         round_trip(base, base + 8, &mut clint, clint::Clint::new);
     }
@@ -348,9 +473,11 @@ mod tests {
         let base = 0x0c00_0000u64;
         let mut plic = plic::Plic::new();
         // Set priority 7 for UART IRQ (source 10)
-        plic.write(&mut mk_ctx(), base, 10 * 4, 4, &7u32.to_le_bytes());
+        plic.write(&mut mk_ctx(), base, 10 * 4, 4, &7u32.to_le_bytes())
+            .unwrap();
         // Enable UART IRQ in supervisor context (offset 0x2081, bit 2 = IRQ 10)
-        plic.write(&mut mk_ctx(), base, 0x2081, 1, &[1 << 2]);
+        plic.write(&mut mk_ctx(), base, 0x2081, 1, &[1 << 2])
+            .unwrap();
         round_trip(base, base + 0x400_0000, &mut plic, plic::Plic::new);
     }
 

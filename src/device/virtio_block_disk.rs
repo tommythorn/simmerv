@@ -3,6 +3,7 @@
 use crate::device::Context;
 use crate::device::MemoryMapped;
 use crate::device::MemoryMappedInfo;
+use crate::device::MmioError;
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::device::dma_read_u16;
@@ -549,16 +550,25 @@ impl MemoryMapped for VirtioBlockDisk {
         offset: usize,
         size: usize,
         data: &mut [u8],
-    ) {
+    ) -> Result<(), MmioError> {
         for (i, slot) in data[..size].iter_mut().enumerate() {
             *slot = self.load((offset + i) as u64);
         }
+        Ok(())
     }
 
-    fn write(&mut self, _ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
+    fn write(
+        &mut self,
+        _ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &[u8],
+    ) -> Result<(), MmioError> {
         for (i, &byte) in data[..size].iter().enumerate() {
             self.store((offset + i) as u64, byte);
         }
+        Ok(())
     }
 
     fn service(&mut self, ctx: &mut Context, memory: &mut [(Range<u64>, Vec<u8>)]) {

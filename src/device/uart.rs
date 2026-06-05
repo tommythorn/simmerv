@@ -3,6 +3,7 @@
 use crate::device::Context;
 use crate::device::MemoryMapped;
 use crate::device::MemoryMappedInfo;
+use crate::device::MmioError;
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::serial_backend::SerialBackend;
@@ -130,7 +131,30 @@ impl MemoryMapped for Uart {
         Ok(())
     }
 
-    fn read(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &mut [u8]) {
+    fn read(
+        &mut self,
+        ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &mut [u8],
+    ) -> Result<(), MmioError> {
+        if size > data.len() {
+            return Err(MmioError::BufferTooSmall {
+                size,
+                len: data.len(),
+            });
+        }
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > self.regs.len())
+        {
+            return Err(MmioError::OutOfRange {
+                offset,
+                size,
+                device_len: self.regs.len(),
+            });
+        }
         let dlab = self.dlab();
         for i in offset..offset + size {
             // smolrv64 DUT: returns 0 for DLL/DLM reads (divisor ignored) and
@@ -151,9 +175,33 @@ impl MemoryMapped for Uart {
             }
         }
         ctx.asserted_irq = self.interrupting.then_some(self.irq);
+        Ok(())
     }
 
-    fn write(&mut self, ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
+    fn write(
+        &mut self,
+        ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &[u8],
+    ) -> Result<(), MmioError> {
+        if size > data.len() {
+            return Err(MmioError::BufferTooSmall {
+                size,
+                len: data.len(),
+            });
+        }
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > self.regs.len())
+        {
+            return Err(MmioError::OutOfRange {
+                offset,
+                size,
+                device_len: self.regs.len(),
+            });
+        }
         let dlab = self.dlab();
         for i in offset..offset + size {
             let byte = data[i - offset];
@@ -194,6 +242,7 @@ impl MemoryMapped for Uart {
             }
         }
         ctx.asserted_irq = self.interrupting.then_some(self.irq);
+        Ok(())
     }
 
     fn service(&mut self, ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {

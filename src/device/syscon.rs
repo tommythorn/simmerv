@@ -1,6 +1,7 @@
 use super::Context;
 use super::MemoryMapped;
 use super::MemoryMappedInfo;
+use super::MmioError;
 use super::Pack;
 use super::Unpack;
 use super::write_u32;
@@ -32,13 +33,21 @@ impl Syscon {
 }
 
 impl MemoryMapped for Syscon {
-    fn write(&mut self, _ctx: &mut Context, _base: u64, offset: usize, size: usize, data: &[u8]) {
-        write_u32(offset, size, &mut self.reg, data);
+    fn write(
+        &mut self,
+        _ctx: &mut Context,
+        _base: u64,
+        offset: usize,
+        size: usize,
+        data: &[u8],
+    ) -> Result<(), MmioError> {
+        write_u32(offset, size, &mut self.reg, data)?;
         match self.reg {
             0x5555 => self.poweroff.store(true, Ordering::Relaxed),
             0x7777 => self.reset.store(true, Ordering::Relaxed),
             _ => {}
         }
+        Ok(())
     }
 
     fn service(&mut self, _ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {}
