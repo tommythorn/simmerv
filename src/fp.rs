@@ -750,7 +750,7 @@ pub trait Sf {
         if is_unsigned {
             (value & mask) as u64
         } else if is_negative {
-            Self::sign_extend(((!value) + 1) & mask, bits)
+            Self::sign_extend((!value).wrapping_add(1) & mask, bits)
         } else {
             Self::sign_extend(value, bits)
         }

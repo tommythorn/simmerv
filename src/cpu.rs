@@ -3082,6 +3082,13 @@ mod test_cpu {
     fn initialize() { let _cpu = create_cpu(); }
 
     #[test]
+    fn decode_fcvt_xf_preserves_rounding_mode() {
+        let uop = decode(MEMORY_BASE, 0xc010_1053);
+        assert_eq!(uop.op, Op::FcvtWuS);
+        assert_eq!(uop.rm, RoundingMode::RoundTowardsZero as u8);
+    }
+
+    #[test]
     fn update_pc() {
         let mut cpu = create_cpu();
         assert_eq!(0, cpu.read_pc());

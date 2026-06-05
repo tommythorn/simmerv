@@ -1017,10 +1017,12 @@ fn decode_r(_addr: u64, word: u32, op: Op) -> Uop {
 }
 
 fn decode_r_xf(_addr: u64, word: u32, op: Op) -> Uop {
+    #[allow(clippy::cast_possible_truncation)]
     Uop {
         op,
         rd: xd((word >> 7) & 31),  // [11:7]
         rs1: f((word >> 15) & 31), // [19:15]
+        rm: ((word >> 12) & 7) as u8,
         ..Uop::default()
     }
 }

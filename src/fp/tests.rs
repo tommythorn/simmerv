@@ -235,6 +235,18 @@ fn test_translated_conversions() {
         (0x7fff_ffff, fflag::INVALIDOP),
     );
     test_wf(
+        cvt_sf32_u32(fp32(0, 0x80, 0x20003f), RoundingMode::RoundTowardsZero),
+        (2, fflag::INEXACT),
+    );
+    test_wf(
+        cvt_sf32_u64(fp32(0, 0x7e, 0x000001), RoundingMode::RoundTowardsZero),
+        (0, fflag::INEXACT),
+    );
+    test_wf(
+        cvt_sf32_i32(fp32(1, 0x7e, 0x6e138c), RoundingMode::RoundTowardsZero),
+        (0, fflag::INEXACT),
+    );
+    test_wf(
         fcvt_s_d(f64::MAX.to_bits(), RoundingMode::RoundNearestEven),
         (fp32(0, 0xff, 0), fflag::OVERFLOW | fflag::INEXACT),
     );
