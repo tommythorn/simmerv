@@ -10,8 +10,6 @@
 //! Copyright (c) 2016 Fabrice Bellard
 //! Copyright (C) 2017,2018,2019, Esperanto Technologies Inc.
 
-use crate::native_fp;
-
 use num_derive::FromPrimitive;
 
 pub const NAN_BOX_F32: u64 = 0xFFFF_FFFF_0000_0000;
@@ -56,6 +54,7 @@ pub struct Sf32;
 pub struct Sf64;
 
 pub trait Sf {
+    // Format description.
     type F;
     const N: usize;
     const MANT_SIZE: usize;
@@ -85,6 +84,7 @@ pub trait Sf {
     #[must_use]
     fn nanbox(a: u64) -> u64;
 
+    // Bit-field helpers.
     #[must_use]
     fn sign(a: u64) -> u64 { (a >> (Self::N - 1)) & 1 }
 
@@ -104,6 +104,7 @@ pub trait Sf {
     #[must_use]
     fn qnan() -> u64 { Self::nanbox(Self::QNAN) }
 
+    // Classification and predicates.
     #[must_use]
     fn fclass(a: u64) -> Fclass {
         let a = Self::unbox(a);
@@ -165,6 +166,7 @@ pub trait Sf {
         }
     }
 
+    // Comparisons.
     #[must_use]
     fn feq(a0: u64, b0: u64) -> (u64, u8) {
         let (a, b) = (Self::unbox(a0), Self::unbox(b0));
@@ -220,6 +222,7 @@ pub trait Sf {
         Self::fadd(a, b ^ Self::SIGN_MASK, rm)
     }
 
+    // Arithmetic operations.
     #[must_use]
     /* Based heavily on Fabrice Bellard's RISCVEMU/TinyEMU */
     fn fadd(a: u64, b: u64, rm: RoundingMode) -> (u64, u8) {
@@ -284,6 +287,7 @@ pub trait Sf {
         Self::normalize(a_sign, a_exp, a_mant, rm)
     }
 
+    // Normalization and fixed-width integer helpers.
     #[must_use]
     fn normalize(a_sign: u64, a_exp: i64, mut a_mant: u64, rm: RoundingMode) -> (u64, u8) {
         // a_mant is considered to have at most F_SIZE - 1 bits
@@ -688,6 +692,7 @@ pub trait Sf {
         }
     }
 
+    // Integer conversion helpers.
     #[must_use]
     fn rshift_rnd_u128(a: u128, d: i64) -> u128 {
         if d == 0 {
@@ -846,6 +851,7 @@ pub trait Sf {
         Self::normalize(a_sign, a_exp, r as u64, rm)
     }
 
+    // Final rounding and packing.
     #[must_use]
     fn round_pack(a_sign: u64, mut a_exp: i64, mut a_mant: u64, rm: RoundingMode) -> (u64, u8) {
         use RoundingMode::RoundDown;
@@ -945,27 +951,7 @@ pub trait Sf {
         (1 - shift as i64, mant << shift)
     }
 
-    fn map1(a: u64, f: impl Fn(Self::F) -> Self::F) -> (u64, u8) {
-        let a = Self::to_float(a);
-        let r = f(a);
-        let fflags = native_fp::fflags_raised();
-        (Self::from_float(r), fflags)
-    }
-
-    fn map2(a: u64, b: u64, f: impl Fn(Self::F, Self::F) -> Self::F) -> (u64, u8) {
-        let (a, b) = (Self::to_float(a), Self::to_float(b));
-        let r = f(a, b);
-        let fflags = native_fp::fflags_raised();
-        (Self::from_float(r), fflags)
-    }
-
-    fn map3(a: u64, b: u64, c: u64, f: impl Fn(Self::F, Self::F, Self::F) -> Self::F) -> (u64, u8) {
-        let (a, b, c) = (Self::to_float(a), Self::to_float(b), Self::to_float(c));
-        let r = f(a, b, c);
-        let fflags = native_fp::fflags_raised();
-        (Self::from_float(r), fflags)
-    }
-
+    // Min/max.
     #[must_use]
     fn min(a: u64, b: u64) -> (u64, u8)
     where
@@ -1043,6 +1029,8 @@ pub trait Sf {
     }
 }
 
+// Concrete floating-point formats.
+
 impl Sf for Sf32 {
     const N: usize = 32;
     const MANT_SIZE: usize = 23;
@@ -1111,6 +1099,8 @@ impl Sf for Sf16 {
 
     fn nanbox(r: u64) -> u64 { r | NAN_BOX_F16 }
 }
+
+// Float-to-float conversions.
 
 // f16 → f32 (widening, always exact)
 #[must_use]
@@ -1334,6 +1324,8 @@ pub fn fcvt_s_d(a: u64, rm: RoundingMode) -> (u64, u8) {
     Sf32::normalize(a_sign, a_exp, a_mant, rm)
 }
 
+// Integer-to-float conversions.
+
 // i64 -> f32
 #[must_use]
 pub fn cvt_i64_sf32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_from_int(a, rm, 64, false) }
@@ -1351,18 +1343,6 @@ pub fn cvt_u32_sf32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_from_int(
 pub fn cvt_i32_sf32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_from_int(a, rm, 32, false) }
 
 #[must_use]
-pub fn cvt_sf32_i32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 32, false) }
-
-#[must_use]
-pub fn cvt_sf32_u32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 32, true) }
-
-#[must_use]
-pub fn cvt_sf32_i64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 64, false) }
-
-#[must_use]
-pub fn cvt_sf32_u64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 64, true) }
-
-#[must_use]
 pub fn cvt_i32_sf64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf64::cvt_from_int(a, rm, 32, false) }
 
 #[must_use]
@@ -1373,6 +1353,20 @@ pub fn cvt_i64_sf64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf64::cvt_from_int(
 
 #[must_use]
 pub fn cvt_u64_sf64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf64::cvt_from_int(a, rm, 64, true) }
+
+// Float-to-integer conversions.
+
+#[must_use]
+pub fn cvt_sf32_i32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 32, false) }
+
+#[must_use]
+pub fn cvt_sf32_u32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 32, true) }
+
+#[must_use]
+pub fn cvt_sf32_i64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 64, false) }
+
+#[must_use]
+pub fn cvt_sf32_u64(a: u64, rm: RoundingMode) -> (u64, u8) { Sf32::cvt_to_int(a, rm, 64, true) }
 
 #[must_use]
 pub fn cvt_sf64_i32(a: u64, rm: RoundingMode) -> (u64, u8) { Sf64::cvt_to_int(a, rm, 32, false) }
