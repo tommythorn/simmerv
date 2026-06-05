@@ -109,6 +109,9 @@ pub unsafe extern "C" fn simmerv_set_seip(ctx: *mut SimmervCtx, asserted: bool) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn simmerv_set_stip_armed(ctx: *mut SimmervCtx, asserted: bool) {
     if let Some(ctx) = unsafe { ctx.as_mut() } {
+        // Being driven by the cosim: the DUT owns interrupt-acceptance timing,
+        // so disable the standalone one-retire xRET defer (see Cpu::cosim_mode).
+        ctx.emu.cpu.cosim_mode = true;
         ctx.emu.cpu.cosim_stip_armed = asserted;
     }
 }
@@ -122,6 +125,7 @@ pub unsafe extern "C" fn simmerv_set_stip_armed(ctx: *mut SimmervCtx, asserted: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn simmerv_set_seip_armed(ctx: *mut SimmervCtx, asserted: bool) {
     if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.cosim_mode = true;
         ctx.emu.cpu.cosim_seip_armed = asserted;
     }
 }

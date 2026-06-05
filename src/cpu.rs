@@ -316,6 +316,9 @@ pub enum IcacheFlushKind {
 }
 
 // XXX rename ArchState?
+// A CPU model legitimately carries many independent boolean micro-arch flags
+// (wfi, defer/cosim gating, ...); they are not a state machine to refactor.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cpu {
     // The essential CPU state
     rf: [u64; 65],
@@ -334,6 +337,20 @@ pub struct Cpu {
     // Wait-For-Interrupt; relax and await further instruction
     // XXX needn't be part of CPU state; is part of fetch
     wfi: bool,
+
+    // Standalone: skip the interrupt check for exactly one retire after an xRET,
+    // so the MRET/SRET-target instruction makes forward progress before a still
+    // level-asserted interrupt (STIP via mtime>=stimecmp, SEIP via the PLIC)
+    // re-fires. Without it the trap-return path livelocks (hangs) under a
+    // continuously pending interrupt. In cosim the DUT drives interrupt timing
+    // via cosim_*_armed, so this is disabled there (see cosim_mode).
+    defer_interrupt: bool,
+
+    // True when driven by the cosim harness (the armed-gate setters turn it on).
+    // In cosim the DUT governs interrupt-acceptance timing, so defer_interrupt
+    // is suppressed — deferring would skip an interrupt the DUT takes at the
+    // xRET target and diverge. Standalone leaves this false.
+    pub cosim_mode: bool,
 
     // Cosim: gate on taking the supervisor timer interrupt (STIP). The DUT's
     // STIP latches as soon as mtime>=stimecmp but it only vectors at the next
@@ -414,6 +431,8 @@ impl Cpu {
             seqno: 0,
             cycle: 0,
             wfi: false,
+            defer_interrupt: false,
+            cosim_mode: false,
             cosim_stip_armed: true,
             cosim_seip_armed: true,
             armed_csr_read: None,
@@ -878,7 +897,13 @@ impl Cpu {
         }
 
         let pc_before_int = self.pc;
-        self.handle_interrupt();
+        // Standalone defers one retire after xRET (forward-progress guarantee);
+        // cosim never defers (the DUT-follow armed gates own the timing).
+        let defer = self.defer_interrupt && !self.cosim_mode;
+        self.defer_interrupt = false;
+        if !defer {
+            self.handle_interrupt();
+        }
         if self.pc != pc_before_int {
             cap.trapped = 1;
             cap.trap_cause = match self.mmu.prv {
@@ -2868,6 +2893,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
+            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::Sret => {
@@ -2890,6 +2916,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
+            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::SfenceVma | Op::SinvalVma => {
