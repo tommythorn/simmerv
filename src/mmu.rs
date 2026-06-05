@@ -117,6 +117,7 @@ pub const PTE_V_MASK: u64 = 1 << 0;
 pub const PTE_U_MASK: u64 = 1 << 4;
 pub const PTE_A_MASK: u64 = 1 << 6;
 pub const PTE_D_MASK: u64 = 1 << 7;
+pub const PTE_N_MASK: u64 = 1 << 63;
 
 #[derive(Clone, Copy, Default)]
 pub struct TlbDisplayStats {
@@ -1136,10 +1137,15 @@ impl Mmu {
                 break;
             }
 
-            let paddr = (pte >> 10) << PG_SHIFT;
             let mut xwr = (pte >> 1) & 7;
+            let ppn = pte >> 10;
+            let is_napot = pte & PTE_N_MASK != 0;
             if xwr == 0 {
-                pte_addr = paddr;
+                if is_napot {
+                    warn!("** {prv:?} mode access to {va:08x} denied: NAPOT non-leaf PTE");
+                    break;
+                }
+                pte_addr = ppn << PG_SHIFT;
                 continue;
             }
 
@@ -1174,9 +1180,11 @@ impl Mmu {
             }
 
             /* 6. Check for misaligned superpages */
-            let ppn = pte >> 10;
             let j = levels - 1 - i;
-            if ((1 << j) - 1) & ppn != 0 {
+            if is_napot && (j != 0 || ppn & 0xf != 0x8) {
+                warn!("** access to {va:08x} denied: unsupported NAPOT PTE {ppn:#x}");
+                break;
+            } else if !is_napot && ((1 << j) - 1) & ppn != 0 {
                 warn!("** access to {va:08x} denied: misaligned superpage {i} / {ppn}");
                 break;
             }
@@ -1204,7 +1212,14 @@ impl Mmu {
             }
 
             let vaddr_mask = (1 << vaddr_shift) - 1;
-            return Ok((paddr & !vaddr_mask | va & vaddr_mask, pte));
+            let paddr = if is_napot {
+                let ppn = (ppn & !0xf) | ((va >> PG_SHIFT) & 0xf);
+                (ppn << PG_SHIFT) | (va & ((1 << PG_SHIFT) - 1))
+            } else {
+                let paddr = ppn << PG_SHIFT;
+                paddr & !vaddr_mask | va & vaddr_mask
+            };
+            return Ok((paddr, pte));
         }
 
         page_fault(va, access)
