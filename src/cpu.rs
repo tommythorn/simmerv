@@ -317,7 +317,7 @@ pub enum IcacheFlushKind {
 
 // XXX rename ArchState?
 // A CPU model legitimately carries many independent boolean micro-arch flags
-// (wfi, defer/cosim gating, ...); they are not a state machine to refactor.
+// (wfi, cosim_mode, ...); they are not a state machine to refactor.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cpu {
     // The essential CPU state
@@ -338,18 +338,17 @@ pub struct Cpu {
     // XXX needn't be part of CPU state; is part of fetch
     wfi: bool,
 
-    // Standalone: skip the interrupt check for exactly one retire after an xRET,
-    // so the MRET/SRET-target instruction makes forward progress before a still
-    // level-asserted interrupt (STIP via mtime>=stimecmp, SEIP via the PLIC)
-    // re-fires. Without it the trap-return path livelocks (hangs) under a
-    // continuously pending interrupt. In cosim the DUT drives interrupt timing
-    // via cosim_*_armed, so this is disabled there (see cosim_mode).
-    defer_interrupt: bool,
-
-    // True when driven by the cosim harness (the armed-gate setters turn it on).
-    // In cosim the DUT governs interrupt-acceptance timing, so defer_interrupt
-    // is suppressed — deferring would skip an interrupt the DUT takes at the
-    // xRET target and diverge. Standalone leaves this false.
+    // True when driven by the cosim harness (the armed-gate setters turn it
+    // on). The standalone block executor (run_soc/step_block) only checks
+    // interrupts at block/batch boundaries, and a CSR write to
+    // sstatus/sie/mstatus/mie is NOT block-terminal — so standalone takes a
+    // newly-unmasked interrupt INLINE at the enabling write (see write_csr),
+    // otherwise an enable-then-disable window within one block never delivers
+    // the pending IRQ and the kernel spins forever. The cosim runs one
+    // instruction per step_retire and checks interrupts between every
+    // instruction, so it must NOT take them inline: doing so fires a retire
+    // earlier than the DUT (which vectors at the next fetch boundary) and
+    // diverges. cosim_mode suppresses the inline take.
     pub cosim_mode: bool,
 
     // Cosim: gate on taking the supervisor timer interrupt (STIP). The DUT's
@@ -431,7 +430,6 @@ impl Cpu {
             seqno: 0,
             cycle: 0,
             wfi: false,
-            defer_interrupt: false,
             cosim_mode: false,
             cosim_stip_armed: true,
             cosim_seip_armed: true,
@@ -897,13 +895,7 @@ impl Cpu {
         }
 
         let pc_before_int = self.pc;
-        // Standalone defers one retire after xRET (forward-progress guarantee);
-        // cosim never defers (the DUT-follow armed gates own the timing).
-        let defer = self.defer_interrupt && !self.cosim_mode;
-        self.defer_interrupt = false;
-        if !defer {
-            self.handle_interrupt();
-        }
+        self.handle_interrupt();
         if self.pc != pc_before_int {
             cap.trapped = 1;
             cap.trap_cause = match self.mmu.prv {
@@ -1415,11 +1407,18 @@ impl Cpu {
         }
 
         self.write_csr_raw(csr, value);
-        // Do NOT take a newly-unmasked interrupt inline here. Interrupts are
-        // delivered between instructions, at the step_retire boundary; taking
-        // one mid-instruction (during the csrXX that enables it) fires it a
-        // whole instruction too early and diverges from smolrv64, which takes
-        // it at the next fetch boundary.
+        // Standalone: deliver a newly-unmasked interrupt AT the enabling write.
+        // The block executor only checks interrupts at block/batch boundaries,
+        // and these CSR writes are not block-terminal, so a local_irq_enable /
+        // local_irq_disable window within one block would otherwise pass with
+        // the pending IRQ never delivered -> the kernel spins forever waiting
+        // for the handler's side effect. Under cosim this must be skipped: the
+        // per-retire loop already checks interrupts between instructions, and
+        // taking one inline fires it a retire earlier than smolrv64 (which
+        // vectors at the next fetch boundary) and diverges.
+        if !self.cosim_mode && matches!(csr, Csr::Sstatus | Csr::Sie | Csr::Mstatus | Csr::Mie) {
+            self.handle_interrupt();
+        }
         Ok(())
     }
 
@@ -2893,7 +2892,6 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
-            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::Sret => {
@@ -2916,7 +2914,6 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
-            cpu.defer_interrupt = true;
             ExecOut::ok(0)
         }
         Op::SfenceVma | Op::SinvalVma => {
