@@ -22,7 +22,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
 ## Features
 
-- Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
+- Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Svpbmt_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
   (CLINT, PLIC, NS16550A UART, virtio block device, and VirtIO ethernet)
 - Targets native and WASM
 - Snapshots
@@ -45,8 +45,9 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 - [x] Svade (hardware A/D fault-on-access)
 - [x] Sstc (stimecmp/menvcfg timer compare)
 - [x] Sv39, Sv48, Sv57
+- [x] Svpbmt (page-based memory types; PTEs accepted, no caches to model)
 - [x] Privileged Spec 1.12 (mcounteren/scounteren, senvcfg, PMP stub with 0 entries)
-- [ ] Svnapot
+- [x] Svnapot
 - [-] PMP enforcement (0 entries implemented; all accesses permitted)
 
 The emulator supports all instructions listed above.
@@ -62,7 +63,7 @@ forget `git lfs install` also) and recheckout if needed.  Otherwise
 the images will be small files with LFS pointers.
 
 ```sh
-$ cargo r -r -- linux/fw_payload.elf -f linux/rootfs.img
+$ cargo r -r -- linux/fw_payload.bin,0x80000000 -f linux/rootfs.img
 ```
 
 or
@@ -76,7 +77,7 @@ Allocate 2 GiB, use a device tree with initramfs at 0xa0000000 and
 load the initrd2+gdb.cpio binary at that address.
 
 ```sh
-$ (cd linux;cargo r -r -- -m 2048 -d with-initrd.dtb fw_payload.elf initrd2+gdb.cpio,0xa0000000)
+$ (cd linux;cargo r -r -- -m 2048 -d with-initrd.dtb fw_payload.bin,0x80000000 initrd2+gdb.cpio,0xa0000000)
 ```
 
 ## How to run riscv-tests
