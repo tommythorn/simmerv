@@ -1138,7 +1138,16 @@ impl Mmu {
             }
 
             let mut xwr = (pte >> 1) & 7;
-            let ppn = pte >> 10;
+            // Architectural PPN is bits [53:10] (44 bits).  Mask so the
+            // Svnapot N bit, the Svpbmt PBMT field [62:61], and the reserved
+            // bits [60:54] cannot leak into the formed physical address.
+            // NOTE (cosim gating gap): we accept PBMT pages unconditionally and
+            // do NOT gate on menvcfg.PBMTE, nor fault on PBMT!=0 when disabled or
+            // on the reserved PBMT=11 encoding.  A spec-correct DUT page-faults
+            // those; we treat every page as plain cached memory.  Safe only
+            // because OpenSBI sets menvcfg before S-mode.  See MENVCFG_STCE in
+            // csr.rs.
+            let ppn = (pte >> 10) & ((1u64 << 44) - 1);
             let is_napot = pte & PTE_N_MASK != 0;
             if xwr == 0 {
                 if is_napot {

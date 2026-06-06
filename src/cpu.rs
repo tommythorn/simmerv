@@ -2178,6 +2178,11 @@ fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: 
 )]
 fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u64) -> ExecOut {
     match uop.op {
+        // NOTE (cosim gating gap): the Zicbom (CboInval/Clean/Flush) ops are
+        // no-ops on this coherent functional model, and we do not gate them on
+        // menvcfg.CBIE/CBCFE.  A spec-correct DUT traps these (illegal instr)
+        // when the enable bits are clear; we never do.  Safe only because
+        // OpenSBI sets menvcfg before S-mode.  See MENVCFG_STCE in csr.rs.
         Op::CNop
         | Op::SfenceWInval
         | Op::SfenceInvalIr
@@ -3071,6 +3076,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
         Op::CboZero => {
+            // NOTE (cosim gating gap): not gated on menvcfg.CBZE.  A spec-correct
+            // DUT traps cbo.zero (illegal instr) when CBZE is clear; we always
+            // execute it.  Safe only because OpenSBI sets menvcfg before S-mode.
+            // See MENVCFG_STCE in csr.rs.
             let base = s1 & !63;
             for i in 0..8u64 {
                 etry!(cpu.memop_write(base, i * 8, 0, 8));

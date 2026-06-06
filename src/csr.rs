@@ -77,6 +77,16 @@ impl Display for Csr {
 
 pub const MENVCFG_STCE: u64 = 1 << 63; // Sstc: enables stimecmp in S-mode
 
+// NOTE (cosim gating gap): menvcfg also defines the enable bits for the cache
+// extensions — CBZE (cbo.zero), CBIE[1:0]/CBCFE (Zicbom cbo.clean/flush/inval),
+// and PBMTE (Svpbmt).  We do NOT implement those bits or gate on them yet: the
+// cbo.* ops in cpu.rs execute unconditionally and the MMU accepts PBMT pages
+// regardless of PBMTE.  This matches the DUT only because OpenSBI sets menvcfg
+// before S-mode runs, so Linux never executes a cbo / touches a PBMT page while
+// the bits are clear.  A DUT that traps when these bits are clear would diverge
+// in that (firmware-only) window.  Add CBZE/CBIE/CBCFE/PBMTE here and gate the
+// ops if exact enable-bit parity is ever needed.
+
 pub const MIP_MEIP: u64 = 0x800;
 pub const MIP_MTIP: u64 = 0x080;
 pub const MIP_MSIP: u64 = 0x008;
