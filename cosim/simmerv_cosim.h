@@ -60,6 +60,10 @@ void        simmerv_set_plic_ip(SimmervCtx*, uint32_t irq, bool asserted);
 // dependent (counters, externally-driven mip bits) so the DUT's read
 // authoritatively wins.
 void        simmerv_arm_csr_read(SimmervCtx*, uint16_t csrno, uint64_t value);
+// Arm the DUT's loaded value for the next retire; simmerv uses it only if its
+// own load resolves to MMIO (device-register reads are model-specific). Also
+// auto-cleared at the end of simmerv_step_retire.
+void        simmerv_arm_load_value(SimmervCtx*, uint64_t value);
 int32_t     simmerv_step_retire(SimmervCtx*, SimmervRetire* out);
 
 #ifdef __cplusplus

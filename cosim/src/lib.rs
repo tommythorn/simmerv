@@ -155,6 +155,20 @@ pub unsafe extern "C" fn simmerv_arm_csr_read(ctx: *mut SimmervCtx, csrno: u16, 
     }
 }
 
+/// Arm the value the DUT loaded for the instruction about to retire. simmerv
+/// consumes it only if its own load for that instruction resolves to MMIO,
+/// letting the DUT's device-register read win (device bits are model-specific
+/// and side-effecting; the two models cannot be expected to agree). Harmless
+/// to arm on non-load or RAM-load retires: the value is dropped at step end.
+/// Call before `simmerv_step_retire` whenever the DUT wrote a destination
+/// register and did not trap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_arm_load_value(ctx: *mut SimmervCtx, value: u64) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.armed_load_value = Some(value);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn simmerv_debug_dump(ctx: *mut SimmervCtx, out: *mut u64) {
     if let (Some(ctx), Some(out)) = (unsafe { ctx.as_mut() }, unsafe { out.as_mut() }) {
@@ -182,9 +196,10 @@ pub unsafe extern "C" fn simmerv_step_retire(
         return -1;
     }
     let cap = ctx.emu.cpu.step_retire();
-    // Drop any unconsumed CSR-read override so it can't bleed into a
-    // later retire whose arming the glue legitimately skipped.
+    // Drop any unconsumed CSR-read / MMIO-load overrides so they can't bleed
+    // into a later retire whose arming the glue legitimately skipped.
     ctx.emu.cpu.armed_csr_read = None;
+    ctx.emu.cpu.armed_load_value = None;
     unsafe {
         *out = cap;
     }

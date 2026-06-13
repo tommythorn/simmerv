@@ -405,6 +405,15 @@ pub struct Cpu {
     // driven mip bits) instead of recomputing them in the model.
     pub armed_csr_read: Option<(u16, u64)>,
 
+    // Cosim override for MMIO loads: device-register reads are model-specific
+    // and side-effecting, so the two models cannot be expected to return the
+    // same bits. When the DUT retires a register-writing instruction the glue
+    // arms its rd_val here; memop_read consumes it ONLY when its own load
+    // resolves to MMIO (non-RAM), letting the DUT's value win while simmerv
+    // still performs the read for its side effects. RAM loads and non-memory
+    // ops never touch it, so it is simply dropped at step end.
+    pub armed_load_value: Option<u64>,
+
     // Giving each instruction a unique sequence number in program order is
     // especially helpful when dealing with out-of-order execution.
     // We can derive instret by maintaining an offset from seqno (as minstret
@@ -465,6 +474,7 @@ impl Cpu {
             cosim_stip_armed: true,
             cosim_seip_armed: true,
             armed_csr_read: None,
+            armed_load_value: None,
             pc: 0,
             csr: CsrFile::new(),
             mmu,
@@ -1903,10 +1913,27 @@ impl Cpu {
 
         let addr = self.mmu.translate_data_address(va, Read, false)?;
 
-        if addr.mem_idx != DataAddr::NO_RAM {
+        let is_mmio = addr.mem_idx == DataAddr::NO_RAM;
+        let mut model_val = 0u64; // for diagnostics only (MMIO path)
+        let result = if is_mmio {
+            // Perform the MMIO read for its side effects, then let the DUT's
+            // armed value win (device-register bits are model-specific).
+            model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
+                trap: Trap::LoadAccessFault,
+                tval: va,
+            })?;
+            self.armed_load_value.take().map_or(model_val, |v| {
+                let mask = if size >= 8 {
+                    u64::MAX
+                } else {
+                    (1u64 << (size * 8)) - 1
+                };
+                v & mask
+            })
+        } else {
             let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
             let mem = &self.mmu.memory[addr.mem_idx as usize].1;
-            return Ok(match size {
+            match size {
                 1 => u64::from(mem[off]),
                 2 => u64::from(u16::from_le_bytes([mem[off], mem[off + 1]])),
                 4 => u64::from(u32::from_le_bytes([
@@ -1925,13 +1952,32 @@ impl Cpu {
                     mem[off + 6],
                     mem[off + 7],
                 ]),
-            });
+            }
+        };
+
+        // DIAG (bounded): divergences clustered on the 0xffffffc60000d000 page,
+        // which maps to the 0x10001000 device window. Log the first handful of
+        // loads to it so we can confirm RAM-vs-MMIO and watch the MMIO override
+        // engage (model_val -> result). Bounded so a passing 5.5h run is quiet.
+        if (va & !0xfff) == 0xffff_ffc6_0000_d000 {
+            use std::sync::atomic::AtomicU32;
+            use std::sync::atomic::Ordering;
+            static DIAG_N: AtomicU32 = AtomicU32::new(0);
+            if DIAG_N.fetch_add(1, Ordering::Relaxed) < 64 {
+                eprintln!(
+                    "REF-LOAD pc={:016x} va={:016x} pa={:016x} {} size={} model={:016x} result={:016x}",
+                    self.pc,
+                    va,
+                    addr.pa,
+                    if is_mmio { "MMIO" } else { "RAM " },
+                    size,
+                    model_val,
+                    result
+                );
+            }
         }
 
-        self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
-            trap: Trap::LoadAccessFault,
-            tval: va,
-        })
+        Ok(result)
     }
 
     /// Data store. Clears any load-reservation.
