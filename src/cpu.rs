@@ -1914,11 +1914,10 @@ impl Cpu {
         let addr = self.mmu.translate_data_address(va, Read, false)?;
 
         let is_mmio = addr.mem_idx == DataAddr::NO_RAM;
-        let mut model_val = 0u64; // for diagnostics only (MMIO path)
         let result = if is_mmio {
             // Perform the MMIO read for its side effects, then let the DUT's
             // armed value win (device-register bits are model-specific).
-            model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
+            let model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
                 trap: Trap::LoadAccessFault,
                 tval: va,
             })?;
@@ -1954,28 +1953,6 @@ impl Cpu {
                 ]),
             }
         };
-
-        // DIAG (bounded): divergences clustered on the 0xffffffc60000d000 page,
-        // which maps to the 0x10001000 device window. Log the first handful of
-        // loads to it so we can confirm RAM-vs-MMIO and watch the MMIO override
-        // engage (model_val -> result). Bounded so a passing 5.5h run is quiet.
-        if (va & !0xfff) == 0xffff_ffc6_0000_d000 {
-            use std::sync::atomic::AtomicU32;
-            use std::sync::atomic::Ordering;
-            static DIAG_N: AtomicU32 = AtomicU32::new(0);
-            if DIAG_N.fetch_add(1, Ordering::Relaxed) < 64 {
-                eprintln!(
-                    "REF-LOAD pc={:016x} va={:016x} pa={:016x} {} size={} model={:016x} result={:016x}",
-                    self.pc,
-                    va,
-                    addr.pa,
-                    if is_mmio { "MMIO" } else { "RAM " },
-                    size,
-                    model_val,
-                    result
-                );
-            }
-        }
 
         Ok(result)
     }
