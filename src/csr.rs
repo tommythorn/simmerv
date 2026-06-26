@@ -48,6 +48,9 @@ pub enum Csr {
     Mip = 0x344,
     Pmpcfg0 = 0x3a0,
     Pmpaddr0 = 0x3b0,
+    // Smrnmi resumable-NMI status: the DUT implements it as a benign WARL CSR
+    // (read-0 / write-ignored here); riscv-tests' reset vector writes it.
+    Mnstatus = 0x744,
     Mcycle = 0xb00,
     Minstret = 0xb02,
     Cycle = 0xc00,
@@ -191,6 +194,9 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Mstatus
             | Csr::Mtval
             | Csr::Mtvec
+            | Csr::Mnstatus
+            | Csr::Pmpcfg0
+            | Csr::Pmpaddr0
             | Csr::Mvendorid
             | Csr::Menvcfg
             | Csr::Satp
@@ -251,6 +257,10 @@ pub struct CsrFile {
     pub mcyclecfg: u64,
     pub minstretcfg: u64,
     pub senvcfg: u64,
+    // PMP: the DUTs (smolrv64 + probe) store cfg/addr0 verbatim (no enforcement),
+    // so simmerv stores them too -- OpenSBI writes then reads them back at boot.
+    pub pmpcfg0: u64,
+    pub pmpaddr0: u64,
 }
 
 impl Default for CsrFile {
@@ -292,6 +302,8 @@ impl CsrFile {
             mcyclecfg: 0,
             minstretcfg: 0,
             senvcfg: 0,
+            pmpcfg0: 0,
+            pmpaddr0: 0,
         }
     }
 }

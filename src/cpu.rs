@@ -1302,12 +1302,17 @@ impl Cpu {
         };
 
         // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode only,
-        // hardwired to zero (0 PMP entries implemented).
+        // no enforcement. The DUTs store cfg0/addr0 verbatim and read them back
+        // (OpenSBI boot), so return the stored value; the rest read as zero.
         if matches!(csrno, 0x3A0..=0x3EF) {
             if u64::from(self.mmu.prv) < 3 {
                 return illegal;
             }
-            return Ok(0);
+            return Ok(match csrno {
+                0x3A0 => self.csr.pmpcfg0,
+                0x3B0 => self.csr.pmpaddr0,
+                _ => 0,
+            });
         }
 
         // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
@@ -1370,14 +1375,19 @@ impl Cpu {
             tval: 0,
         });
 
-        // PMP: pmpcfg0-15 and pmpaddr0-63 — M-mode only, writes silently ignored
-        // (0 PMP entries implemented; all accesses permitted).
+        // PMP: pmpcfg0-15 and pmpaddr0-63 — M-mode only, no enforcement. The DUTs
+        // store cfg0/addr0 verbatim and read them back at OpenSBI boot, so mirror that;
+        // the rest stay write-ignored (no PMP entries beyond #0 modeled).
         if matches!(csrno, 0x3A0..=0x3EF) {
-            return if u64::from(self.mmu.prv) < 3 {
-                illegal
-            } else {
-                Ok(())
-            };
+            if u64::from(self.mmu.prv) < 3 {
+                return illegal;
+            }
+            match csrno {
+                0x3A0 => self.csr.pmpcfg0 = value,
+                0x3B0 => self.csr.pmpaddr0 = value,
+                _ => {}
+            }
+            return Ok(());
         }
 
         // Zihpm: hpmcounter3-31 are read-only; mhpmcounter/mhpmevent writes are
@@ -1527,6 +1537,8 @@ impl Cpu {
             Csr::Scounteren => u64::from(self.csr.scounteren),
             Csr::Senvcfg => self.csr.senvcfg,
             Csr::Menvcfg => self.csr.menvcfg,
+            Csr::Pmpcfg0 => self.csr.pmpcfg0,
+            Csr::Pmpaddr0 => self.csr.pmpaddr0,
             Csr::Time => self.mmu.read_mtime_csr(),
             Csr::Ustatus => self.csr.ustatus,
             _ => 0,
@@ -1594,6 +1606,8 @@ impl Cpu {
             Csr::Menvcfg => self.csr.menvcfg = value,
             Csr::Senvcfg => self.csr.senvcfg = value,
             Csr::Misa => {} // read-only WARL; extension set is fixed
+            Csr::Pmpcfg0 => self.csr.pmpcfg0 = value, // verbatim, matching the DUT
+            Csr::Pmpaddr0 => self.csr.pmpaddr0 = value,
             Csr::Time => self.mmu.write_mtime_csr(value), // XXX SHOULD trap
             Csr::Ustatus => self.csr.ustatus = value,
             _ => log::warn!("We are ignoring writes to {csr:?}"),
@@ -1983,6 +1997,12 @@ impl Cpu {
         }
 
         let addr = self.mmu.translate_data_address(va, Write, false)?;
+
+        // cosim store-stream log (VIRTUAL address -> frame-allocation-independent)
+        if crate::mmu::storelog_active() {
+            let m = if size >= 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
+            eprintln!("ST {va:016x} {size} {:016x}", v & m);
+        }
 
         if addr.mem_idx != DataAddr::NO_RAM {
             let off = addr.page_byte_offset as usize | (va as usize & 0xfff);

@@ -1,5 +1,16 @@
 #![allow(clippy::unreadable_literal, clippy::cast_possible_wrap)]
 
+// Cosim aid: when SIMMERV_STORELOG is set AND STORELOG_ARMED (armed at run start, so
+// the ELF loader's stores are excluded), eprintln every committed physical store as
+// `ST <pa> <width> <value>` for diffing against a DUT's store stream.
+static STORELOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+pub static STORELOG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[must_use]
+pub fn storelog_active() -> bool {
+    *STORELOG.get_or_init(|| std::env::var("SIMMERV_STORELOG").is_ok())
+        && STORELOG_ARMED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 use crate::cpu;
 use crate::csr;
 use crate::device::Context;

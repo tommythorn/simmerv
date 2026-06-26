@@ -298,6 +298,8 @@ impl Emulator {
     /// When `tracing_flag` is set, prints a disassembly line for every
     /// instruction.
     pub fn run_program(&mut self) {
+        // Arm the cosim store log now that the ELF loader is done (its stores are excluded).
+        crate::mmu::STORELOG_ARMED.store(true, Ordering::Relaxed);
         let mut s = String::new();
         loop {
             if self.tracing_flag.load(Ordering::Relaxed) {
