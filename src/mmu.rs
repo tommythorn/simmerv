@@ -1,10 +1,12 @@
 #![allow(clippy::unreadable_literal, clippy::cast_possible_wrap)]
 
-// Cosim aid: when SIMMERV_STORELOG is set AND STORELOG_ARMED (armed at run start, so
-// the ELF loader's stores are excluded), eprintln every committed physical store as
-// `ST <pa> <width> <value>` for diffing against a DUT's store stream.
+// Cosim aid: when SIMMERV_STORELOG is set AND STORELOG_ARMED (armed at run
+// start, so the ELF loader's stores are excluded), eprintln every committed
+// physical store as `ST <pa> <width> <value>` for diffing against a DUT's store
+// stream.
 static STORELOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-pub static STORELOG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static STORELOG_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[must_use]
 pub fn storelog_active() -> bool {
     *STORELOG.get_or_init(|| std::env::var("SIMMERV_STORELOG").is_ok())
@@ -1015,6 +1017,20 @@ impl Mmu {
         if effective_prv == PrivMode::M
             || (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64
         {
+            // Physical access (no translation). Resolve to the backing RAM range so the
+            // value is read from / written to real memory -- and, crucially for the cosim,
+            // so a physical-mode (M-mode / Bare) RAM load is VERIFIED against the model
+            // instead of blindly taking the DUT's armed MMIO value. Only a PA outside RAM
+            // stays NO_RAM: a genuine device register (or the cosim DUT-follow override).
+            for (i, (range, _)) in self.memory.iter().enumerate() {
+                if range.contains(&address) {
+                    return Ok(DataAddr {
+                        pa: address,
+                        mem_idx: i as u8,
+                        page_byte_offset: (address & !0xfff) - range.start,
+                    });
+                }
+            }
             return Ok(DataAddr {
                 pa: address,
                 mem_idx: DataAddr::NO_RAM,

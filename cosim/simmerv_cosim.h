@@ -52,6 +52,9 @@ void        simmerv_set_stip_armed(SimmervCtx*, bool asserted);
 // Same DUT-follow gate for the supervisor external interrupt (SEIP), to match
 // the DUT's one-instruction suppress after an interrupt-control CSR write.
 void        simmerv_set_seip_armed(SimmervCtx*, bool asserted);
+// Force taking the machine timer interrupt (MTIP) on the DUT taking it this
+// retirement (FORCE, not suppress: the DUT's mie.MTIE is a retire stale).
+void        simmerv_set_mtip_armed(SimmervCtx*, bool asserted);
 void        simmerv_set_plic_ip(SimmervCtx*, uint32_t irq, bool asserted);
 // Arm a one-shot CSR-read override: the next read of `csrno` returns
 // `value`. Consumed on first matching read, and unconditionally cleared

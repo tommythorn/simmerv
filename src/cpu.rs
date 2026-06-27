@@ -398,6 +398,16 @@ pub struct Cpu {
     // now". `mip.SEIP` (mirrored from the DUT PLIC) stays set for sip reads.
     pub cosim_seip_armed: bool,
 
+    // Cosim: DUT-follow gate for the *machine* timer interrupt (MTIP). Unlike
+    // STIP/SEIP -- where simmerv would take the interrupt a retire EARLY so the
+    // gate only SUPPRESSES -- MTIP fails the other way: simmerv won't take it at
+    // the DUT's retire because mie.MTIE is a retire stale (the DUT is "1 cycle
+    // stale"). So this is a FORCE gate: when set, MTIP is taken regardless of
+    // mie.MTIE. Defaults FALSE (inert for standalone runs); the harness sets it
+    // each retire to "DUT is taking MTIP now". mip.MTIP stays mirrored normally
+    // (via mtimecmp) so mip/sip reads still match.
+    pub cosim_mtip_armed: bool,
+
     // Cosim CSR-read override. When `Some((csrno, value))`, the next
     // CSR read of `csrno` returns `value` and the override is consumed.
     // Used by cosim glue to force the model's read result for CSRs
@@ -473,6 +483,7 @@ impl Cpu {
             cosim_mode: false,
             cosim_stip_armed: true,
             cosim_seip_armed: true,
+            cosim_mtip_armed: false,
             armed_csr_read: None,
             armed_load_value: None,
             pc: 0,
@@ -1000,12 +1011,13 @@ impl Cpu {
         let result = new_execute(self, &uop, s1, s2, s3, insn_addr);
         if result.is_err() {
             let mut exc = result.to_exception();
-            // Match smolrv64's mtval convention: on IllegalInstruction the
-            // trapping instruction encoding goes into mtval. new_execute's
-            // runtime-illegal checks pass tval=0 because they don't have the
-            // raw insn in scope; patch it here.
-            if matches!(exc.trap, Trap::IllegalInstruction) && exc.tval == 0 {
-                exc.tval = u64::from(insn);
+            // mtval convention: the sharded-OoO (probe) core reports mtval=0 on
+            // illegal-instruction -- carrying the raw insn bits to the (non-speculative)
+            // commit point in an OoO pipeline is real cost, and tval=0 is spec-conformant.
+            // Force 0 here to match it (overrides any insn set by new_execute's checks).
+            // (Legacy smolrv64 inner core used the insn word; its cosim would differ here.)
+            if matches!(exc.trap, Trap::IllegalInstruction) {
+                exc.tval = 0;
             }
             cap.trapped = 1;
             cap.trap_cause = get_trap_cause(&exc);
@@ -1048,12 +1060,22 @@ impl Cpu {
         use self::Trap::SupervisorSoftwareInterrupt;
         use self::Trap::SupervisorTimerInterrupt;
         let mut minterrupt = self.mmu.mip & self.csr.mie;
-        // Cosim: follow the DUT on supervisor-timer-interrupt *timing*. The DUT
-        // registers its pending signal (1 cycle stale) so it vectors STIP a
-        // retire later than simmerv's mtime>=stimecmp would. Suppress taking
-        // STIP unless the DUT is taking it this retire (mip.STIP itself stays
-        // set, so sip/stimecmp reads still match).
-        if !self.cosim_stip_armed {
+        // Cosim: force-take MTIP exactly on the DUT's retire (cosim_mtip_armed),
+        // bypassing simmerv's mie.MTIE which is a retire stale vs the DUT. mip.MTIP
+        // is mirrored normally (via mtimecmp) so mip/sip reads still match; the
+        // mtie==0 reject in handle_trap is likewise bypassed when armed.
+        if self.cosim_mtip_armed {
+            minterrupt |= MIP_MTIP;
+        }
+        // Cosim: full DUT-follow on the supervisor timer interrupt (STIP), like
+        // MTIP above -- FORCE it when the DUT takes it this retire, SUPPRESS it
+        // otherwise. A suppress-only gate misses an immediately-pending STIP when
+        // sstatus.SIE/sie.STIE were just enabled (retire-stale vs the DUT) or when
+        // the forced mtime recomputes mip.STIP=0 at the injected-trap retire. The
+        // raw mip.STIP/sip stays computed normally, so CSR reads still match.
+        if self.cosim_stip_armed {
+            minterrupt |= MIP_STIP;
+        } else {
             minterrupt &= !MIP_STIP;
         }
         if !self.cosim_seip_armed {
@@ -1185,10 +1207,14 @@ impl Cpu {
                 Trap::UserTimerInterrupt if utie == 0 => {
                     return false;
                 }
-                Trap::SupervisorTimerInterrupt if stie == 0 => {
+                // Cosim: force STIP through even though sie.STIE is a retire stale
+                // vs the DUT (cosim_stip_armed), mirroring the MTIP bypass below.
+                Trap::SupervisorTimerInterrupt if stie == 0 && !self.cosim_stip_armed => {
                     return false;
                 }
-                Trap::MachineTimerInterrupt if mtie == 0 => {
+                // Cosim: when the DUT is taking MTIP this retire, force it through
+                // even though simmerv's mie.MTIE is a retire stale (cosim_mtip_armed).
+                Trap::MachineTimerInterrupt if mtie == 0 && !self.cosim_mtip_armed => {
                     return false;
                 }
                 Trap::UserExternalInterrupt if ueie == 0 => {
@@ -1928,45 +1954,62 @@ impl Cpu {
         let addr = self.mmu.translate_data_address(va, Read, false)?;
 
         let is_mmio = addr.mem_idx == DataAddr::NO_RAM;
-        let result = if is_mmio {
-            // Perform the MMIO read for its side effects, then let the DUT's
-            // armed value win (device-register bits are model-specific).
-            let model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
-                trap: Trap::LoadAccessFault,
-                tval: va,
-            })?;
-            self.armed_load_value.take().map_or(model_val, |v| {
+        let result =
+            if is_mmio {
+                // Perform the MMIO read for its side effects, then let the DUT's
+                // armed value win (device-register bits are model-specific).
+                let model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
+                    trap: Trap::LoadAccessFault,
+                    tval: va,
+                })?;
+                self.armed_load_value.take().map_or(model_val, |v| {
                 let mask = if size >= 8 {
                     u64::MAX
                 } else {
                     (1u64 << (size * 8)) - 1
                 };
-                v & mask
+                let vv = v & mask;
+                // COSIM DIAGNOSTIC: the DUT's MMIO read value differs from simmerv's
+                // own model -> the DUT device returned something wrong (and the cosim
+                // silently follows it). Capped so a poll loop can't flood. mtime is
+                // synced to dut each retire so it won't show; expect only the culprit.
+                if vv != (model_val & mask) {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static N: AtomicU64 = AtomicU64::new(0);
+                    let i = N.fetch_add(1, Ordering::Relaxed);
+                    if i < 200 {
+                        eprintln!(
+                            "MMIO-DIVERGE#{i} pc={:#x} pa={:#x} sz={size} model={:#x} dut={:#x}",
+                            self.pc, addr.pa, model_val & mask, vv
+                        );
+                    }
+                }
+                vv
             })
-        } else {
-            let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
-            let mem = &self.mmu.memory[addr.mem_idx as usize].1;
-            match size {
-                1 => u64::from(mem[off]),
-                2 => u64::from(u16::from_le_bytes([mem[off], mem[off + 1]])),
-                4 => u64::from(u32::from_le_bytes([
-                    mem[off],
-                    mem[off + 1],
-                    mem[off + 2],
-                    mem[off + 3],
-                ])),
-                _ => u64::from_le_bytes([
-                    mem[off],
-                    mem[off + 1],
-                    mem[off + 2],
-                    mem[off + 3],
-                    mem[off + 4],
-                    mem[off + 5],
-                    mem[off + 6],
-                    mem[off + 7],
-                ]),
-            }
-        };
+            } else {
+                let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
+                let mem = &self.mmu.memory[addr.mem_idx as usize].1;
+                match size {
+                    1 => u64::from(mem[off]),
+                    2 => u64::from(u16::from_le_bytes([mem[off], mem[off + 1]])),
+                    4 => u64::from(u32::from_le_bytes([
+                        mem[off],
+                        mem[off + 1],
+                        mem[off + 2],
+                        mem[off + 3],
+                    ])),
+                    _ => u64::from_le_bytes([
+                        mem[off],
+                        mem[off + 1],
+                        mem[off + 2],
+                        mem[off + 3],
+                        mem[off + 4],
+                        mem[off + 5],
+                        mem[off + 6],
+                        mem[off + 7],
+                    ]),
+                }
+            };
 
         Ok(result)
     }
@@ -2000,7 +2043,11 @@ impl Cpu {
 
         // cosim store-stream log (VIRTUAL address -> frame-allocation-independent)
         if crate::mmu::storelog_active() {
-            let m = if size >= 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
+            let m = if size >= 8 {
+                u64::MAX
+            } else {
+                (1u64 << (size * 8)) - 1
+            };
             eprintln!("ST {va:016x} {size} {:016x}", v & m);
         }
 
@@ -2215,7 +2262,7 @@ fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: 
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_lossless,
-    // EBREAK and C.EBREAK intentionally share the same Breakpoint{tval:0} body
+    // EBREAK and C.EBREAK intentionally share the same Breakpoint{tval:pc} body
     // but live in the compressed- and base-op sections respectively.
     clippy::match_same_arms
 )]
@@ -2235,7 +2282,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         | Op::PrefetchI
         | Op::PrefetchR
         | Op::PrefetchW => ExecOut::ok(0),
-        Op::CEbreak => ExecOut::err(Trap::Breakpoint, 0),
+        Op::CEbreak => ExecOut::err(Trap::Breakpoint, insn_addr),
 
         Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
         Op::Auipc => ExecOut::ok(insn_addr.wrapping_add(uop.imm64())),
@@ -2347,9 +2394,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             },
             uop.imm64(),
         ),
-        // Breakpoint mtval is 0 or the pc per spec (never the instruction
-        // word); smolrv64 reports 0, so match it.
-        Op::Ebreak => ExecOut::err(Trap::Breakpoint, 0),
+        // Breakpoint mtval is 0 or the pc per spec (never the instruction word).
+        // The sharded-OoO (probe) core reports the pc, like Spike, so match that.
+        // (Legacy smolrv64 inner core reported 0 -- its cosim would now differ here.)
+        Op::Ebreak => ExecOut::err(Trap::Breakpoint, insn_addr),
         // RV64I
         Op::Lwu => {
             let v = etry!(cpu.memop_read(s1, uop.imm64(), 4));

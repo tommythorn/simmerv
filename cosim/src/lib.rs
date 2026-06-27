@@ -130,6 +130,20 @@ pub unsafe extern "C" fn simmerv_set_seip_armed(ctx: *mut SimmervCtx, asserted: 
     }
 }
 
+/// Cosim: force simmerv to take the *machine* timer interrupt (MTIP) on the DUT
+/// taking it this retirement. Unlike STIP/SEIP this is a FORCE, not a suppress:
+/// the DUT's mie.MTIE is a retire stale, so simmerv would otherwise withhold
+/// MTIP at the DUT's retire even though mip.MTIP is mirrored. Call every
+/// retirement with `asserted = (DUT trapped this retire with machine-timer
+/// cause)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_mtip_armed(ctx: *mut SimmervCtx, asserted: bool) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        ctx.emu.cpu.cosim_mode = true;
+        ctx.emu.cpu.cosim_mtip_armed = asserted;
+    }
+}
+
 /// Cosim: force IRQ `irq`'s pending bit in simmerv's PLIC, so claim/pending
 /// reads match the DUT whose PLIC is driven by its own Verilog UART.
 #[unsafe(no_mangle)]
