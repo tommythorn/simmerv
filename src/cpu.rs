@@ -385,28 +385,15 @@ pub struct Cpu {
     // Cosim: gate on taking the supervisor timer interrupt (STIP). The DUT's
     // STIP latches as soon as mtime>=stimecmp but it only vectors at the next
     // fetch boundary (registered `pre_intr_pending`, 1 cycle stale); simmerv
-    // would otherwise take it a retire early. Set each retirement to "DUT is
-    // taking STIP now". `mip.STIP`/`sip.STIP` stay computed normally (so reads
-    // match) — only the *taking* is gated. Defaults true for standalone runs.
-    pub cosim_stip_armed: bool,
-
-    // Cosim: same DUT-follow gate for the supervisor external interrupt
-    // (SEIP). The DUT suppresses interrupts for one instruction after a write
-    // to an interrupt-control CSR (sstatus/sie/mstatus/mie/mip/mideleg — its
-    // `just_xret` flag), so SEIP enabled by such a write vectors one retire
-    // later than simmerv would. Set each retirement to "DUT is taking SEIP
-    // now". `mip.SEIP` (mirrored from the DUT PLIC) stays set for sip reads.
-    pub cosim_seip_armed: bool,
-
-    // Cosim: DUT-follow gate for the *machine* timer interrupt (MTIP). Unlike
-    // STIP/SEIP -- where simmerv would take the interrupt a retire EARLY so the
-    // gate only SUPPRESSES -- MTIP fails the other way: simmerv won't take it at
-    // the DUT's retire because mie.MTIE is a retire stale (the DUT is "1 cycle
-    // stale"). So this is a FORCE gate: when set, MTIP is taken regardless of
-    // mie.MTIE. Defaults FALSE (inert for standalone runs); the harness sets it
-    // each retire to "DUT is taking MTIP now". mip.MTIP stays mirrored normally
-    // (via mtimecmp) so mip/sip reads still match.
-    pub cosim_mtip_armed: bool,
+    // Cosim: full interrupt DUT-follow. simmerv's mip/mie are retire-stale vs the
+    // DUT, so in cosim_mode it does NOT decide interrupts itself -- it takes EXACTLY
+    // the interrupt the DUT took this retire and nothing else. The harness sets this
+    // each retirement to the DUT's interrupt cause (mcause/scause, MSB set), or 0 if
+    // the DUT took no interrupt. handle_interrupt vectors exactly this cause, forced
+    // through the enable checks (which are likewise stale). mip/sip stay mirrored
+    // normally (mtimecmp/seip/plic_ip) so CSR reads still match. This replaces the
+    // old per-type cosim_{stip,seip,mtip}_armed gates with one general rule.
+    pub cosim_forced_cause: u64,
 
     // Cosim CSR-read override. When `Some((csrno, value))`, the next
     // CSR read of `csrno` returns `value` and the override is consumed.
@@ -481,9 +468,7 @@ impl Cpu {
             cycle: 0,
             wfi: false,
             cosim_mode: false,
-            cosim_stip_armed: true,
-            cosim_seip_armed: true,
-            cosim_mtip_armed: false,
+            cosim_forced_cause: 0,
             armed_csr_read: None,
             armed_load_value: None,
             pc: 0,
@@ -1059,28 +1044,36 @@ impl Cpu {
         use self::Trap::SupervisorExternalInterrupt;
         use self::Trap::SupervisorSoftwareInterrupt;
         use self::Trap::SupervisorTimerInterrupt;
-        let mut minterrupt = self.mmu.mip & self.csr.mie;
-        // Cosim: force-take MTIP exactly on the DUT's retire (cosim_mtip_armed),
-        // bypassing simmerv's mie.MTIE which is a retire stale vs the DUT. mip.MTIP
-        // is mirrored normally (via mtimecmp) so mip/sip reads still match; the
-        // mtie==0 reject in handle_trap is likewise bypassed when armed.
-        if self.cosim_mtip_armed {
-            minterrupt |= MIP_MTIP;
+        // Cosim DUT-follow: simmerv's mip/mie are retire-stale vs the DUT, so it does
+        // NOT decide interrupts itself -- it takes EXACTLY the interrupt the DUT took
+        // this retire (cosim_forced_cause), forced through handle_trap's enable checks
+        // (likewise stale). 0 -> the DUT took none -> take none.
+        if self.cosim_mode {
+            if self.cosim_forced_cause == 0 {
+                return;
+            }
+            let trap_type = match self.cosim_forced_cause & 0xff {
+                1 => SupervisorSoftwareInterrupt,
+                3 => MachineSoftwareInterrupt,
+                5 => SupervisorTimerInterrupt,
+                7 => MachineTimerInterrupt,
+                9 => SupervisorExternalInterrupt,
+                11 => MachineExternalInterrupt,
+                _ => return,
+            };
+            let trap = Exception {
+                trap: trap_type,
+                tval: 0,
+            };
+            if self.handle_trap(&trap, self.pc, true) {
+                self.wfi = false;
+                self.reservation = None;
+            }
+            return;
         }
-        // Cosim: full DUT-follow on the supervisor timer interrupt (STIP), like
-        // MTIP above -- FORCE it when the DUT takes it this retire, SUPPRESS it
-        // otherwise. A suppress-only gate misses an immediately-pending STIP when
-        // sstatus.SIE/sie.STIE were just enabled (retire-stale vs the DUT) or when
-        // the forced mtime recomputes mip.STIP=0 at the injected-trap retire. The
-        // raw mip.STIP/sip stays computed normally, so CSR reads still match.
-        if self.cosim_stip_armed {
-            minterrupt |= MIP_STIP;
-        } else {
-            minterrupt &= !MIP_STIP;
-        }
-        if !self.cosim_seip_armed {
-            minterrupt &= !MIP_SEIP;
-        }
+
+        // Standalone: autonomous interrupt taking from mip & mie.
+        let minterrupt = self.mmu.mip & self.csr.mie;
         if minterrupt == 0 {
             return;
         }
@@ -1141,7 +1134,10 @@ impl Cpu {
             PrivMode::U
         };
 
-        if is_interrupt {
+        // Cosim DUT-follow: a forced interrupt was already validated takeable by the
+        // DUT, and simmerv's enable bits are retire-stale -- so skip the reject
+        // checks entirely.
+        if is_interrupt && !self.cosim_mode {
             let new_priv_encoding = u64::from(new_priv_mode);
             // Second, ignore the interrupt if it's disabled by some conditions
 
@@ -1207,14 +1203,10 @@ impl Cpu {
                 Trap::UserTimerInterrupt if utie == 0 => {
                     return false;
                 }
-                // Cosim: force STIP through even though sie.STIE is a retire stale
-                // vs the DUT (cosim_stip_armed), mirroring the MTIP bypass below.
-                Trap::SupervisorTimerInterrupt if stie == 0 && !self.cosim_stip_armed => {
+                Trap::SupervisorTimerInterrupt if stie == 0 => {
                     return false;
                 }
-                // Cosim: when the DUT is taking MTIP this retire, force it through
-                // even though simmerv's mie.MTIE is a retire stale (cosim_mtip_armed).
-                Trap::MachineTimerInterrupt if mtie == 0 && !self.cosim_mtip_armed => {
+                Trap::MachineTimerInterrupt if mtie == 0 => {
                     return false;
                 }
                 Trap::UserExternalInterrupt if ueie == 0 => {

@@ -99,48 +99,20 @@ pub unsafe extern "C" fn simmerv_set_seip(ctx: *mut SimmervCtx, asserted: bool) 
     }
 }
 
-/// Cosim: gate simmerv's *taking* of the supervisor timer interrupt (STIP) on
-/// the DUT taking it this retirement. The DUT's `pre_intr_pending` is a
-/// registered (1-cycle-stale) signal, so it vectors STIP a retire later than
-/// simmerv's `mtime>=stimecmp` would. Call every retirement with
-/// `asserted = (DUT trapped this retire with supervisor-timer cause)`; simmerv
-/// keeps `mip.STIP`/`sip.STIP` computed normally (reads still match) and only
-/// withholds the interrupt until the DUT vectors it.
+/// Cosim: full interrupt DUT-follow. Call every retirement with `cause` = the
+/// DUT's interrupt mcause/scause (MSB set) when it took an interrupt this
+/// retire, or 0 when it didn't. simmerv then takes EXACTLY that interrupt at
+/// this boundary and never decides interrupts on its own (its mip/mie are
+/// retire-stale vs the DUT). Replaces the old per-type stip/seip/mtip "armed"
+/// gates. mip/sip stay mirrored normally (mtimecmp/seip/plic_ip) so CSR reads
+/// still match.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn simmerv_set_stip_armed(ctx: *mut SimmervCtx, asserted: bool) {
+pub unsafe extern "C" fn simmerv_set_forced_interrupt(ctx: *mut SimmervCtx, cause: u64) {
     if let Some(ctx) = unsafe { ctx.as_mut() } {
-        // Being driven by the cosim: the DUT owns interrupt-acceptance timing,
-        // so disable the standalone one-retire xRET defer (see Cpu::cosim_mode).
+        // Driven by the cosim: the DUT owns interrupt-acceptance timing (also
+        // disables the standalone one-retire xRET defer; see Cpu::cosim_mode).
         ctx.emu.cpu.cosim_mode = true;
-        ctx.emu.cpu.cosim_stip_armed = asserted;
-    }
-}
-
-/// Cosim: gate simmerv's *taking* of the supervisor external interrupt (SEIP)
-/// on the DUT taking it this retirement. The DUT suppresses interrupts for one
-/// instruction after an interrupt-control CSR write (`just_xret`), so SEIP
-/// unmasked by such a write vectors a retire later than simmerv would. Call
-/// every retirement with `asserted = (DUT trapped with supervisor-external
-/// cause)`; `mip.SEIP` (mirrored via `simmerv_set_seip`) stays set for reads.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn simmerv_set_seip_armed(ctx: *mut SimmervCtx, asserted: bool) {
-    if let Some(ctx) = unsafe { ctx.as_mut() } {
-        ctx.emu.cpu.cosim_mode = true;
-        ctx.emu.cpu.cosim_seip_armed = asserted;
-    }
-}
-
-/// Cosim: force simmerv to take the *machine* timer interrupt (MTIP) on the DUT
-/// taking it this retirement. Unlike STIP/SEIP this is a FORCE, not a suppress:
-/// the DUT's mie.MTIE is a retire stale, so simmerv would otherwise withhold
-/// MTIP at the DUT's retire even though mip.MTIP is mirrored. Call every
-/// retirement with `asserted = (DUT trapped this retire with machine-timer
-/// cause)`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn simmerv_set_mtip_armed(ctx: *mut SimmervCtx, asserted: bool) {
-    if let Some(ctx) = unsafe { ctx.as_mut() } {
-        ctx.emu.cpu.cosim_mode = true;
-        ctx.emu.cpu.cosim_mtip_armed = asserted;
+        ctx.emu.cpu.cosim_forced_cause = cause;
     }
 }
 

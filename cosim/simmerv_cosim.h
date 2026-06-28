@@ -46,15 +46,11 @@ void        simmerv_write_register(SimmervCtx*, uint32_t idx, uint64_t val);
 void        simmerv_set_mtime(SimmervCtx*, uint64_t value);
 void        simmerv_set_mtimecmp(SimmervCtx*, uint64_t value);
 void        simmerv_set_seip(SimmervCtx*, bool asserted);
-// Gate taking the supervisor timer interrupt (STIP) on the DUT taking it this
-// retirement, to match the DUT's 1-cycle-stale registered pending signal.
-void        simmerv_set_stip_armed(SimmervCtx*, bool asserted);
-// Same DUT-follow gate for the supervisor external interrupt (SEIP), to match
-// the DUT's one-instruction suppress after an interrupt-control CSR write.
-void        simmerv_set_seip_armed(SimmervCtx*, bool asserted);
-// Force taking the machine timer interrupt (MTIP) on the DUT taking it this
-// retirement (FORCE, not suppress: the DUT's mie.MTIE is a retire stale).
-void        simmerv_set_mtip_armed(SimmervCtx*, bool asserted);
+// Full interrupt DUT-follow: call every retirement with `cause` = the DUT's
+// interrupt mcause/scause (MSB set) when it took an interrupt this retire, else 0.
+// simmerv takes exactly that interrupt and never decides interrupts on its own.
+// Replaces the per-type stip/seip/mtip armed gates.
+void        simmerv_set_forced_interrupt(SimmervCtx*, uint64_t cause);
 void        simmerv_set_plic_ip(SimmervCtx*, uint32_t irq, bool asserted);
 // Arm a one-shot CSR-read override: the next read of `csrno` returns
 // `value`. Consumed on first matching read, and unconditionally cleared
