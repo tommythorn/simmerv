@@ -1319,18 +1319,15 @@ impl Cpu {
             _ => None,
         };
 
-        // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode only,
-        // no enforcement. The DUTs store cfg0/addr0 verbatim and read them back
-        // (OpenSBI boot), so return the stored value; the rest read as zero.
+        // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode only.
+        // The DUTs (SmolRV64, probe) implement 0 PMP entries: reads return 0, writes
+        // ignored. A nonzero readback would make OpenSBI see PMP present and attempt
+        // root-domain hart isolation, which the DUTs (no PMP) skip -> boot divergence.
         if matches!(csrno, 0x3A0..=0x3EF) {
             if u64::from(self.mmu.prv) < 3 {
                 return illegal;
             }
-            return Ok(match csrno {
-                0x3A0 => self.csr.pmpcfg0,
-                0x3B0 => self.csr.pmpaddr0,
-                _ => 0,
-            });
+            return Ok(0);
         }
 
         // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
@@ -1393,17 +1390,11 @@ impl Cpu {
             tval: 0,
         });
 
-        // PMP: pmpcfg0-15 and pmpaddr0-63 — M-mode only, no enforcement. The DUTs
-        // store cfg0/addr0 verbatim and read them back at OpenSBI boot, so mirror that;
-        // the rest stay write-ignored (no PMP entries beyond #0 modeled).
+        // PMP: pmpcfg0-15 and pmpaddr0-63 — M-mode only, 0 entries implemented:
+        // writes silently ignored (matches the DUTs; see the read side).
         if matches!(csrno, 0x3A0..=0x3EF) {
             if u64::from(self.mmu.prv) < 3 {
                 return illegal;
-            }
-            match csrno {
-                0x3A0 => self.csr.pmpcfg0 = value,
-                0x3B0 => self.csr.pmpaddr0 = value,
-                _ => {}
             }
             return Ok(());
         }
