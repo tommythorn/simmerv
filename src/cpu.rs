@@ -1554,6 +1554,25 @@ impl Cpu {
         }
     }
 
+    // Legalize a value stored into a VA-holding CSR (mepc/sepc/mtval/stval) to
+    // match the DUT, which stores these 40-bit Sv39-compressed (low 39 + a
+    // non-canonical flag) -- see probe/va_codec.vh.  Canonical addresses are
+    // exact; a non-canonical one is WARL-legalized to {25{~va[38]}, va[38:0]}
+    // (still non-canonical, faults identically, but not bit-for-bit verbatim).
+    // Applying it here covers BOTH the trap handler and architectural CSRW,
+    // since both route through write_csr_raw.
+    const fn legalize_va(v: u64) -> u64 {
+        let bit38 = (v >> 38) & 1;
+        let sext_top = if bit38 == 1 { !0u64 << 39 } else { 0u64 };
+        if (v & (!0u64 << 39)) == sext_top {
+            v // canonical: stored exactly
+        } else {
+            let lo = v & ((1u64 << 39) - 1);
+            let new_top = if bit38 == 1 { 0u64 } else { !0u64 << 39 };
+            new_top | lo
+        }
+    }
+
     fn write_csr_raw(&mut self, csr: Csr, value: u64) {
         match csr {
             Csr::Mcycle => self.cycle = value,
@@ -1564,7 +1583,7 @@ impl Cpu {
             ),
             Csr::Mcause => self.csr.mcause = value,
             Csr::Medeleg => self.csr.medeleg = value,
-            Csr::Mepc => self.csr.mepc = value,
+            Csr::Mepc => self.csr.mepc = Self::legalize_va(value),
             Csr::Mhartid => self.csr.mhartid = value,
             // Sscofpmf: bit 13 (LCOFIP) is delegatable in addition to the
             // standard SSIP/STIP/SEIP (0x222). The DUT stores mideleg unmasked
@@ -1578,11 +1597,11 @@ impl Cpu {
                 self.mmu.mstatus = value & mask | self.mmu.mstatus & !mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
             }
-            Csr::Mtval => self.csr.mtval = value,
+            Csr::Mtval => self.csr.mtval = Self::legalize_va(value),
             Csr::Mtvec => self.csr.mtvec = value,
             Csr::Scause => self.csr.scause = value,
             Csr::Sedeleg => self.csr.sedeleg = value,
-            Csr::Sepc => self.csr.sepc = value,
+            Csr::Sepc => self.csr.sepc = Self::legalize_va(value),
             Csr::Sideleg => self.csr.sideleg = value,
             // SIE mask includes LCOFIE (bit 13) to match the DUT (csr_mie & 0x2222).
             Csr::Sie => self.csr.mie = self.csr.mie & !0x2222 | value & 0x2222,
@@ -1596,7 +1615,7 @@ impl Cpu {
                 self.mmu.mstatus |= value & mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
             }
-            Csr::Stval => self.csr.stval = value,
+            Csr::Stval => self.csr.stval = Self::legalize_va(value),
             Csr::Stvec => self.csr.stvec = value,
             Csr::Stimecmp => {
                 self.csr.stimecmp = value;
