@@ -2694,7 +2694,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 4)) | fp::NAN_BOX_F32)
         }
         Op::Fsw => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FP store READS an f-reg (does not modify FP state) -> access-check only, no
+            // FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             etry!(cpu.memop_write(s1, uop.imm64(), s2, 4));
             ExecOut::ok(0)
         }
@@ -2703,7 +2705,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2)) | fp::NAN_BOX_F16)
         }
         Op::Fsh => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FP store READS an f-reg (does not modify FP state) -> access-check only, no
+            // FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             etry!(cpu.memop_write(s1, uop.imm64(), s2, 2));
             ExecOut::ok(0)
         }
@@ -2849,7 +2853,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(v)
         }
         Op::Fsd | Op::CFsd | Op::CFsdsp => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FP store READS an f-reg (does not modify FP state) -> access-check only, no
+            // FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             etry!(cpu.mmu.store64(s1.wrapping_add(uop.imm64()), s2));
             ExecOut::ok(0)
         }
