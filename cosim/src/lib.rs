@@ -223,3 +223,17 @@ pub unsafe extern "C" fn simmerv_write_register(ctx: *mut SimmervCtx, idx: u32, 
         }
     }
 }
+
+/// Read an architectural register by bank index: 0..31 = integer, 32..63 = FP.
+/// Used by the cosim mismatch dump to recover operand addresses (e.g. a
+/// diverging load's base register) from the reference side.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_read_register(ctx: *mut SimmervCtx, idx: u32) -> u64 {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        use simmerv::bounded::Bounded;
+        if idx < 64 {
+            return ctx.emu.cpu.read_register(Bounded::<65>::new(idx));
+        }
+    }
+    0
+}
