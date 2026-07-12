@@ -71,6 +71,13 @@ pub struct Mmu {
     /// Plain RAM regions — fast path for load/store.
     pub memory: Vec<(Range<u64>, Vec<u8>)>,
 
+    /// Cosim DUT-follow: swallow stores to queue devices (uart/virtio/syscon).
+    /// A model device acting on a store (e.g. a virtio `QueueNotify` ring-chew)
+    /// would fork REF RAM from the DUT; loads adopt DUT values so device
+    /// state is never consulted. CLINT/PLIC stores stay live (their state
+    /// is force-synced anyway).
+    pub cosim_inert_devstore: bool,
+
     /// CLINT — always present, serviced every cycle outside the device queue.
     clint: (Range<u64>, Clint),
 
@@ -190,6 +197,7 @@ impl Mmu {
             plic: (Self::PLIC_BASE..Self::PLIC_END, Plic::new()),
             devices: Vec::new(),
             service_queue: BinaryHeap::new(),
+            cosim_inert_devstore: false,
             cycle: 0,
             itlb: Tlb::<512>::new(),
             dtlb: DTlb::<1024>::new(),
@@ -810,6 +818,9 @@ impl Mmu {
             }
             self.mip = ctx.mip;
             return Ok(());
+        }
+        if self.cosim_inert_devstore {
+            return Ok(()); // cosim: swallow device stores (incl. unmapped) -- DUT-follow
         }
         // MMIO devices
         for i in 0..self.devices.len() {

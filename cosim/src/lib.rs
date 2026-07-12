@@ -112,6 +112,7 @@ pub unsafe extern "C" fn simmerv_set_forced_interrupt(ctx: *mut SimmervCtx, caus
         // Driven by the cosim: the DUT owns interrupt-acceptance timing (also
         // disables the standalone one-retire xRET defer; see Cpu::cosim_mode).
         ctx.emu.cpu.cosim_mode = true;
+        ctx.emu.cpu.mmu.cosim_inert_devstore = true;
         ctx.emu.cpu.cosim_forced_cause = cause;
     }
 }
