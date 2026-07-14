@@ -1126,13 +1126,25 @@ impl Cpu {
         };
         let pos = cause & 63;
 
-        let new_priv_mode = if (mdeleg >> pos) & 1 == 0 {
+        let mut new_priv_mode = if (mdeleg >> pos) & 1 == 0 {
             PrivMode::M
         } else if (sdeleg >> pos) & 1 == 0 {
             PrivMode::S
         } else {
             PrivMode::U
         };
+
+        // A trap never transitions to a less-privileged mode than the one in which it
+        // occurred: medeleg/sedeleg lower an *exception* handler from M toward the
+        // current mode, but never below it.  In particular a fault taken in M-mode --
+        // e.g. an MPRV load/store page fault while OpenSBI accesses S/U memory on
+        // behalf of the kernel -- is handled in M-mode regardless of
+        // medeleg[cause].  (An interrupt expresses the same rule by staying
+        // pending instead; that is the `new_priv_encoding <
+        // current_priv_encoding` check further below.)
+        if !is_interrupt && u64::from(new_priv_mode) < current_priv_encoding {
+            new_priv_mode = self.mmu.prv;
+        }
 
         // Cosim DUT-follow: a forced interrupt was already validated takeable by the
         // DUT, and simmerv's enable bits are retire-stale -- so skip the reject
