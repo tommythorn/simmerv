@@ -2802,11 +2802,15 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf_w(cvt_sf32_u32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvXW => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FMV.X.W READS an f-reg (does not modify FP state) -> access-check only, no
+            // FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(s1 as i32 as u64)
         }
         Op::FmvXH => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FMV.X.H READS an f-reg (does not modify FP state) -> access-check only, no
+            // FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(Sf16::unbox(s1) as i16 as u64)
         }
         Op::FeqS => {
@@ -2822,7 +2826,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf(Sf32::fle(s1, s2))
         }
         Op::FclassS => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FCLASS READS an f-reg, writes an x-reg (no FP-state change) -> no FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(1 << Sf32::fclass(s1) as usize)
         }
         Op::FcvtSW => {
@@ -2978,7 +2983,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf(Sf64::fle(s1, s2))
         }
         Op::FclassD => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            // FCLASS READS an f-reg, writes an x-reg (no FP-state change) -> no FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(1 << Sf64::fclass(s1) as usize)
         }
         Op::FcvtWD | Op::FcvtWuD => {
@@ -3006,7 +3012,14 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             etry!(cpu.check_float_access_and_dirty(uop.rm));
             ExecOut::from_wf(cvt_sf64_u64(s1, cpu.get_rm(uop.rm)))
         }
-        Op::FmvXD | Op::FmvDX => {
+        Op::FmvXD => {
+            // FMV.X.D READS an f-reg (does not modify FP state) -> access-check only, no
+            // FS-dirty.
+            etry!(cpu.check_float_access_ro(0));
+            ExecOut::ok(s1)
+        }
+        Op::FmvDX => {
+            // FMV.D.X WRITES an f-reg -> dirties FS.
             etry!(cpu.check_float_access_and_dirty(0));
             ExecOut::ok(s1)
         }
