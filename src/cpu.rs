@@ -574,6 +574,13 @@ impl Cpu {
         Ok(())
     }
 
+    /// Dirty FP state AFTER a value actually reaches an f-register. FP loads
+    /// use this (not `check_float_access_and_dirty`) so a load that
+    /// page-faults -- which writes no f-reg -- does not spuriously set
+    /// `mstatus.FS` = Dirty. (cosim caught REF dirtying FS on a faulting
+    /// user FLD while the DUT, which only dirties at load completion, did not.)
+    const fn mark_fp_dirty(&mut self) { self.fs = 3; }
+
     /// Runs program N cycles. Fetch, decode, and execution are completed in a
     /// cycle so far.
     #[allow(clippy::cast_sign_loss)]
@@ -2702,8 +2709,12 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // RV32F
         Op::Flw => {
-            etry!(cpu.check_float_access_and_dirty(0));
-            ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 4)) | fp::NAN_BOX_F32)
+            // ro-check may trap (FP off); the load may page-fault. Dirty FS only AFTER the
+            // value reaches the f-reg -- a faulting load writes nothing, so must not dirty.
+            etry!(cpu.check_float_access_ro(0));
+            let v = etry!(cpu.memop_read(s1, uop.imm64(), 4)) | fp::NAN_BOX_F32;
+            cpu.mark_fp_dirty();
+            ExecOut::ok(v)
         }
         Op::Fsw => {
             // FP store READS an f-reg (does not modify FP state) -> access-check only, no
@@ -2713,8 +2724,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(0)
         }
         Op::Flh => {
-            etry!(cpu.check_float_access_and_dirty(0));
-            ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2)) | fp::NAN_BOX_F16)
+            etry!(cpu.check_float_access_ro(0));
+            let v = etry!(cpu.memop_read(s1, uop.imm64(), 2)) | fp::NAN_BOX_F16;
+            cpu.mark_fp_dirty();
+            ExecOut::ok(v)
         }
         Op::Fsh => {
             // FP store READS an f-reg (does not modify FP state) -> access-check only, no
@@ -2865,8 +2878,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // RV32D
         Op::Fld | Op::CFld | Op::CFldsp => {
-            etry!(cpu.check_float_access_and_dirty(0));
+            etry!(cpu.check_float_access_ro(0));
             let v = etry!(cpu.memop_read(s1, uop.imm64(), 8));
+            cpu.mark_fp_dirty();
             ExecOut::ok(v)
         }
         Op::Fsd | Op::CFsd | Op::CFsdsp => {
