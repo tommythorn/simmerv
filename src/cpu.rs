@@ -3299,6 +3299,42 @@ mod test_cpu {
     }
 
     #[test]
+    fn fp_load_dirties_fs_only_on_success() {
+        // Regression for 44f628f: a page-faulting FP load writes no f-reg, so it must
+        // NOT dirty mstatus.FS; a successful FP load does. (Pre-fix,
+        // check_float_access_and_dirty set fs=3 BEFORE memop_read, so even a
+        // FAULTING load dirtied FS -> diverged from the cosim DUT on the
+        // kernel's sstatus read.) Encoding: FLD f0, 0(x1) = 0x0000_b007.
+
+        // faulting: an address past the end of RAM makes memop_read return a
+        // LoadAccessFault before any f-reg write. (create_cpu maps 8 MiB at
+        // MEMORY_BASE.)
+        let mut cpu = create_cpu();
+        cpu.fs = 1; // FP enabled, Initial (not Dirty)
+        cpu.write_register(x(1), MEMORY_BASE + 8 * 1024 * 1024); // first byte past RAM -> fault
+        cpu.get_mut_mmu()
+            .store_virt_u32(MEMORY_BASE, 0x0000_b007)
+            .expect("store FLD");
+        cpu.update_pc(MEMORY_BASE);
+        assert!(
+            cpu.step_single().is_err(),
+            "load past end of RAM should fault"
+        );
+        assert_eq!(cpu.fs, 1, "a faulting FP load must NOT dirty mstatus.FS");
+
+        // success: an aligned in-range address completes the load -> FS goes Dirty.
+        let mut cpu = create_cpu();
+        cpu.fs = 1;
+        cpu.write_register(x(1), MEMORY_BASE + 0x40);
+        cpu.get_mut_mmu()
+            .store_virt_u32(MEMORY_BASE, 0x0000_b007)
+            .expect("store FLD");
+        cpu.update_pc(MEMORY_BASE);
+        assert!(cpu.step_single().is_ok(), "aligned FLD should succeed");
+        assert_eq!(cpu.fs, 3, "a successful FP load dirties mstatus.FS");
+    }
+
+    #[test]
     #[allow(clippy::match_wild_err_arm)]
     fn step_single() {
         let mut cpu = create_cpu();
