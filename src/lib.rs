@@ -247,9 +247,11 @@ impl Emulator {
 
         let mut dtb = include_bytes!("./device/dtb.dtb").to_vec();
         let dtb_base = dtb_end_of_ram(0x8000_0000, capacity, dtb.len());
-        let usable = dtb_base - 0x8000_0000;
+        // Report all of RAM. The DTB sits at the top of RAM, but the kernel
+        // reserves its own FDT footprint (early_init_fdt_reserve_self), so it
+        // needn't be carved out of the memory node.
         #[allow(clippy::expect_used)]
-        patch_dtb_memory(&mut dtb, usable).expect("can't patch dtb");
+        patch_dtb_memory(&mut dtb, capacity as u64).expect("can't patch dtb");
         mmu.write_memory_at(dtb_base, &dtb);
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
@@ -880,8 +882,8 @@ impl Emulator {
         let mut dtb = content.to_vec();
         #[allow(clippy::cast_possible_truncation)]
         let dtb_base = dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len());
-        let usable = dtb_base - 0x8000_0000;
-        patch_dtb_memory(&mut dtb, usable)?;
+        // Report all of RAM; the kernel reserves the FDT's own footprint.
+        patch_dtb_memory(&mut dtb, self.memory_bytes)?;
         self.cpu.get_mut_mmu().write_memory_at(dtb_base, &dtb);
         self.cpu.set_dtb_base(dtb_base);
         Ok(())
