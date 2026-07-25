@@ -15,6 +15,16 @@ pub enum Csr {
     Ucause = 0x042,
     Utval = 0x043,
     Uip = 0x044,
+    // V — the vector CSRs.  vstart/vxsat/vxrm/vcsr are read-write in U-mode,
+    // vl/vtype/vlenb are read-only.
+    Vstart = 0x008,
+    Vxsat = 0x009,
+    Vxrm = 0x00a,
+    Vcsr = 0x00f,
+    Vl = 0xc20,
+    Vtype = 0xc21,
+    Vlenb = 0xc22,
+
     Sstatus = 0x100,
     Sedeleg = 0x102,
     Sideleg = 0x103,
@@ -227,6 +237,13 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Ustatus
             | Csr::Utval
             | Csr::Utvec
+            | Csr::Vstart
+            | Csr::Vxsat
+            | Csr::Vxrm
+            | Csr::Vcsr
+            | Csr::Vl
+            | Csr::Vtype
+            | Csr::Vlenb
     )
 }
 

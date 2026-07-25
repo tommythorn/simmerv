@@ -270,6 +270,26 @@ pub trait RiscvDecoder {
     fn fcvt_h_s(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn fcvt_d_h(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn fcvt_h_d(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    // V (RVV 1.0).  One method per encoding group rather than per
+    // instruction; the funct6 dispatch happens in `vector.rs`.
+    fn vsetvl(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vsetivli(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vsetvli(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vload_8(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vload_16(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vload_32(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vload_64(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vstore_8(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vstore_16(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vstore_32(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vstore_64(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_ivv(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_fvv(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_mvv(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_ivi(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_ivx(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_fvf(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
+    fn vop_mvx(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn unimp(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
     fn end(a: u64, w: u32, c: &mut Self::Context) -> Self::Returns;
 }

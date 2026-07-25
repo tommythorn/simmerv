@@ -6,7 +6,7 @@
 /// `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz_Zfhmin`
 /// instructions, useful for deriving decoders etc.  There is simple utility
 /// function that generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 264] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 282] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -278,6 +278,41 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 264] = [
     (0xfff0007f, 0x44000053, "fcvt.h.s"),
     (0xfff0007f, 0x42200053, "fcvt.d.h"),
     (0xfff0007f, 0x44100053, "fcvt.h.d"),
+    // V — the vector extension (RVV 1.0).
+    //
+    // Unlike every other extension above, V is NOT enumerated instruction by
+    // instruction here.  Its ~400 instructions live in a dense funct6 × funct3
+    // space and share one operand layout per funct3 group, so the table lists
+    // one entry per *encoding group* and `vector.rs` does the funct6 dispatch
+    // from the raw instruction word (which the decoder stashes in `Uop::imm`).
+    // Keeping the group coarse also keeps the generated dispatch table small.
+    //
+    // Configuration (OPCFG, funct3=7).  Ordered specific-to-general by the
+    // generator, which sorts candidates by mask popcount.
+    (0xfe00707f, 0x80007057, "vsetvl"),   // 31:25 = 1000000
+    (0xc000707f, 0xc0007057, "vsetivli"), // 31:30 = 11
+    (0x8000707f, 0x00007057, "vsetvli"),  // 31    = 0
+    // Loads (LOAD-FP, opcode 0x07) and stores (STORE-FP, 0x27).  funct3 is the
+    // `width` field: 0/5/6/7 are vector EEW 8/16/32/64 (1/2/3 are the scalar
+    // FLH/FLW/FLD, which keep their own entries above).  mop/lumop/nf inside
+    // the word pick unit-stride vs strided vs indexed vs whole-register, and
+    // the segment count.
+    (0x0000707f, 0x00000007, "vload.8"),
+    (0x0000707f, 0x00005007, "vload.16"),
+    (0x0000707f, 0x00006007, "vload.32"),
+    (0x0000707f, 0x00007007, "vload.64"),
+    (0x0000707f, 0x00000027, "vstore.8"),
+    (0x0000707f, 0x00005027, "vstore.16"),
+    (0x0000707f, 0x00006027, "vstore.32"),
+    (0x0000707f, 0x00007027, "vstore.64"),
+    // Arithmetic (OP-V, opcode 0x57), one entry per funct3 operand form.
+    (0x0000707f, 0x00000057, "vop.ivv"),
+    (0x0000707f, 0x00001057, "vop.fvv"),
+    (0x0000707f, 0x00002057, "vop.mvv"),
+    (0x0000707f, 0x00003057, "vop.ivi"),
+    (0x0000707f, 0x00004057, "vop.ivx"),
+    (0x0000707f, 0x00005057, "vop.fvf"),
+    (0x0000707f, 0x00006057, "vop.mvx"),
     (0xffffffff, 0x00100073, "end"), // sentinel — should match (overlap ebreak)
 ];
 
@@ -355,7 +390,7 @@ pub fn generate_riscv_decoder() {
     println!("use crate::riscv_decoding::RiscvDecoder;");
     println!();
     println!(
-        "#[allow(clippy::too_many_lines, clippy::verbose_bit_mask, clippy::match_same_arms, unused_braces)]"
+        "#[allow(clippy::too_many_lines, clippy::verbose_bit_mask, clippy::match_same_arms, clippy::ifs_same_cond, unused_braces)]"
     );
     println!(
         "pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: &mut C) -> R {{"
@@ -1489,6 +1524,78 @@ mod test {
         }
         fn fcvt_h_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "fcvt_h_d";
+            0
+        }
+        fn vsetvl(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vsetvl";
+            0
+        }
+        fn vsetivli(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vsetivli";
+            0
+        }
+        fn vsetvli(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vsetvli";
+            0
+        }
+        fn vload_8(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vload_8";
+            0
+        }
+        fn vload_16(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vload_16";
+            0
+        }
+        fn vload_32(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vload_32";
+            0
+        }
+        fn vload_64(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vload_64";
+            0
+        }
+        fn vstore_8(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vstore_8";
+            0
+        }
+        fn vstore_16(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vstore_16";
+            0
+        }
+        fn vstore_32(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vstore_32";
+            0
+        }
+        fn vstore_64(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vstore_64";
+            0
+        }
+        fn vop_ivv(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_ivv";
+            0
+        }
+        fn vop_fvv(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_fvv";
+            0
+        }
+        fn vop_mvv(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_mvv";
+            0
+        }
+        fn vop_ivi(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_ivi";
+            0
+        }
+        fn vop_ivx(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_ivx";
+            0
+        }
+        fn vop_fvf(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_fvf";
+            0
+        }
+        fn vop_mvx(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "vop_mvx";
             0
         }
         fn unimp(_a: u64, _w: u32, s: &mut Self::Context) -> usize {

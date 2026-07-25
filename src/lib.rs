@@ -18,6 +18,7 @@ pub mod serial_backend;
 pub mod speedometer;
 pub mod tlb;
 pub mod uop_cache;
+pub mod vector;
 
 use crate::cpu::Cpu;
 use crate::device::syscon::Syscon;
@@ -285,6 +286,27 @@ impl Emulator {
         emulator
     }
 
+    /// Enable (or disable) the V vector extension.
+    ///
+    /// This is a machine-construction switch: it gates vector instruction
+    /// decoding, the `misa` V bit and the vector CSRs.  When enabling it we
+    /// also patch the built-in device tree's `riscv,isa` string so a guest
+    /// kernel sees the extension; the replacement is deliberately the same
+    /// length as the original so the blob's structure is untouched.
+    pub fn set_vector_enabled(&mut self, on: bool) {
+        const OLD: &[u8] = b"rv64imafdcsu\0";
+        const NEW: &[u8] = b"rv64imafdcv\0\0";
+        self.cpu.set_vector_enabled(on);
+        if !on {
+            return;
+        }
+        let dtb = include_bytes!("./device/dtb.dtb");
+        if let Some(off) = dtb.windows(OLD.len()).position(|w| w == OLD) {
+            let base = self.cpu.dtb_base + off as u64;
+            self.cpu.get_mut_mmu().write_memory_at(base, NEW);
+        }
+    }
+
     /// Runs program set by `load_image()`. Calls `run_test()` if the program
     /// is [`riscv-tests`](https://github.com/riscv/riscv-tests).
     /// Otherwise calls `run_program()`.
@@ -318,7 +340,7 @@ impl Emulator {
                 print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
                 if let Ok(insn) = insn_word {
                     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                    let uop = cpu::decode(insn_addr, insn as u32);
+                    let uop = cpu::decode(insn_addr, insn as u32, self.cpu.vector_enabled);
                     if !uop.rd.is_x0_dest() && !exceptional {
                         print!("{:16x}", self.cpu.read_register(uop.rd));
                         if self.cpu.fflags != fflags {
@@ -402,7 +424,7 @@ impl Emulator {
         let mut state = Vec::new();
         self.cpu.write_state(&mut state);
 
-        let mut data = b"SIMMERVC7".to_vec();
+        let mut data = b"SIMMERVC8".to_vec();
         {
             let params = brotli::enc::BrotliEncoderParams {
                 quality: 5,
@@ -422,7 +444,7 @@ impl Emulator {
     /// # Errors
     /// Returns an error if the data is not a valid snapshot or is corrupt.
     pub fn load_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        if data.len() < 9 || &data[..9] != b"SIMMERVC7" {
+        if data.len() < 9 || &data[..9] != b"SIMMERVC8" {
             bail!("not a valid snapshot");
         }
         let mut state = Vec::new();
@@ -498,7 +520,7 @@ impl Emulator {
             print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
             if let Ok(insn) = insn_word {
                 #[allow(clippy::cast_sign_loss)]
-                let uop = cpu::decode(insn_addr, insn as u32);
+                let uop = cpu::decode(insn_addr, insn as u32, self.cpu.vector_enabled);
                 if !uop.rd.is_x0_dest() && !exceptional {
                     print!("{:16x}", self.cpu.read_register(uop.rd));
                     if self.cpu.fflags != fflags {

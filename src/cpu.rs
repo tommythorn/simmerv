@@ -26,6 +26,8 @@ use crate::speedometer::Speedometer;
 use crate::uop_cache::BasicBlock;
 use crate::uop_cache::BbCache;
 use crate::uop_cache::MAX_BLOCK_LEN;
+use crate::vector;
+use crate::vector::VectorUnit;
 pub use csr::*;
 use fp::RoundingMode;
 use fp::Sf;
@@ -360,6 +362,13 @@ pub struct Cpu {
     pub fflags: u8,
     pub fs: u8,
 
+    // The vector unit and its mstatus.VS field.  `vector_enabled` is the
+    // build-the-machine-with-V switch: with it clear the decoder rejects every
+    // vector encoding and none of this state is reachable.
+    pub v: VectorUnit,
+    pub vs: u8,
+    pub vector_enabled: bool,
+
     // Supervisor and CSR
     pub cycle: u64,
     csr: csr::CsrFile,
@@ -464,6 +473,10 @@ impl Cpu {
             fflags: 0,
             fs: 1,
 
+            v: VectorUnit::new(),
+            vs: 1,
+            vector_enabled: false,
+
             seqno: 0,
             cycle: 0,
             wfi: false,
@@ -499,6 +512,8 @@ impl Cpu {
         self.rf = [0; 65];
         self.fflags = 0;
         self.fs = 1;
+        self.v = VectorUnit::new();
+        self.vs = 1;
         self.wfi = false;
         self.pc = 0x8000_0000;
         self.csr = CsrFile::new();
@@ -564,6 +579,32 @@ impl Cpu {
         }
     }
 
+    /// True for the CSRs that belong to the vector unit, which are
+    /// inaccessible without V and when `mstatus.VS` is Off.
+    const fn is_vector_csr(csr: Csr) -> bool {
+        matches!(
+            csr,
+            Csr::Vstart | Csr::Vxsat | Csr::Vxrm | Csr::Vcsr | Csr::Vl | Csr::Vtype | Csr::Vlenb
+        )
+    }
+
+    /// Turn the vector extension on or off.  This is a machine-construction
+    /// switch rather than architectural state: it gates instruction decoding,
+    /// the `misa` V bit and the vector CSRs.
+    pub const fn set_vector_enabled(&mut self, on: bool) {
+        self.vector_enabled = on;
+        let v_bit = 1u64 << (b'V' - b'A');
+        if on {
+            self.csr.misa |= v_bit;
+            self.vs = 1;
+        } else {
+            self.csr.misa &= !v_bit;
+            self.vs = 0;
+        }
+        // Previously decoded blocks were decoded under the old setting.
+        self.icache_flush = IcacheFlushKind::Full;
+    }
+
     /// Checks that float instructions are enabled and
     /// that the rounding mode is legal; dirty the FP state
     fn check_float_access_and_dirty(&mut self, rm: u8) -> Result<(), Exception> {
@@ -579,7 +620,7 @@ impl Cpu {
     /// page-faults -- which writes no f-reg -- does not spuriously set
     /// `mstatus.FS` = Dirty. (cosim caught REF dirtying FS on a faulting
     /// user FLD while the DUT, which only dirties at load completion, did not.)
-    const fn mark_fp_dirty(&mut self) { self.fs = 3; }
+    pub(crate) const fn mark_fp_dirty(&mut self) { self.fs = 3; }
 
     /// Runs program N cycles. Fetch, decode, and execution are completed in a
     /// cycle so far.
@@ -796,7 +837,7 @@ impl Cpu {
                 break;
             }
 
-            let uop = decode(fetch_pc, insn);
+            let uop = decode(fetch_pc, insn, self.vector_enabled);
 
             if matches!(uop.op, Op::CUnimp | Op::End) {
                 if i == 0 {
@@ -888,7 +929,7 @@ impl Cpu {
         let insn_addr = self.pc;
         let insn = self.memop_code(insn_addr)? as u32;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
-        let uop = decode(insn_addr, insn);
+        let uop = decode(insn_addr, insn, self.vector_enabled);
         if matches!(uop.op, Op::CUnimp | Op::End) {
             return Err(Exception {
                 trap: Trap::IllegalInstruction,
@@ -982,7 +1023,7 @@ impl Cpu {
         };
         cap.insn = insn;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
-        let uop = decode(insn_addr, insn);
+        let uop = decode(insn_addr, insn, self.vector_enabled);
         if matches!(uop.op, Op::CUnimp | Op::End) {
             let exc = Exception {
                 trap: Trap::IllegalInstruction,
@@ -1376,6 +1417,10 @@ impl Cpu {
             return illegal;
         };
 
+        if Self::is_vector_csr(csr) && (!self.vector_enabled || self.vs == 0) {
+            return illegal;
+        }
+
         match csr {
             Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access_ro(0)?,
             Csr::Cycle | Csr::Time | Csr::Instret if self.mmu.prv != PrivMode::M => {
@@ -1437,6 +1482,10 @@ impl Cpu {
 
         if (csrno >> 10) & 3 == 3 {
             log::warn!("Write attempted to Read Only CSR {csrno:03x}");
+            return illegal;
+        }
+
+        if Self::is_vector_csr(csr) && (!self.vector_enabled || self.vs == 0) {
             return illegal;
         }
 
@@ -1525,9 +1574,10 @@ impl Cpu {
             Csr::Mscratch => self.csr.mscratch,
             Csr::Mstatus => {
                 let mut mstatus = self.mmu.mstatus & !(1u64 << 63);
-                mstatus &= !MSTATUS_FS;
+                mstatus &= !(MSTATUS_FS | MSTATUS_VS);
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
-                if self.fs == 3 {
+                mstatus |= u64::from(self.vs) << MSTATUS_VS_SHIFT;
+                if self.fs == 3 || self.vs == 3 {
                     mstatus |= 1 << 63;
                 }
                 mstatus
@@ -1544,10 +1594,11 @@ impl Cpu {
             Csr::Sscratch => self.csr.sscratch,
             Csr::Sstatus => {
                 let mut mstatus = self.mmu.mstatus & !(1u64 << 63);
-                mstatus &= !MSTATUS_FS;
-                mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
+                mstatus &= !(MSTATUS_FS | MSTATUS_VS);
                 mstatus &= 0x8000_0003_000d_e162;
-                if self.fs == 3 {
+                mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
+                mstatus |= u64::from(self.vs) << MSTATUS_VS_SHIFT;
+                if self.fs == 3 || self.vs == 3 {
                     mstatus |= 1 << 63;
                 }
                 mstatus
@@ -1569,6 +1620,13 @@ impl Cpu {
             Csr::Pmpaddr0 => self.csr.pmpaddr0,
             Csr::Time => self.mmu.read_mtime_csr(),
             Csr::Ustatus => self.csr.ustatus,
+            Csr::Vstart => self.v.vstart,
+            Csr::Vxsat => u64::from(self.v.vxsat),
+            Csr::Vxrm => u64::from(self.v.vxrm),
+            Csr::Vcsr => self.v.vcsr(),
+            Csr::Vl => self.v.vl,
+            Csr::Vtype => self.v.vtype,
+            Csr::Vlenb => vector::VLENB as u64,
             _ => 0,
         }
     }
@@ -1615,6 +1673,10 @@ impl Cpu {
                 let mask = MSTATUS_MASK & !(MSTATUS_VS | MSTATUS_UXL_MASK | MSTATUS_SXL_MASK);
                 self.mmu.mstatus = value & mask | self.mmu.mstatus & !mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
+                // Without V the VS field is hardwired to zero (WARL).
+                if self.vector_enabled {
+                    self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
+                }
             }
             Csr::Mtval => self.csr.mtval = Self::legalize_va(value),
             Csr::Mtvec => self.csr.mtvec = value,
@@ -1633,6 +1695,9 @@ impl Cpu {
                 self.mmu.mstatus &= !mask;
                 self.mmu.mstatus |= value & mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
+                if self.vector_enabled {
+                    self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
+                }
             }
             Csr::Stval => self.csr.stval = Self::legalize_va(value),
             Csr::Stvec => self.csr.stvec = value,
@@ -1657,6 +1722,23 @@ impl Cpu {
             Csr::Pmpaddr0 => self.csr.pmpaddr0 = value,
             Csr::Time => self.mmu.write_mtime_csr(value), // XXX SHOULD trap
             Csr::Ustatus => self.csr.ustatus = value,
+            // Writing any vector CSR makes the vector state dirty.
+            Csr::Vstart => {
+                self.v.vstart = value & (vector::VLEN as u64 - 1);
+                self.vs = 3;
+            }
+            Csr::Vxsat => {
+                self.v.vxsat = value & 1 != 0;
+                self.vs = 3;
+            }
+            Csr::Vxrm => {
+                self.v.vxrm = (value & 3) as u8;
+                self.vs = 3;
+            }
+            Csr::Vcsr => {
+                self.v.set_vcsr(value);
+                self.vs = 3;
+            }
             _ => log::warn!("We are ignoring writes to {csr:?}"),
         }
     }
@@ -1676,7 +1758,7 @@ impl Cpu {
             rs2,
             imm,
             ..
-        } = decode(addr, insn as u32);
+        } = decode(addr, insn as u32, self.vector_enabled);
 
         let op = format!("{op:?}").to_lowercase(); // XXX More clever CAdd -> c.add
 
@@ -1707,6 +1789,9 @@ impl Cpu {
     ///   [1 B] wfi
     ///   [1 B] reservation flag (0=None, 1=Some) + [8 B] value
     ///   [20×8 B] CSR fields (fixed order, see `read_state`)
+    ///   [1 B] vs (mstatus.VS) + [1 B] `vector_enabled`
+    ///   [4×8 B] vtype, vl, vstart, vcsr
+    ///   [32·VLENB B] the vector register file
     ///   [? B] MMU state (via `Mmu::write_state`)
     pub fn write_state(&self, out: &mut Vec<u8>) {
         {
@@ -1758,6 +1843,13 @@ impl Cpu {
             ] {
                 w.u64(v);
             }
+            w.u8(self.vs);
+            w.bool(self.vector_enabled);
+            w.u64(self.v.vtype);
+            w.u64(self.v.vl);
+            w.u64(self.v.vstart);
+            w.u64(self.v.vcsr());
+            w.raw(&self.v.vrf);
         }
         self.mmu.write_state(out);
     }
@@ -1833,6 +1925,14 @@ impl Cpu {
         c.mcounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.senvcfg = r.u64()?;
+        self.vs = r.u8()?;
+        self.vector_enabled = r.bool()?;
+        self.v.vtype = r.u64()?;
+        self.v.vl = r.u64()?;
+        self.v.vstart = r.u64()?;
+        let vcsr = r.u64()?;
+        self.v.set_vcsr(vcsr);
+        self.v.vrf.copy_from_slice(r.raw(vector::VLENB * 32)?);
         self.icache_flush = IcacheFlushKind::Full;
         self.mmu.read_state(r.remaining(), make_device)
     }
@@ -1842,7 +1942,7 @@ impl Cpu {
         self.mmu.get_mut_serial_backend()
     }
 
-    fn read_frm(&self) -> RoundingMode {
+    pub(crate) fn read_frm(&self) -> RoundingMode {
         debug_assert_ne!(self.fs, 0);
         self.frm
     }
@@ -1868,7 +1968,7 @@ impl Cpu {
     /// Accumulate non-zero fflags
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn add_to_fflags(&mut self, fflags: u8) {
+    pub(crate) fn add_to_fflags(&mut self, fflags: u8) {
         debug_assert_ne!(fflags, 0);
         debug_assert_ne!(self.fs, 0);
         debug_assert_eq!(fflags & !31, 0);
@@ -1956,7 +2056,12 @@ impl Cpu {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn memop_read(&mut self, baseva: u64, offset: u64, size: u64) -> Result<u64, Exception> {
+    pub(crate) fn memop_read(
+        &mut self,
+        baseva: u64,
+        offset: u64,
+        size: u64,
+    ) -> Result<u64, Exception> {
         let va = baseva.wrapping_add(offset);
 
         if va & 0xfff > 0x1000 - size {
@@ -2039,7 +2144,7 @@ impl Cpu {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn memop_write(
+    pub(crate) fn memop_write(
         &mut self,
         baseva: u64,
         offset: u64,
@@ -2153,7 +2258,7 @@ impl Cpu {
     /// Returns `Err(())` if the instruction word is illegal or cannot be
     /// decoded.
     pub fn get_register_info(&self, addr: u64, insn: u32) -> anyhow::Result<Uop> {
-        Ok(decode(addr, insn))
+        Ok(decode(addr, insn, self.vector_enabled))
     }
 }
 
@@ -2172,8 +2277,8 @@ pub const fn get_trap_cause(exc: &Exception) -> u64 {
 }
 
 #[must_use]
-pub fn decode(a: u64, word: u32) -> Uop {
-    let mut uop = decoder(a, word, &mut new_decoder::Decoder {});
+pub fn decode(a: u64, word: u32, vector: bool) -> Uop {
+    let mut uop = decoder(a, word, &mut new_decoder::Decoder { vector });
     let size: u8 = if word & 3 == 3 { 4 } else { 2 };
     let branch_flag: u8 = if Cpu::is_branch(uop.op) { 0x80 } else { 0 };
     uop.insn_size = size | branch_flag;
@@ -3224,6 +3329,26 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             }
             ExecOut::ok(0)
         }
+        // V — every vector encoding funnels through one dispatcher, which
+        // re-derives its operands from the instruction word kept in `imm`.
+        Op::Vsetvli
+        | Op::Vsetivli
+        | Op::Vsetvl
+        | Op::Vload8
+        | Op::Vload16
+        | Op::Vload32
+        | Op::Vload64
+        | Op::Vstore8
+        | Op::Vstore16
+        | Op::Vstore32
+        | Op::Vstore64
+        | Op::VopIvv
+        | Op::VopFvv
+        | Op::VopMvv
+        | Op::VopIvi
+        | Op::VopIvx
+        | Op::VopFvf
+        | Op::VopMvx => vector::execute(cpu, uop.op, uop.imm as u32, s1, s2),
         // End is the sentinel for unrecognised 32-bit instructions; CUnimp for compressed.
         Op::End | Op::Unimp | Op::CUnimp => ExecOut::err(Trap::IllegalInstruction, 0),
     }
@@ -3250,7 +3375,7 @@ mod test_cpu {
 
     #[test]
     fn decode_fcvt_xf_preserves_rounding_mode() {
-        let uop = decode(MEMORY_BASE, 0xc010_1053);
+        let uop = decode(MEMORY_BASE, 0xc010_1053, false);
         assert_eq!(uop.op, Op::FcvtWuS);
         assert_eq!(uop.rm, RoundingMode::RoundTowardsZero as u8);
     }
@@ -3296,6 +3421,134 @@ mod test_cpu {
 
         assert_eq!(MEMORY_BASE + 6, cpu.read_pc());
         assert_eq!(8, cpu.read_register(x(8)));
+    }
+
+    /// Assemble-verified encodings used by the vector tests below.
+    const VSETVLI_T0_A0_E32M2: u32 = 0x0d15_72d7; // vsetvli t0, a0, e32, m2, ta, ma
+    const VADD_VV_V4_V8_V12: u32 = 0x0286_0257; // vadd.vv v4, v8, v12
+    const VLE32_V0_A1: u32 = 0x0205_e007; // vle32.v v0, (a1)
+
+    fn vector_cpu() -> Cpu {
+        let mut cpu = create_cpu();
+        cpu.set_vector_enabled(true);
+        cpu
+    }
+
+    /// Run one instruction at `MEMORY_BASE`.
+    fn run_one(cpu: &mut Cpu, insn: u32) -> Result<(), Exception> {
+        cpu.get_mut_mmu()
+            .store_virt_u32(MEMORY_BASE, insn)
+            .expect("store instruction");
+        cpu.update_pc(MEMORY_BASE);
+        cpu.step_single()
+    }
+
+    #[test]
+    fn vector_decoding_is_gated_by_the_runtime_flag() {
+        // Without V every vector encoding is an unknown instruction...
+        for insn in [VSETVLI_T0_A0_E32M2, VADD_VV_V4_V8_V12, VLE32_V0_A1] {
+            assert_eq!(
+                decode(MEMORY_BASE, insn, false).op,
+                Op::Unimp,
+                "{insn:08x} must not decode without -V"
+            );
+        }
+        // ...and with it they decode into their encoding groups.
+        assert_eq!(
+            decode(MEMORY_BASE, VSETVLI_T0_A0_E32M2, true).op,
+            Op::Vsetvli
+        );
+        assert_eq!(decode(MEMORY_BASE, VADD_VV_V4_V8_V12, true).op, Op::VopIvv);
+        assert_eq!(decode(MEMORY_BASE, VLE32_V0_A1, true).op, Op::Vload32);
+
+        // A gated-off vector instruction traps rather than executing.
+        let mut cpu = create_cpu();
+        assert_eq!(
+            run_one(&mut cpu, VADD_VV_V4_V8_V12).unwrap_err().trap,
+            Trap::IllegalInstruction
+        );
+    }
+
+    #[test]
+    fn vsetvli_clamps_avl_to_vlmax() {
+        let mut cpu = vector_cpu();
+        // e32/m2 over VLEN=128 holds 2 * 128/32 = 8 elements, so an AVL of 100
+        // is clamped and the written vtype reads back verbatim.
+        cpu.write_register(x(10), 100);
+        run_one(&mut cpu, VSETVLI_T0_A0_E32M2).expect("vsetvli");
+        assert_eq!(cpu.v.vl, 8);
+        assert_eq!(cpu.v.vtype, 0xd1);
+        assert_eq!(cpu.read_register(x(5)), 8, "vsetvli writes vl to rd");
+        assert_eq!(cpu.vs, 3, "a vector instruction dirties mstatus.VS");
+
+        // An AVL below VLMAX is taken as-is.
+        cpu.write_register(x(10), 3);
+        run_one(&mut cpu, VSETVLI_T0_A0_E32M2).expect("vsetvli");
+        assert_eq!(cpu.v.vl, 3);
+    }
+
+    #[test]
+    fn vadd_vv_respects_vl_and_leaves_the_tail_alone() {
+        let mut cpu = vector_cpu();
+        cpu.write_register(x(10), 3);
+        run_one(&mut cpu, VSETVLI_T0_A0_E32M2).expect("vsetvli");
+        assert_eq!(cpu.v.vl, 3);
+
+        for i in 0..8 {
+            cpu.v.eset(8, i, 4, 100 + i as u64);
+            cpu.v.eset(12, i, 4, 1000 * (i as u64 + 1));
+            cpu.v.eset(4, i, 4, 0xdead_beef);
+        }
+        run_one(&mut cpu, VADD_VV_V4_V8_V12).expect("vadd.vv");
+
+        for i in 0..3 {
+            assert_eq!(
+                cpu.v.eget(4, i, 4),
+                100 + i as u64 + 1000 * (i as u64 + 1),
+                "element {i}"
+            );
+        }
+        for i in 3..8 {
+            assert_eq!(cpu.v.eget(4, i, 4), 0xdead_beef, "tail element {i}");
+        }
+    }
+
+    #[test]
+    fn vle32_loads_vl_elements_from_memory() {
+        let mut cpu = vector_cpu();
+        cpu.write_register(x(10), 4);
+        run_one(&mut cpu, VSETVLI_T0_A0_E32M2).expect("vsetvli");
+
+        let data = MEMORY_BASE + 0x1000;
+        for i in 0..4u64 {
+            cpu.get_mut_mmu()
+                .store_virt_u32(data + i * 4, 0x1000_0000 + i as u32)
+                .expect("store");
+        }
+        cpu.write_register(x(11), data);
+        for i in 0..4 {
+            cpu.v.eset(0, i, 4, 0);
+        }
+        run_one(&mut cpu, VLE32_V0_A1).expect("vle32.v");
+        for i in 0..4u64 {
+            assert_eq!(cpu.v.eget(0, i as usize, 4), 0x1000_0000 + i);
+        }
+    }
+
+    #[test]
+    fn vector_csrs_are_unreachable_without_the_extension() {
+        // csrr t0, vlenb  ==  csrrs t0, 0xc22, x0
+        let read_vlenb: u32 = 0xc220_22f3;
+        let mut cpu = create_cpu();
+        assert_eq!(
+            run_one(&mut cpu, read_vlenb).unwrap_err().trap,
+            Trap::IllegalInstruction,
+            "vlenb must not be readable without V"
+        );
+
+        let mut cpu = vector_cpu();
+        run_one(&mut cpu, read_vlenb).expect("vlenb readable with V");
+        assert_eq!(cpu.read_register(x(5)), crate::vector::VLENB as u64);
     }
 
     #[test]

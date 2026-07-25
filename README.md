@@ -24,6 +24,7 @@ here](https://tommythorn.github.io/simmerv/wasm/web/index.html)
 
 - Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Svpbmt_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
   (CLINT, PLIC, NS16550A UART, virtio block device, and VirtIO ethernet)
+- Optional `V` vector extension (RVV 1.0, `VLEN`=128, `ELEN`=64), enabled with `-V`
 - Targets native and WASM
 - Snapshots
 - Speedometer
@@ -55,6 +56,52 @@ The emulator supports all instructions listed above.
 - Passes all riscof (RISC-V Architectural Tests) for RV64IMC
 - Boots Buildroot, Debian Trixie, Ubuntu
 - Linux OpenSBI and legacy BBL boot support
+
+### RVA23 profile (in progress)
+
+- [x] **V** — the vector extension, RVV 1.0.  All of `Zve64d` plus the full
+      `V` instruction set: configuration, unit-stride / strided / indexed /
+      segment / whole-register / fault-only-first loads and stores, the
+      integer, fixed-point, mask, permutation and floating-point operations,
+      and the `vstart` / `vl` / `vtype` / `vxrm` / `vxsat` / `vcsr` / `vlenb`
+      CSRs with `mstatus.VS`.  `VLEN` is 128 (`Zvl128b`, the profile minimum).
+- [x] Zvfh, Zvfhmin — vector half-precision (the full arithmetic set, which is
+      a superset of the `Zvfhmin` the profile requires)
+- [x] Zvkt, Zkt — constant-time execution; trivially satisfied by a functional
+      model with no data-dependent timing
+- [x] Zicond, Zfhmin, Zicbom/z/p, Svinval, Svnapot, Svpbmt, Sstc, Svade
+      (inherited from RVA22)
+- [ ] Zcb, Zcmop, Zimop — the newer compressed and may-be-operation encodings
+- [ ] Zfa — additional scalar floating-point instructions
+- [ ] Zvbb — vector basic bit manipulation
+- [ ] Zawrs — wait-on-reservation-set
+- [ ] Zihintntl — non-temporal locality hints
+- [ ] Supm / Ssnpm / Smnpm — pointer masking
+- [ ] Sscofpmf — count-overflow interrupts (the CSR reads exist, no overflows
+      are raised)
+- [ ] Ssstateen / Smstateen — the state-enable CSRs
+- [ ] H — the hypervisor extension, required by RVA23S64
+- [ ] Sv48, Sv57 in `satp` (the page-table walker handles them, but `satp`
+      writes currently accept only Bare and Sv39)
+
+The vector extension is off by default and enabled with `-V`, so that a run
+without the flag still models a hart that traps every vector encoding.
+
+```sh
+$ cargo r -r -- -V -n my-vector-program.elf
+```
+
+`tests/vector/run.sh` builds a bare-metal RVV exerciser — ~1440 instruction
+cases across every SEW, LMUL, rounding mode and addressing form — and diffs
+simmerv's transcript against QEMU's `virt` machine, which shares simmerv's
+memory map.  All 1437 transcript lines currently match exactly.
+
+One deliberate difference: simmerv enforces `vill`, register-group alignment,
+EMUL range and the "masked instruction may not write v0" rule, but not the
+finer source/destination overlap constraints (a narrowing `vs1` inside the
+double-width `vs2` group, a segment-load destination overlapping the index
+group).  QEMU raises an illegal instruction for those; simmerv executes them.
+No conforming assembler emits them.
 
 ## How to run Linux with VirtIO Block Device (/dev/vda)
 

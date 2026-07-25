@@ -109,7 +109,12 @@ const fn sign_extend(value: u32, bits: u32) -> i32 {
     (value as i32) << shift >> shift
 }
 
-pub struct Decoder {}
+/// Decoder context.  `vector` is the runtime V-extension enable: with it clear
+/// every vector encoding decodes to `Op::Unimp` (illegal instruction), which is
+/// exactly what a hart without V does.
+pub struct Decoder {
+    pub vector: bool,
+}
 
 impl RiscvDecoder for Decoder {
     type Context = Self;
@@ -859,6 +864,134 @@ impl RiscvDecoder for Decoder {
     fn fcvt_h_d(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         decode_r_fff(a, insn, Op::FcvtHD)
     }
+    // ── V (RVV 1.0) ──────────────────────────────────────────────────────
+    // The whole instruction word is carried in `imm`; `vector.rs` pulls the
+    // vector register numbers, vm, funct6 and the addressing fields out of it
+    // at execute time.  Only the *scalar* operands are named here, so that the
+    // generic register-read/write plumbing in `step_block` still works: rs1 is
+    // the x (or f) source of a .vx/.vf/vset form, and rd is set only for the
+    // handful of vector instructions that write a scalar register.
+    fn vsetvli(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        decode_vset(insn, Op::Vsetvli)
+    }
+    fn vsetivli(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        // AVL is the 5-bit uimm in the rs1 field, not a register read.
+        Uop {
+            op: Op::Vsetivli,
+            rd: xd((insn >> 7) & 31),
+            imm: insn as i32,
+            ..Uop::default()
+        }
+    }
+    fn vsetvl(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            rs2: x((insn >> 20) & 31), // new vtype
+            ..decode_vset(insn, Op::Vsetvl)
+        }
+    }
+
+    fn vload_8(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vload8)
+    }
+    fn vload_16(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vload16)
+    }
+    fn vload_32(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vload32)
+    }
+    fn vload_64(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vload64)
+    }
+    fn vstore_8(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vstore8)
+    }
+    fn vstore_16(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vstore16)
+    }
+    fn vstore_32(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vstore32)
+    }
+    fn vstore_64(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_vmem(a, insn, c, Op::Vstore64)
+    }
+
+    fn vop_ivv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        decode_vop(insn, Op::VopIvv)
+    }
+    fn vop_ivi(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        decode_vop(insn, Op::VopIvi)
+    }
+    fn vop_ivx(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            rs1: x((insn >> 15) & 31),
+            ..decode_vop(insn, Op::VopIvx)
+        }
+    }
+    fn vop_mvv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            // VWXUNARY0 (vmv.x.s, vcpop.m, vfirst.m) writes an integer register.
+            rd: if (insn >> 26) & 0x3f == 0b010000 {
+                xd((insn >> 7) & 31)
+            } else {
+                NODESTREG
+            },
+            ..decode_vop(insn, Op::VopMvv)
+        }
+    }
+    fn vop_mvx(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            rs1: x((insn >> 15) & 31),
+            ..decode_vop(insn, Op::VopMvx)
+        }
+    }
+    fn vop_fvv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            // VWFUNARY0 (vfmv.f.s) writes a floating-point register.
+            rd: if (insn >> 26) & 0x3f == 0b010000 {
+                f((insn >> 7) & 31)
+            } else {
+                NODESTREG
+            },
+            ..decode_vop(insn, Op::VopFvv)
+        }
+    }
+    fn vop_fvf(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.vector {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            rs1: f((insn >> 15) & 31),
+            ..decode_vop(insn, Op::VopFvf)
+        }
+    }
+
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         log::warn!("Unknown instruction: {a:016x} {insn:08x} -> unimp");
         decode_exceptional(a, insn, Op::Unimp)
@@ -1078,6 +1211,48 @@ fn decode_r2_ffff(_addr: u64, word: u32, op: Op) -> Uop {
         rs2: f((word >> 20) & 31),
         rs3: f((word >> 27) & 31),
         rm: ((word >> 12) & 7) as u8,
+        ..Uop::default()
+    }
+}
+
+/// A vector arithmetic instruction: no scalar operands by default, and the
+/// entire word kept in `imm` for `vector.rs` to decode.
+fn decode_vop(word: u32, op: Op) -> Uop {
+    Uop {
+        op,
+        imm: word as i32,
+        ..Uop::default()
+    }
+}
+
+/// vsetvli / vsetvl: reads x[rs1] as AVL and writes x[rd].
+fn decode_vset(word: u32, op: Op) -> Uop {
+    Uop {
+        op,
+        rd: xd((word >> 7) & 31),
+        rs1: x((word >> 15) & 31),
+        imm: word as i32,
+        ..Uop::default()
+    }
+}
+
+/// A vector load or store.  rs1 is the base address; the rs2 field is a second
+/// scalar only for the strided forms (mop=0b10) — for the indexed forms it
+/// names a vector index register instead, so we must not claim to read it.
+fn decode_vmem(a: u64, word: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.vector {
+        return Decoder::unimp(a, word, c);
+    }
+    let strided = (word >> 26) & 3 == 0b10;
+    Uop {
+        op,
+        rs1: x((word >> 15) & 31),
+        rs2: if strided {
+            x((word >> 20) & 31)
+        } else {
+            ZEROREG
+        },
+        imm: word as i32,
         ..Uop::default()
     }
 }

@@ -85,6 +85,10 @@ struct Args {
     #[argh(option)]
     fw_dynamic: Option<String>,
 
+    /// enable the V vector extension (RVV 1.0, VLEN=128)
+    #[argh(switch, short = 'V')]
+    vector: bool,
+
     /// uop cache mode: "direct" or "skew" (default: skew)
     #[argh(option)]
     uop_cache_mode: Option<String>,
@@ -135,7 +139,7 @@ fn write_snap(emulator: &mut Emulator, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn is_snapshot(data: &[u8]) -> bool { data.len() >= 9 && data[..9] == *b"SIMMERVC7" }
+fn is_snapshot(data: &[u8]) -> bool { data.len() >= 9 && data[..9] == *b"SIMMERVC8" }
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() -> anyhow::Result<()> {
@@ -178,6 +182,9 @@ fn main() -> anyhow::Result<()> {
     );
     emulator.exit_flag = Arc::clone(&exit_flag);
     emulator.verbose = Arc::clone(&verbose_flag);
+    if args.vector {
+        emulator.set_vector_enabled(true);
+    }
     emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
     emulator.tracing_flag = Arc::clone(&tracing_flag);
 
