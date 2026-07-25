@@ -210,6 +210,14 @@ pub struct Emulator {
 
     /// When `true`, log a message to stderr each time a snapshot is written.
     pub verbose: Arc<AtomicBool>,
+
+    /// Set to request an on-demand snapshot (e.g. from the Ctrl-C `s` command).
+    /// The run loop writes a snapshot to `snapshot_path` and clears the flag,
+    /// without stopping execution.
+    pub snapshot_flag: Arc<AtomicBool>,
+
+    /// Destination path for on-demand snapshots requested via `snapshot_flag`.
+    pub snapshot_path: String,
 }
 
 impl Emulator {
@@ -281,6 +289,8 @@ impl Emulator {
             reset_flag,
             tracing_flag: Arc::new(AtomicBool::new(false)),
             verbose: Arc::new(AtomicBool::new(false)),
+            snapshot_flag: Arc::new(AtomicBool::new(false)),
+            snapshot_path: "snapshot".to_string(),
         };
         emulator.cpu.set_dtb_base(dtb_base);
         emulator
@@ -319,6 +329,24 @@ impl Emulator {
     }
 
     fn machine_reset(&mut self) { self.cpu.soft_reset(); }
+
+    /// Honor a pending on-demand snapshot request (Ctrl-C `s`): write a
+    /// snapshot to `snapshot_path`, report the outcome, and clear the
+    /// request flag. Execution is not interrupted. Does nothing when no
+    /// request is pending.
+    fn maybe_write_requested_snapshot(&self) {
+        if self.snapshot_flag.swap(false, Ordering::Relaxed) {
+            match self.write_snapshot(&self.snapshot_path) {
+                Ok(()) => {
+                    eprintln!(
+                        "snapshot → {} [seqno={}]",
+                        self.snapshot_path, self.cpu.seqno
+                    );
+                }
+                Err(e) => eprintln!("snapshot failed: {e}"),
+            }
+        }
+    }
 
     /// Runs program set by `load_image()`. The emulator will run forever.
     /// When `tracing_flag` is set, prints a disassembly line for every
@@ -365,6 +393,7 @@ impl Emulator {
             } else {
                 self.tick(600); // 600 is an arbitrary number
             }
+            self.maybe_write_requested_snapshot();
             if self.handle_htif()
                 || self.exit_flag.load(Ordering::Relaxed)
                 || self.poweroff_flag.load(Ordering::Relaxed)
@@ -387,6 +416,7 @@ impl Emulator {
         let mut snap_num: usize = 0;
         loop {
             self.tick(6);
+            self.maybe_write_requested_snapshot();
             if self.handle_htif()
                 || self.exit_flag.load(Ordering::Relaxed)
                 || self.poweroff_flag.load(Ordering::Relaxed)

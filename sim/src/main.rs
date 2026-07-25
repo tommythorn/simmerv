@@ -181,6 +181,7 @@ fn main() -> anyhow::Result<()> {
         cache_mode,
     );
     emulator.exit_flag = Arc::clone(&exit_flag);
+    emulator.snapshot_flag = Arc::clone(&snapshot_flag);
     emulator.verbose = Arc::clone(&verbose_flag);
     if args.vector {
         emulator.set_vector_enabled(true);
@@ -331,6 +332,9 @@ fn main() -> anyhow::Result<()> {
         emulator.setup_fw_dynamic(kernel_addr, 0x8008_0000);
     }
 
+    // Destination for on-demand snapshots requested via Ctrl-C S.
+    emulator.snapshot_path = auto_snapshot_path;
+
     // Run with optional periodic snapshots, or plain run.
     if let Some(spec) = args.snapshot_interval {
         // Format: "N:base_name"
@@ -366,12 +370,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // --write-snapshot always wins; fall back to the auto path on Ctrl-C exit.
+    // Write the on-exit snapshot when --write-snapshot was given. Interactive
+    // snapshots (Ctrl-C S) are written by the run loop, not here.
     if let Some(path) = args.write_snapshot {
         write_snap(&mut emulator, &path).with_context(|| format!("writing snapshot to {path}"))?;
-    } else if snapshot_flag.load(Ordering::Relaxed) {
-        write_snap(&mut emulator, &auto_snapshot_path)
-            .with_context(|| format!("writing snapshot to {auto_snapshot_path}"))?;
     }
 
     Ok(())

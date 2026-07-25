@@ -114,8 +114,9 @@ impl NonblockNoEcho {
                 let speedometer = self.speedometer_flag.load(Ordering::Relaxed);
                 let tracing = self.tracing_flag.load(Ordering::Relaxed);
                 eprintln!(
-                    "[[v - Verbose({verbose}), s - Speedometer({speedometer}), \
-                     t - Tracing({tracing}), x - eXit+snapshot, else pass to guest]]"
+                    "[[v - Verbose({verbose}), S - Speedometer({speedometer}), \
+                     t - Tracing({tracing}), s - Save snapshot, x - eXit, \
+                     else pass to guest]]"
                 );
             }
             't' => {
@@ -125,10 +126,13 @@ impl NonblockNoEcho {
                 self.verbose_flag.fetch_xor(true, Ordering::Relaxed);
             }
             's' => {
+                // Save a snapshot without stopping; the run loop honors this.
+                self.snapshot_flag.store(true, Ordering::Relaxed);
+            }
+            'S' => {
                 self.speedometer_flag.fetch_xor(true, Ordering::Relaxed);
             }
-            'x' => {
-                self.snapshot_flag.store(true, Ordering::Relaxed);
+            'x' | 'X' => {
                 self.exit_flag.store(true, Ordering::Relaxed);
             }
             _ => return false,
