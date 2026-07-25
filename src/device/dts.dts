@@ -11,6 +11,22 @@
                 stdout-path = "/uart@10000000";
         };
 
+        // Reserve the M-mode firmware (OpenSBI) region so S-mode (U-Boot, the
+        // kernel) does not treat it as free RAM. QEMU's generated DTB carries
+        // the equivalent "mmode_resv0" node; without it, and with PMP not
+        // enforced, the kernel allocates over OpenSBI and corrupts its trap
+        // handler.
+        reserved-memory {
+                #address-cells = <0x2>;
+                #size-cells = <0x2>;
+                ranges;
+
+                mmode_resv0@80000000 {
+                        reg = <0x0 0x80000000 0x0 0x200000>;
+                        no-map;
+                };
+        };
+
         uart@10000000 {
                 interrupts = <0xa>;
                 interrupt-parent = <0x3>;
