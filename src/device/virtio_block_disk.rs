@@ -21,6 +21,9 @@ enum DiskStorage {
     /// The `File` variant is unavailable on WASM where there is no filesystem.
     #[cfg(not(target_arch = "wasm32"))]
     File(std::fs::File),
+    /// Base image served from a URL, with local copy-on-write for writes.
+    #[cfg(not(target_arch = "wasm32"))]
+    Url(crate::device::url_disk::UrlStorage),
 }
 
 #[allow(clippy::use_self)]
@@ -30,6 +33,8 @@ impl DiskStorage {
             DiskStorage::Memory(v) => v.len() as u64 / SECTOR_SIZE as u64,
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::File(f) => f.metadata().map_or(0, |m| m.len()) / SECTOR_SIZE as u64,
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::Url(u) => u.sector_count(),
         }
     }
 
@@ -45,6 +50,8 @@ impl DiskStorage {
                 use std::os::unix::fs::FileExt;
                 f.read_exact_at(buf, offset).expect("disk read failed");
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::Url(u) => u.read_at(offset, buf),
         }
     }
 
@@ -60,6 +67,8 @@ impl DiskStorage {
                 use std::os::unix::fs::FileExt;
                 f.write_all_at(data, offset).expect("disk write failed");
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            DiskStorage::Url(u) => u.write_at(offset, data),
         }
     }
 }
@@ -177,6 +186,21 @@ impl VirtioBlockDisk {
         let mut d = Self::new(irq);
         d.storage = DiskStorage::File(file);
         d
+    }
+
+    /// Creates a disk whose base image is served from `url`, with writes kept
+    /// in a local copy-on-write overlay (never sent back to the server).
+    ///
+    /// # Errors
+    /// Returns an error if the URL is unusable (bad scheme, compressed image,
+    /// no range support, or an unreachable server) — see [`UrlStorage::open`].
+    ///
+    /// [`UrlStorage::open`]: crate::device::url_disk::UrlStorage::open
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_url(url: &str, irq: u32) -> anyhow::Result<Self> {
+        let mut d = Self::new(irq);
+        d.storage = DiskStorage::Url(crate::device::url_disk::UrlStorage::open(url)?);
+        Ok(d)
     }
 
     /// Replaces the in-memory image. Expected to be called at most once.
@@ -595,13 +619,15 @@ impl MemoryMapped for VirtioBlockDisk {
         w.u32(self.status);
         w.u32(self.block_size);
         w.bool(self.writeback);
-        // File-backed storage writes a zero-length sentinel; the disk image is
-        // already persisted in the backing file and need not be embedded in the
-        // snapshot.
+        // File- and URL-backed storage write a zero-length sentinel: the base
+        // image lives outside the snapshot (in the file, or at the URL), so it
+        // is not embedded here. A URL disk's copy-on-write overlay is likewise
+        // not captured — restoring yields an empty in-memory disk, matching the
+        // file-backed behavior.
         match &self.storage {
             DiskStorage::Memory(v) => w.bytes(v),
             #[cfg(not(target_arch = "wasm32"))]
-            DiskStorage::File(_) => w.u64(0),
+            DiskStorage::File(_) | DiskStorage::Url(_) => w.u64(0),
         }
         w.u32(self.pending_requests);
         w.u32(self.irq);

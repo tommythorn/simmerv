@@ -43,6 +43,9 @@ anyhow = "1.0.98"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libc = "0.2"
+# Blocking HTTP client for URL-backed disks (range requests). rustls TLS only;
+# gzip/json/etc. disabled so binary range responses pass through untouched.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [build-dependencies]
 cc = "1"

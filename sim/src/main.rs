@@ -24,8 +24,10 @@ use std::sync::atomic::Ordering;
 struct Args {
     /// file system image file(s); the first -f is /dev/vda, an optional second
     /// -f is /dev/vdb (at most two). A ".zst" image is decompressed in memory
-    /// (read-only); any other image is opened read-write and backed directly by
-    /// the file.
+    /// (read-only); an "http(s)://" URL to a raw (uncompressed) image is read
+    /// on demand via HTTP range requests with writes kept in a local
+    /// copy-on-write overlay; any other image is opened read-write and backed
+    /// directly by the file.
     #[argh(option, short = 'f')]
     fs: Vec<String>,
 
@@ -301,7 +303,11 @@ fn main() -> anyhow::Result<()> {
         );
     }
     for (index, path) in args.fs.iter().enumerate() {
-        if path.ends_with(".zst") {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            emulator
+                .setup_filesystem_url_at(index, path)
+                .with_context(|| format!("attaching URL disk {path}"))?;
+        } else if path.ends_with(".zst") {
             let file = File::open(path).with_context(|| path.to_string())?;
             emulator.setup_filesystem_at(index, zstd::stream::decode_all(file)?);
         } else {

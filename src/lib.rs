@@ -838,6 +838,26 @@ impl Emulator {
         );
     }
 
+    /// Attaches a URL-backed block device on disk `index` (0 → `/dev/vda`,
+    /// 1 → `/dev/vdb`). Reads are fetched from `url` via HTTP range requests;
+    /// writes are kept in a local copy-on-write overlay and never sent back.
+    /// Out-of-range indices are ignored.
+    ///
+    /// # Errors
+    /// Returns an error if the URL cannot be opened as a raw disk image (bad
+    /// scheme, compressed image, no range support, or unreachable server).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn setup_filesystem_url_at(&mut self, index: usize, url: &str) -> anyhow::Result<()> {
+        let Some((base, end, irq)) = Self::block_disk_slot(index) else {
+            return Ok(());
+        };
+        let disk = VirtioBlockDisk::new_with_url(url, irq)?;
+        self.cpu
+            .get_mut_mmu()
+            .replace_device(base..end, Box::new(disk));
+        Ok(())
+    }
+
     /// Replaces the network backend.  Call after `new()` to attach a TAP
     /// interface or other backend.
     pub fn setup_network(&mut self, backend: Box<dyn NetworkBackend>) {
