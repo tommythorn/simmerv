@@ -588,6 +588,13 @@ impl Cpu {
         )
     }
 
+    /// `mstatus.VS` as architecturally exposed. Without the V extension the
+    /// field is hardwired to 0 (Off, WARL), so software never observes stale
+    /// vector state. The kernel's syscall path gates `riscv_v_vstate_discard`
+    /// on `sstatus.VS != Off`, not on `has_vector()`, so a nonzero VS here
+    /// sends it into vector code that then executes an illegal V instruction.
+    const fn exposed_vs(&self) -> u8 { if self.vector_enabled { self.vs } else { 0 } }
+
     /// Turn the vector extension on or off.  This is a machine-construction
     /// switch rather than architectural state: it gates instruction decoding,
     /// the `misa` V bit and the vector CSRs.
@@ -1576,8 +1583,8 @@ impl Cpu {
                 let mut mstatus = self.mmu.mstatus & !(1u64 << 63);
                 mstatus &= !(MSTATUS_FS | MSTATUS_VS);
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
-                mstatus |= u64::from(self.vs) << MSTATUS_VS_SHIFT;
-                if self.fs == 3 || self.vs == 3 {
+                mstatus |= u64::from(self.exposed_vs()) << MSTATUS_VS_SHIFT;
+                if self.fs == 3 || self.exposed_vs() == 3 {
                     mstatus |= 1 << 63;
                 }
                 mstatus
@@ -1597,8 +1604,8 @@ impl Cpu {
                 mstatus &= !(MSTATUS_FS | MSTATUS_VS);
                 mstatus &= 0x8000_0003_000d_e162;
                 mstatus |= u64::from(self.fs) << MSTATUS_FS_SHIFT;
-                mstatus |= u64::from(self.vs) << MSTATUS_VS_SHIFT;
-                if self.fs == 3 || self.vs == 3 {
+                mstatus |= u64::from(self.exposed_vs()) << MSTATUS_VS_SHIFT;
+                if self.fs == 3 || self.exposed_vs() == 3 {
                     mstatus |= 1 << 63;
                 }
                 mstatus
