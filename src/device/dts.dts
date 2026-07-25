@@ -33,6 +33,13 @@
                 compatible = "virtio,mmio";
         };
 
+        virtio_mmio@10003000 {
+                interrupts = <0x03>;
+                interrupt-parent = <0x03>;
+                reg = <0x00 0x10003000 0x00 0x1000>;
+                compatible = "virtio,mmio";
+        };
+
         syscon@100000 {
                 phandle = <0x12>;
                 reg = <0x0 0x100000 0x0 0x1000>;

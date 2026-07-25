@@ -164,6 +164,9 @@ impl Mmu {
     pub const NET_BASE: u64 = 0x1000_2000;
     pub const NET_END: u64 = 0x1000_3000;
     pub const NET_IRQ: u32 = 2;
+    pub const VIRTIO2_BASE: u64 = 0x1000_3000;
+    pub const VIRTIO2_END: u64 = 0x1000_4000;
+    pub const VIRTIO2_IRQ: u32 = 3;
     pub const SYSCON_BASE: u64 = 0x0010_0000;
     pub const SYSCON_END: u64 = 0x0010_1000;
 

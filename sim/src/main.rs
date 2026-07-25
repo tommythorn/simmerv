@@ -22,7 +22,10 @@ use std::sync::atomic::Ordering;
 #[allow(clippy::struct_excessive_bools)]
 /// Simulate a RISC-V RV64GC System on Chip
 struct Args {
-    /// file system image files
+    /// file system image file(s); the first -f is /dev/vda, an optional second
+    /// -f is /dev/vdb (at most two). A ".zst" image is decompressed in memory
+    /// (read-only); any other image is opened read-write and backed directly by
+    /// the file.
     #[argh(option, short = 'f')]
     fs: Vec<String>,
 
@@ -283,17 +286,23 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    for path in args.fs {
+    if args.fs.len() > 2 {
+        bail!(
+            "at most two -f disk images are supported (got {}); disk 0 is /dev/vda, disk 1 is /dev/vdb",
+            args.fs.len()
+        );
+    }
+    for (index, path) in args.fs.iter().enumerate() {
         if path.ends_with(".zst") {
-            let file = File::open(&path).with_context(|| path.to_string())?;
-            emulator.setup_filesystem(zstd::stream::decode_all(file)?);
+            let file = File::open(path).with_context(|| path.to_string())?;
+            emulator.setup_filesystem_at(index, zstd::stream::decode_all(file)?);
         } else {
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(&path)
+                .open(path)
                 .with_context(|| path.to_string())?;
-            emulator.setup_filesystem_file(file);
+            emulator.setup_filesystem_file_at(index, file);
         }
     }
 

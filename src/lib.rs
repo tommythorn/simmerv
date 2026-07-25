@@ -250,6 +250,10 @@ impl Emulator {
             Mmu::NET_BASE..Mmu::NET_END,
             Box::new(VirtioNet::new(Box::new(DummyNetworkBackend), Mmu::NET_IRQ)),
         );
+        mmu.add_device(
+            Mmu::VIRTIO2_BASE..Mmu::VIRTIO2_END,
+            Box::new(VirtioBlockDisk::new(Mmu::VIRTIO2_IRQ)),
+        );
         let poweroff_flag = Arc::new(AtomicBool::new(false));
         let reset_flag = Arc::new(AtomicBool::new(false));
         mmu.add_device(
@@ -432,7 +436,7 @@ impl Emulator {
 
         self.bb_cache.clear();
         self.cpu
-            .read_state(&state, |name, _range| {
+            .read_state(&state, |name, range| {
                 use crate::device::uart::Uart;
                 use crate::device::virtio_block_disk::VirtioBlockDisk;
                 match name {
@@ -440,7 +444,15 @@ impl Emulator {
                         .take()
                         .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
                     "VirtIO Block" => {
-                        Some(Box::new(VirtioBlockDisk::new(1))
+                        // Two block disks share this name; pick the IRQ from the
+                        // saved MMIO window. `restore_state` overwrites it, but
+                        // this keeps the fresh device self-consistent.
+                        let irq = if range.start == Mmu::VIRTIO2_BASE {
+                            Mmu::VIRTIO2_IRQ
+                        } else {
+                            Mmu::VIRTIO_IRQ
+                        };
+                        Some(Box::new(VirtioBlockDisk::new(irq))
                             as Box<dyn crate::device::MemoryMapped>)
                     }
                     "VirtIO Net" => {
@@ -714,28 +726,63 @@ impl Emulator {
         Ok(elf_file.header.pt2.entry_point() + relocation_offset)
     }
 
-    /// Sets up filesystem. Use this method if program (e.g. Linux) uses
-    /// filesystem. This method is expected to be called up to only once.
+    /// MMIO window `(base, end)` and PLIC IRQ for virtio-blk disk `index`.
+    /// Two block devices are wired up: index 0 (`/dev/vda`) and index 1
+    /// (`/dev/vdb`). Returns `None` for any other index.
+    const fn block_disk_slot(index: usize) -> Option<(u64, u64, u32)> {
+        match index {
+            0 => Some((Mmu::VIRTIO_BASE, Mmu::VIRTIO_END, Mmu::VIRTIO_IRQ)),
+            1 => Some((Mmu::VIRTIO2_BASE, Mmu::VIRTIO2_END, Mmu::VIRTIO2_IRQ)),
+            _ => None,
+        }
+    }
+
+    /// Sets up filesystem on block disk 0 (`/dev/vda`). Use this method if the
+    /// program (e.g. Linux) uses a filesystem.
     ///
     /// # Arguments
     /// * `content` File system content binary
-    pub fn setup_filesystem(&mut self, content: Vec<u8>) {
+    pub fn setup_filesystem(&mut self, content: Vec<u8>) { self.setup_filesystem_at(0, content); }
+
+    /// Sets up filesystem on block disk `index` (0 → `/dev/vda`, 1 →
+    /// `/dev/vdb`) from an in-memory image. Out-of-range indices are
+    /// ignored.
+    ///
+    /// # Arguments
+    /// * `index` Which block device (0 or 1)
+    /// * `content` File system content binary
+    pub fn setup_filesystem_at(&mut self, index: usize, content: Vec<u8>) {
+        let Some((base, end, irq)) = Self::block_disk_slot(index) else {
+            return;
+        };
         self.cpu.get_mut_mmu().replace_device(
-            Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
-            Box::new(VirtioBlockDisk::new_with_contents(content, Mmu::VIRTIO_IRQ)),
+            base..end,
+            Box::new(VirtioBlockDisk::new_with_contents(content, irq)),
         );
     }
 
-    /// Attaches a file-backed block device.  Reads and writes go directly to
-    /// `file`; the image is never copied into the emulator's heap.
+    /// Attaches a file-backed block device on disk 0 (`/dev/vda`).  Reads and
+    /// writes go directly to `file`; the image is never copied into the
+    /// emulator's heap.
     ///
     /// Prefer this over `setup_filesystem` on native builds.  The file must
     /// be opened with both read and write access.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn setup_filesystem_file(&mut self, file: std::fs::File) {
+        self.setup_filesystem_file_at(0, file);
+    }
+
+    /// Attaches a file-backed block device on disk `index` (0 → `/dev/vda`,
+    /// 1 → `/dev/vdb`). Out-of-range indices are ignored. Reads and writes go
+    /// directly to `file`; the image is never copied into the emulator's heap.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn setup_filesystem_file_at(&mut self, index: usize, file: std::fs::File) {
+        let Some((base, end, irq)) = Self::block_disk_slot(index) else {
+            return;
+        };
         self.cpu.get_mut_mmu().replace_device(
-            Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
-            Box::new(VirtioBlockDisk::new_with_file(file, Mmu::VIRTIO_IRQ)),
+            base..end,
+            Box::new(VirtioBlockDisk::new_with_file(file, irq)),
         );
     }
 
