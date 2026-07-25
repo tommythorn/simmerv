@@ -42,8 +42,12 @@ impl DiskStorage {
     fn read_at(&self, offset: u64, buf: &mut [u8]) {
         match self {
             DiskStorage::Memory(v) => {
-                let o = offset as usize;
-                buf.copy_from_slice(&v[o..o + buf.len()]);
+                // Reads past the end of the image (e.g. a partition scan of a
+                // zero-length / short disk) return zeros rather than panicking.
+                let o = (offset as usize).min(v.len());
+                let n = buf.len().min(v.len() - o);
+                buf[..n].copy_from_slice(&v[o..o + n]);
+                buf[n..].fill(0);
             }
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::File(f) => {
@@ -59,8 +63,11 @@ impl DiskStorage {
     fn write_at(&mut self, offset: u64, data: &[u8]) {
         match self {
             DiskStorage::Memory(v) => {
-                let o = offset as usize;
-                v[o..o + data.len()].copy_from_slice(data);
+                // Drop writes past the end of a fixed in-memory image rather
+                // than panic (a zero-length disk simply absorbs nothing).
+                let o = (offset as usize).min(v.len());
+                let n = data.len().min(v.len() - o);
+                v[o..o + n].copy_from_slice(&data[..n]);
             }
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::File(f) => {
