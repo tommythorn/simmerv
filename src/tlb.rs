@@ -17,6 +17,7 @@ pub struct Tlb<const SETS: usize> {
     ppage: [u32; SETS],
     perm: [u16; SETS],
     pub misses: u64,
+    pub hits: u64,
 }
 
 /// Direct-mapped dTLB with `SETS` entries.
@@ -30,6 +31,7 @@ pub struct DTlb<const SETS: usize> {
     page_byte_offset: [u64; SETS],
     perm: [u16; SETS],
     pub misses: u64,
+    pub hits: u64,
 }
 
 /// Pack permission bits for a TLB entry.
@@ -95,6 +97,7 @@ impl<const SETS: usize> Tlb<SETS> {
             ppage: [0; SETS],
             perm: [INVALID_PERM; SETS],
             misses: 0,
+            hits: 0,
         }
     }
 
@@ -173,6 +176,7 @@ impl<const SETS: usize> DTlb<SETS> {
             page_byte_offset: [0u64; SETS],
             perm: [INVALID_PERM; SETS],
             misses: 0,
+            hits: 0,
         }
     }
 

@@ -72,6 +72,28 @@ impl Speedometer {
                 let dmiss = d(stats.dtlb_misses, self.prev_stats.dtlb_misses);
                 lines.push(format!("miss iTLB {imiss:6.0}/Mi  dTLB {dmiss:6.0}/Mi"));
 
+                // Hit rate over this window = (4 KiB + 2 MiB hits) / (hits + walks).
+                let dc = |cur: u64, prev: u64| cur - prev;
+                let i_hits = dc(stats.itlb_hits, self.prev_stats.itlb_hits)
+                    + dc(stats.itlb2m_hits, self.prev_stats.itlb2m_hits);
+                let d_hits = dc(stats.dtlb_hits, self.prev_stats.dtlb_hits)
+                    + dc(stats.dtlb2m_hits, self.prev_stats.dtlb2m_hits);
+                let hr = |h: u64, walks: u64| {
+                    let total = h + walks;
+                    if total > 0 {
+                        100.0 * h as f64 / total as f64
+                    } else {
+                        100.0
+                    }
+                };
+                let i2m = d(stats.itlb2m_hits, self.prev_stats.itlb2m_hits);
+                let d2m = d(stats.dtlb2m_hits, self.prev_stats.dtlb2m_hits);
+                lines.push(format!(
+                    "hit  iTLB {:7.3}%  dTLB {:7.3}%   2M hits/Mi  i {i2m:5.0}  d {d2m:5.0}",
+                    hr(i_hits, dc(stats.itlb_misses, self.prev_stats.itlb_misses)),
+                    hr(d_hits, dc(stats.dtlb_misses, self.prev_stats.dtlb_misses)),
+                ));
+
                 let flush_full = d(stats.flush_full, self.prev_stats.flush_full);
                 let flush_asid = d(stats.flush_asid, self.prev_stats.flush_asid);
                 let flush_vpage = d(stats.flush_vpage, self.prev_stats.flush_vpage);

@@ -56,6 +56,19 @@ use std::ops::Range;
 /// UART IRQ number on the PLIC.
 const UART_IRQ: u32 = 10;
 
+// TLB set counts (direct-mapped, so these are also the entry counts). Tunable:
+// bump the 4 KiB TLBs for capacity, the 2 MiB TLBs to cover more superpages.
+// A given VA is mapped by exactly one leaf, so a page is cached in only one of
+// the 4 KiB / 2 MiB TLBs.
+const ITLB_SETS: usize = 1024;
+const DTLB_SETS: usize = 2048;
+const ITLB2M_SETS: usize = 256;
+const DTLB2M_SETS: usize = 512;
+
+/// Log2 of the 2 MiB superpage size.
+const SUPERPAGE_SHIFT: u32 = 21;
+const SUPERPAGE_MASK: u64 = (1 << SUPERPAGE_SHIFT) - 1;
+
 /// Emulates Memory Management Unit. It holds the Main memory and peripheral
 /// devices, maps address to them, and accesses them depending on address.
 ///
@@ -92,11 +105,15 @@ pub struct Mmu {
     /// Current cycle, updated at the start of `service()`.
     cycle: u64,
 
-    /// Split TLBs for instruction fetch and data access.
-    /// iTLB: 512 entries (stores physical page numbers).
-    /// dTLB: 1024 entries (stores RAM region index + page byte offset).
-    pub itlb: Tlb<512>,
-    pub dtlb: DTlb<1024>,
+    /// Split TLBs for instruction fetch and data access, one pair per page
+    /// size. The 4 KiB iTLB stores physical page numbers; the 4 KiB dTLB stores
+    /// a RAM region index + page byte offset so hits access memory directly.
+    /// The 2 MiB pair caches superpage (2 MiB, and 2 MiB-aligned chunks of
+    /// 1 GiB) leaves, keyed by `va >> 21`.
+    pub itlb: Tlb<ITLB_SETS>,
+    pub dtlb: DTlb<DTLB_SETS>,
+    pub itlb2m: Tlb<ITLB2M_SETS>,
+    pub dtlb2m: DTlb<DTLB2M_SETS>,
 
     /// Cosim mode: when true, PLIC service no longer drives MIP.SEIP/MEIP.
     /// The bits are instead forced externally via `write_seip` to mirror the
@@ -141,7 +158,13 @@ pub const PTE_N_MASK: u64 = 1 << 63;
 
 #[derive(Clone, Copy, Default)]
 pub struct TlbDisplayStats {
+    pub itlb_hits: u64,
+    pub itlb2m_hits: u64,
+    /// iTLB misses == page-table walks (both the 4 KiB and 2 MiB iTLB missed).
     pub itlb_misses: u64,
+    pub dtlb_hits: u64,
+    pub dtlb2m_hits: u64,
+    /// dTLB misses == page-table walks.
     pub dtlb_misses: u64,
     pub flush_full: u64,
     pub flush_asid: u64,
@@ -202,8 +225,10 @@ impl Mmu {
             service_queue: BinaryHeap::new(),
             cosim_inert_devstore: false,
             cycle: 0,
-            itlb: Tlb::<512>::new(),
-            dtlb: DTlb::<1024>::new(),
+            itlb: Tlb::new(),
+            dtlb: DTlb::new(),
+            itlb2m: Tlb::new(),
+            dtlb2m: DTlb::new(),
             cosim_ext_irq_driven: false,
             flush_full: 0,
             flush_asid: 0,
@@ -257,11 +282,13 @@ impl Mmu {
         }
     }
 
-    /// Flush both I-TLB and D-TLB.
+    /// Flush both I-TLB and D-TLB (all page sizes).
     pub const fn flush_tlb(&mut self) {
         self.flush_full += 1;
         self.itlb.flush_all();
         self.dtlb.flush_all();
+        self.itlb2m.flush_all();
+        self.dtlb2m.flush_all();
     }
 
     /// Flush TLB entries matching the given ASID (skip global).
@@ -269,6 +296,8 @@ impl Mmu {
         self.flush_asid += 1;
         self.itlb.flush_asid(asid);
         self.dtlb.flush_asid(asid);
+        self.itlb2m.flush_asid(asid);
+        self.dtlb2m.flush_asid(asid);
     }
 
     /// Flush TLB entries matching the given virtual page (all ASIDs).
@@ -276,6 +305,9 @@ impl Mmu {
         self.flush_vpage += 1;
         self.itlb.flush_vpage(vpage);
         self.dtlb.flush_vpage(vpage);
+        // A superpage covering this VA is keyed by va >> 21 == vpage >> 9.
+        self.itlb2m.flush_vpage(vpage >> 9);
+        self.dtlb2m.flush_vpage(vpage >> 9);
     }
 
     /// Flush TLB entries matching both vpage and ASID.
@@ -283,13 +315,19 @@ impl Mmu {
         self.flush_vpage_asid += 1;
         self.itlb.flush_vpage_asid(vpage, asid);
         self.dtlb.flush_vpage_asid(vpage, asid);
+        self.itlb2m.flush_vpage_asid(vpage >> 9, asid);
+        self.dtlb2m.flush_vpage_asid(vpage >> 9, asid);
     }
 
     /// Snapshot all TLB statistics for display.
     #[must_use]
     pub const fn tlb_stats(&self) -> TlbDisplayStats {
         TlbDisplayStats {
+            itlb_hits: self.itlb.hits,
+            itlb2m_hits: self.itlb2m.hits,
             itlb_misses: self.itlb.misses,
+            dtlb_hits: self.dtlb.hits,
+            dtlb2m_hits: self.dtlb2m.hits,
             dtlb_misses: self.dtlb.misses,
             flush_full: self.flush_full,
             flush_asid: self.flush_asid,
@@ -925,6 +963,25 @@ impl Mmu {
         }
     }
 
+    /// Cross-check a TLB-hit physical address against a fresh page-table walk.
+    /// A no-op unless the `paranoid-tlb` feature is enabled.
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
+    fn paranoid_check(&mut self, address: u64, pa: u64, access: MemoryAccessType, tlb: &str) {
+        if cfg!(feature = "paranoid-tlb") {
+            match self.translate_address_slow(address, access, true) {
+                Ok((expected_pa, _, _)) => assert_eq!(
+                    pa, expected_pa,
+                    "{tlb} hit pa {pa:#x} != walk pa {expected_pa:#x} for va {address:#x}"
+                ),
+                Err(e) => panic!(
+                    "{tlb} hit pa {pa:#x} but walk faulted {:?} for va {address:#x}",
+                    e.trap
+                ),
+            }
+        }
+    }
+
     /// Translate a fetch (Execute) address. No MPRV, uses iTLB.
     ///
     /// # Errors
@@ -943,43 +1000,44 @@ impl Mmu {
         }
 
         let vpage = (address >> PG_SHIFT) as u32;
+        let vpage2m = (address >> SUPERPAGE_SHIFT) as u32;
         let asid = self.current_asid();
+        let prv_is_user = self.prv == PrivMode::U;
+        let sum = self.mstatus & MSTATUS_SUM != 0;
+        let mxr = self.mstatus & MSTATUS_MXR != 0;
 
-        if let Some((ppage, perm)) = self.itlb.lookup(vpage, asid) {
-            let prv_is_user = self.prv == PrivMode::U;
-            let sum = self.mstatus & MSTATUS_SUM != 0;
-            let mxr = self.mstatus & MSTATUS_MXR != 0;
-            if check_perm(perm, 2, prv_is_user, sum, mxr) {
-                let tlb_pa = (u64::from(ppage) << PG_SHIFT) | (address & 0xfff);
-                if cfg!(feature = "paranoid-tlb") {
-                    let slow =
-                        self.translate_address_slow(address, MemoryAccessType::Execute, true);
-                    match slow {
-                        Ok((expected_pa, _)) => assert_eq!(
-                            tlb_pa, expected_pa,
-                            "iTLB hit pa {tlb_pa:#x} != walk pa {expected_pa:#x} \
-                             for va {address:#x} asid {asid}"
-                        ),
-                        Err(e) => panic!(
-                            "iTLB hit pa {tlb_pa:#x} but walk faulted {:?} \
-                             for va {address:#x} asid {asid} perm {perm:#06x}",
-                            e.trap
-                        ),
-                    }
-                }
-                return Ok(tlb_pa);
-            }
+        if let Some((ppage, perm)) = self.itlb.lookup(vpage, asid)
+            && check_perm(perm, 2, prv_is_user, sum, mxr)
+        {
+            let tlb_pa = (u64::from(ppage) << PG_SHIFT) | (address & 0xfff);
+            self.paranoid_check(address, tlb_pa, MemoryAccessType::Execute, "iTLB");
+            self.itlb.hits += 1;
+            return Ok(tlb_pa);
+        }
+        if let Some((ppage, perm)) = self.itlb2m.lookup(vpage2m, asid)
+            && check_perm(perm, 2, prv_is_user, sum, mxr)
+        {
+            let tlb_pa = (u64::from(ppage) << PG_SHIFT) | (address & SUPERPAGE_MASK);
+            self.paranoid_check(address, tlb_pa, MemoryAccessType::Execute, "iTLB2M");
+            self.itlb2m.hits += 1;
+            return Ok(tlb_pa);
         }
 
         self.itlb.misses += 1;
-        let (pa, pte) = self.translate_address_slow(address, MemoryAccessType::Execute, false)?;
+        let (pa, pte, page_shift) =
+            self.translate_address_slow(address, MemoryAccessType::Execute, false)?;
         if pte != 0 {
-            let ppage = (pa >> PG_SHIFT) as u32;
             let xwr = ((pte >> 1) & 7) as u8;
             let user = pte & PTE_U_MASK != 0;
             let global = pte & (1 << 5) != 0;
             let perm = pack_perm(xwr, user, global, asid);
-            self.itlb.insert(vpage, ppage, perm, asid);
+            if page_shift >= SUPERPAGE_SHIFT {
+                let ppage2m = ((pa & !SUPERPAGE_MASK) >> PG_SHIFT) as u32;
+                self.itlb2m.insert(vpage2m, ppage2m, perm, asid);
+            } else {
+                let ppage = (pa >> PG_SHIFT) as u32;
+                self.itlb.insert(vpage, ppage, perm, asid);
+            }
         }
         Ok(pa)
     }
@@ -1053,44 +1111,45 @@ impl Mmu {
         }
 
         let vpage = (address >> PG_SHIFT) as u32;
+        let vpage2m = (address >> SUPERPAGE_SHIFT) as u32;
         let asid = self.current_asid();
         let access_shift = u32::from(access_type == MemoryAccessType::Write);
+        let prv_is_user = effective_prv == PrivMode::U;
+        let sum = self.mstatus & MSTATUS_SUM != 0;
+        let mxr = self.mstatus & MSTATUS_MXR != 0;
 
-        if let Some((mem_idx, page_byte_offset, perm)) = self.dtlb.lookup(vpage, asid) {
-            let prv_is_user = effective_prv == PrivMode::U;
-            let sum = self.mstatus & MSTATUS_SUM != 0;
-            let mxr = self.mstatus & MSTATUS_MXR != 0;
-            if check_perm(perm, access_shift, prv_is_user, sum, mxr) {
-                // Reconstruct pa for the paranoid check and for callers that only need pa.
-                let pa =
-                    self.memory[mem_idx as usize].0.start + page_byte_offset + (address & 0xfff);
-                if cfg!(feature = "paranoid-tlb") {
-                    let slow = self.translate_address_slow(address, access_type, true);
-                    match slow {
-                        Ok((expected_pa, _)) => assert_eq!(
-                            pa, expected_pa,
-                            "dTLB hit pa {pa:#x} != walk pa {expected_pa:#x} \
-                             for va {address:#x} access {access_type:?} \
-                             prv {effective_prv:?} asid {asid}"
-                        ),
-                        Err(e) => panic!(
-                            "dTLB hit pa {pa:#x} but walk faulted {:?} \
-                             for va {address:#x} access {access_type:?} \
-                             prv {effective_prv:?} asid {asid} perm {perm:#06x}",
-                            e.trap
-                        ),
-                    }
-                }
-                return Ok(DataAddr {
-                    pa,
-                    mem_idx,
-                    page_byte_offset,
-                });
-            }
+        if let Some((mem_idx, page_byte_offset, perm)) = self.dtlb.lookup(vpage, asid)
+            && check_perm(perm, access_shift, prv_is_user, sum, mxr)
+        {
+            let pa = self.memory[mem_idx as usize].0.start + page_byte_offset + (address & 0xfff);
+            self.paranoid_check(address, pa, access_type, "dTLB");
+            self.dtlb.hits += 1;
+            return Ok(DataAddr {
+                pa,
+                mem_idx,
+                page_byte_offset,
+            });
+        }
+        if let Some((mem_idx, base_offset_2m, perm)) = self.dtlb2m.lookup(vpage2m, asid)
+            && check_perm(perm, access_shift, prv_is_user, sum, mxr)
+        {
+            // The stored offset is 2 MiB-aligned; add this 4 KiB page's offset
+            // within the superpage so callers still index RAM directly with
+            // `page_byte_offset | (va & 0xfff)`.
+            let page_byte_offset = base_offset_2m + (address & SUPERPAGE_MASK & !0xfff);
+            let pa = self.memory[mem_idx as usize].0.start + page_byte_offset + (address & 0xfff);
+            self.paranoid_check(address, pa, access_type, "dTLB2M");
+            self.dtlb2m.hits += 1;
+            return Ok(DataAddr {
+                pa,
+                mem_idx,
+                page_byte_offset,
+            });
         }
 
         self.dtlb.misses += 1;
-        let (pa, pte) = self.translate_address_slow(address, access_type, side_effect_free)?;
+        let (pa, pte, page_shift) =
+            self.translate_address_slow(address, access_type, side_effect_free)?;
         if !side_effect_free && pte != 0 {
             let mut xwr = ((pte >> 1) & 7) as u8;
             // When using SW-managed A/D, mask out W if D is not set so
@@ -1101,10 +1160,17 @@ impl Mmu {
             let user = pte & PTE_U_MASK != 0;
             let global = pte & (1 << 5) != 0;
             let perm = pack_perm(xwr, user, global, asid);
-            // Only RAM pages go into the dTLB; MMIO pages use the slow path every time.
+            // Only RAM pages go into a dTLB; MMIO pages use the slow path.
             if let Some((mem_idx, page_byte_offset)) = self.find_ram_for_pa(pa) {
-                self.dtlb
-                    .insert(vpage, mem_idx, page_byte_offset, perm, asid);
+                if page_shift >= SUPERPAGE_SHIFT {
+                    let base_offset_2m =
+                        (pa & !SUPERPAGE_MASK) - self.memory[mem_idx as usize].0.start;
+                    self.dtlb2m
+                        .insert(vpage2m, mem_idx, base_offset_2m, perm, asid);
+                } else {
+                    self.dtlb
+                        .insert(vpage, mem_idx, page_byte_offset, perm, asid);
+                }
                 return Ok(DataAddr {
                     pa,
                     mem_idx,
@@ -1121,18 +1187,21 @@ impl Mmu {
 
     #[allow(
         clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation,
         clippy::too_many_lines,
         clippy::expect_used,
         clippy::cognitive_complexity
     )]
-    /// Slow-path page table walk.  Returns `(physical_address, leaf_pte)`.
-    /// The leaf PTE is needed by the caller to populate TLB permission bits.
+    /// Slow-path page table walk. Returns `(physical_address, leaf_pte,
+    /// page_shift)`, where `page_shift` is 12/21/30 for a 4 KiB/2 MiB/1 GiB
+    /// leaf. The leaf PTE populates TLB permission bits; the shift selects the
+    /// 4 KiB or 2 MiB TLB.
     fn translate_address_slow(
         &mut self,
         va: u64,
         access: MemoryAccessType,
         side_effect_free: bool,
-    ) -> Result<(u64, u64), Exception> {
+    ) -> Result<(u64, u64, u32), Exception> {
         let prv = self.prv;
         let effective_prv =
             if self.mstatus & MSTATUS_MPRV != 0 && access != MemoryAccessType::Execute {
@@ -1144,7 +1213,7 @@ impl Mmu {
 
         let satp_mode = ((self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK) as usize;
         if effective_prv == PrivMode::M || satp_mode == SatpMode::Bare as usize {
-            return Ok((va, 0));
+            return Ok((va, 0, PG_SHIFT as u32));
         }
 
         // Sv39, Sv48, Sv57
@@ -1269,7 +1338,7 @@ impl Mmu {
                 let paddr = ppn << PG_SHIFT;
                 paddr & !vaddr_mask | va & vaddr_mask
             };
-            return Ok((paddr, pte));
+            return Ok((paddr, pte, vaddr_shift as u32));
         }
 
         page_fault(va, access)
