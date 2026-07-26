@@ -2059,6 +2059,35 @@ impl Cpu {
         ])))
     }
 
+    /// Vector element load. Like [`memop_read`](Self::memop_read), but an
+    /// element that crosses a 4 KiB page boundary is byte-split (each byte
+    /// translated on its own) instead of trapped as address-misaligned. Real
+    /// vector hardware handles page-crossing element accesses, and the M-mode
+    /// misaligned-access emulation cannot decode a vector instruction — so a
+    /// trap here surfaces as a fatal, unrecoverable exception in the guest.
+    pub(crate) fn memop_read_vector(&mut self, va: u64, size: u64) -> Result<u64, Exception> {
+        if va & 0xfff > 0x1000 - size {
+            return self.memop_slow(Read, va, 0, size, false);
+        }
+        self.memop_read(va, 0, size)
+    }
+
+    /// Vector element store; see
+    /// [`memop_read_vector`](Self::memop_read_vector).
+    pub(crate) fn memop_write_vector(
+        &mut self,
+        va: u64,
+        v: u64,
+        size: u64,
+    ) -> Result<(), Exception> {
+        self.reservation = None;
+        if va & 0xfff > 0x1000 - size {
+            self.memop_slow(Write, va, v, size, false)?;
+            return Ok(());
+        }
+        self.memop_write(va, 0, v, size)
+    }
+
     /// Data load.
     #[allow(clippy::inline_always)]
     #[inline(always)]

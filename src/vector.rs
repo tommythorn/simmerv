@@ -515,12 +515,12 @@ fn vmem(
             let vreg = vd + j * dregs;
             if is_store {
                 let val = elem_of_group(&cpu.v, vreg, i, ebytes);
-                if let Err(e) = cpu.memop_write(addr, 0, val, ebytes as u64) {
+                if let Err(e) = cpu.memop_write_vector(addr, val, ebytes as u64) {
                     cpu.v.vstart = i as u64;
                     return Err(e);
                 }
             } else {
-                match cpu.memop_read(addr, 0, ebytes as u64) {
+                match cpu.memop_read_vector(addr, ebytes as u64) {
                     Ok(val) => set_elem_of_group(&mut cpu.v, vreg, i, ebytes, val),
                     Err(e) => {
                         if fof && i > 0 {
