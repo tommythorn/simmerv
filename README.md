@@ -127,6 +127,92 @@ load the initrd2+gdb.cpio binary at that address.
 $ (cd linux;cargo r -r -- -m 2048 -d with-initrd.dtb fw_payload.bin,0x80000000 initrd2+gdb.cpio,0xa0000000)
 ```
 
+## How to set up networking (VirtIO-net)
+
+Simmerv emulates a VirtIO-net device (MAC `52:54:00:12:34:56`) on the second
+virtio-mmio window. The built-in device tree already declares it, so a guest
+kernel with `CONFIG_VIRTIO_NET` probes it automatically — but the device stays
+inert (packets are dropped) until you attach a host backend. There is no
+built-in emulator NAT/DHCP other than what the backend provides.
+
+### Linux: TAP interface (`-T`)
+
+On Linux, Simmerv connects the guest's NIC to a **TAP** device — a raw
+layer-2 link with no DHCP or NAT of its own, so you configure the host side
+and give the guest a static address (or bridge `tap0` into a real network if
+you prefer).
+
+1. Create a persistent TAP owned by your user (so Simmerv needs no root):
+
+```sh
+$ sudo ip tuntap add dev tap0 mode tap user $USER
+$ sudo ip link set tap0 up
+$ sudo ip addr add 172.16.0.1/24 dev tap0
+```
+
+2. *For guest internet access*, enable forwarding + NAT on the host. The
+   MASQUERADE rule must name your **internet-facing** interface — auto-detect
+   it from the default route rather than assuming `eth0`:
+
+```sh
+$ UPLINK=$(ip route show default | awk '{print $5; exit}')   # e.g. enp9s0, wlan0
+$ echo "NAT via uplink: $UPLINK"                              # sanity-check it
+$ sudo sysctl -w net.ipv4.ip_forward=1
+$ sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/24 -o "$UPLINK" -j MASQUERADE
+$ sudo iptables -A FORWARD -i tap0 -j ACCEPT
+$ sudo iptables -A FORWARD -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+   If the guest reaches the host (`172.16.0.1`) but nothing beyond it, this
+   rule is almost always the culprit — check it with
+   `sudo iptables -t nat -L POSTROUTING -n -v` (wrong `out` interface, or a
+   `pkts` count stuck at 0 while the guest generates traffic).
+
+3. Run Simmerv attached to the TAP (`-T <ifname>`):
+
+```sh
+$ cargo r -r -- -T tap0 linux/fw_payload.bin,0x80000000 -f linux/rootfs.img
+```
+
+4. Configure the interface inside the guest (the name may be `eth0`,
+   `enp0s…`, etc. — check `ip link`):
+
+```sh
+# in the guest
+$ ip addr add 172.16.0.2/24 dev eth0
+$ ip link set eth0 up
+$ ip route add default via 172.16.0.1        # only needed for step 2
+$ echo 'nameserver 1.1.1.1' > /etc/resolv.conf
+```
+
+Host (`172.16.0.1`) and guest (`172.16.0.2`) can now ping each other; with
+step 2 the guest also reaches the internet. Remove the TAP afterwards with
+`sudo ip tuntap del dev tap0 mode tap`.
+
+### macOS: vmnet shared/NAT (`--vmnet`)
+
+On macOS, Simmerv uses Apple's `vmnet.framework` in **shared mode**, which
+supplies DHCP *and* NAT automatically — the guest just needs to request an
+address. `vmnet` shared mode requires elevated privileges, so run under
+`sudo`. Build first so `sudo` doesn't rebuild the tree as root:
+
+```sh
+$ cargo build -r
+$ sudo ./target/release/simmerv_cli --vmnet linux/fw_payload.bin,0x80000000 -f linux/rootfs.img
+```
+
+The guest receives an address on vmnet's subnet (typically `192.168.x.x`) with
+NAT to the host's network. If your guest image doesn't bring the link up
+automatically, run a DHCP client inside it:
+
+```sh
+# in the guest
+$ udhcpc -i eth0        # busybox; or: dhclient eth0
+```
+
+(`-T`/`--tap` is Linux-only and `--vmnet` is macOS-only; each errors out on the
+other platform.)
+
 ## How to run riscv-tests
 
 ```sh
