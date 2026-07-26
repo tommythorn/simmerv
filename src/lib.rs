@@ -301,22 +301,24 @@ impl Emulator {
     /// Enable (or disable) the V vector extension.
     ///
     /// This is a machine-construction switch: it gates vector instruction
-    /// decoding, the `misa` V bit and the vector CSRs.  When enabling it we
-    /// also patch the built-in device tree's `riscv,isa` string so a guest
-    /// kernel sees the extension; the replacement is deliberately the same
-    /// length as the original so the blob's structure is untouched.
+    /// decoding, the `misa` V bit and the vector CSRs. When enabling it we also
+    /// swap in the vector build of the device tree (`dtb-v.dtb`), whose cpu
+    /// node advertises V via both `riscv,isa` and `riscv,isa-extensions` so
+    /// a modern guest kernel enables vector. The vector DTB differs in
+    /// size, so it is re-placed at the top of RAM and its memory node
+    /// re-patched.
+    #[allow(clippy::cast_possible_truncation, clippy::missing_panics_doc)]
     pub fn set_vector_enabled(&mut self, on: bool) {
-        const OLD: &[u8] = b"rv64imafdcsu\0";
-        const NEW: &[u8] = b"rv64imafdcv\0\0";
         self.cpu.set_vector_enabled(on);
         if !on {
             return;
         }
-        let dtb = include_bytes!("./device/dtb.dtb");
-        if let Some(off) = dtb.windows(OLD.len()).position(|w| w == OLD) {
-            let base = self.cpu.dtb_base + off as u64;
-            self.cpu.get_mut_mmu().write_memory_at(base, NEW);
-        }
+        let mut dtb = include_bytes!("./device/dtb-v.dtb").to_vec();
+        let dtb_base = dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len());
+        #[allow(clippy::expect_used)]
+        patch_dtb_memory(&mut dtb, self.memory_bytes).expect("can't patch vector dtb");
+        self.cpu.get_mut_mmu().write_memory_at(dtb_base, &dtb);
+        self.cpu.set_dtb_base(dtb_base);
     }
 
     /// Runs program set by `load_image()`. Calls `run_test()` if the program

@@ -1,5 +1,13 @@
 /dts-v1/;
 
+/*
+ * Compiled into two blobs via the C preprocessor (the cpu node's isa
+ * properties are #ifdef VECTOR):
+ *   cpp -P -nostdinc -x assembler-with-cpp dts.dts | dtc -I dts -O dtb -o dtb.dtb
+ *   cpp -P -DVECTOR -nostdinc -x assembler-with-cpp dts.dts | dtc -I dts -O dtb -o dtb-v.dtb
+ * dtb.dtb is the default; dtb-v.dtb is loaded when the -V flag is given.
+ */
+
 / {
         #address-cells = <0x2>;
         #size-cells = <0x2>;
@@ -95,7 +103,14 @@
                         reg = <0x0>;
                         status = "okay";
                         compatible = "riscv";
-                        riscv,isa = "rv64imafdcsu";
+                        riscv,isa-base = "rv64i";
+#ifdef VECTOR
+                        riscv,isa = "rv64imafdcv";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b";
+#else
+                        riscv,isa = "rv64imafdc";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+#endif
                         mmu-type = "riscv,sv39";
 
                         interrupt-controller {
