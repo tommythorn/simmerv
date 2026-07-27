@@ -9,7 +9,7 @@ repository = "http://github.com/tommythorn/simmerv"
 
 [dependencies]
 simmerv = {path = "../"}
-wasm-bindgen = "0.2.108"
+wasm-bindgen = "0.2.126"
 
 [lib]
 name = "simmerv_wasm"
