@@ -15,8 +15,20 @@
         model = "riscv-virtio,qemu";
 
         chosen {
-                bootargs = "root=/dev/vda rw ttyS0";
+		bootargs = "console=ttyS0 earlycon=sbi root=/dev/vda1 rw ignore_loglevel random.trust_bootloader=on";
                 stdout-path = "/uart@10000000";
+
+		/* Development-only static seed: replace with per-boot random bytes later. */
+		rng-seed = [
+			6f 2c 91 7a 44 1e d3 b8
+			0a cc 59 32 f4 81 25 9d
+			e7 10 ba 6c 38 5f 02 c1
+			93 d4 76 af 20 8b ee 41
+			15 62 9a cd 57 03 b4 f8
+			80 2d 11 6e a9 4c 73 05
+			dc 37 f1 98 24 bb 60 0f
+			4a e2 7d 36 c5 19 8c a0
+		];
         };
 
         // Reserve the M-mode firmware (OpenSBI) region so S-mode (U-Boot, the
@@ -87,7 +99,7 @@
         cpus {
                 #address-cells = <0x1>;
                 #size-cells = <0x0>;
-                timebase-frequency = <1000000>; // 1 MHz
+                timebase-frequency = <2000000>; // 2 MHz, a 2X lie
 
                 cpu-map {
                         cluster0 {
