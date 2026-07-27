@@ -1,6 +1,4 @@
-use std::io;
-use std::io::Read;
-use std::io::Stdin;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -8,7 +6,10 @@ use std::sync::atomic::Ordering;
 pub struct NonblockNoEcho {
     stdin: i32,
     orig_termios: termios::Termios,
-    reader: Stdin,
+    /// Guest-bound bytes already drained from the host fd (Ctrl-C / menu keys
+    /// removed). Buffered here so nothing is stranded when the device's receive
+    /// FIFO is momentarily full.
+    pending: VecDeque<u8>,
     exit_flag: Arc<AtomicBool>,
     snapshot_flag: Arc<AtomicBool>,
     verbose_flag: Arc<AtomicBool>,
@@ -72,7 +73,7 @@ impl NonblockNoEcho {
         Self {
             stdin,
             orig_termios,
-            reader: io::stdin(),
+            pending: VecDeque::new(),
             exit_flag,
             snapshot_flag,
             verbose_flag,
@@ -95,15 +96,47 @@ impl NonblockNoEcho {
         }
     }
 
-    fn read_byte(&mut self) -> Option<u8> {
-        if !self.stdin_ready() {
-            return None;
+    /// Drain everything currently readable and queue guest-bound bytes.
+    ///
+    /// Reads the raw fd directly rather than through `io::stdin()`: `Stdin`'s
+    /// internal `BufReader` would slurp all available bytes off the fd on the
+    /// first read, leaving `stdin_ready()`'s `poll()` (which sees only the fd,
+    /// not the BufReader) unable to notice them — stranding the tail of a paste
+    /// or a multi-byte escape sequence (e.g. an arrow key's `ESC [ A`) until
+    /// the next unrelated keystroke shook them loose one at a time.
+    fn pump(&mut self) {
+        while self.stdin_ready() {
+            let mut buf = [0u8; 256];
+            // SAFETY: `self.stdin` is a valid fd and `buf` is a valid writable
+            // region of `buf.len()` bytes. `poll()` reported readable data and
+            // VMIN=1/VTIME=0 means the read returns available bytes without
+            // blocking.
+            let n = unsafe { libc::read(self.stdin, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            for &byte in &buf[..n as usize] {
+                self.feed(byte);
+            }
         }
-        let mut buffer = [0; 1];
-        self.reader.read(&mut buffer).map_or(None, |n| {
-            assert!(n == 1);
-            Some(buffer[0])
-        })
+    }
+
+    /// Run one raw input byte through the Ctrl-C command state machine,
+    /// queueing it for the guest unless it is the menu prefix (Ctrl-C) or a
+    /// command that follows it (handled here as a host-side side effect).
+    fn feed(&mut self, got: u8) {
+        if self.awaiting_command {
+            self.awaiting_command = false;
+            if self.handle_command(got) {
+                return;
+            }
+            self.pending.push_back(got); // not a command — pass through to guest
+        } else if got == 3 {
+            self.awaiting_command = true; // swallow Ctrl-C; next byte is the command
+        } else {
+            self.pending.push_back(got);
+        }
     }
 
     /// Try to handle `key` as a command. Returns `true` if consumed.
@@ -140,24 +173,18 @@ impl NonblockNoEcho {
         true
     }
 
+    /// Drain host input and process host-side control keys (the Ctrl-C menu),
+    /// buffering guest-bound bytes. Safe to call even when the device cannot
+    /// accept a byte yet, so the menu keeps working while the guest's receive
+    /// FIFO is full.
+    pub fn poll(&mut self) { self.pump(); }
+
+    /// Next guest-bound byte, or `None` if nothing is buffered or readable.
     pub fn get_key(&mut self) -> Option<u8> {
-        let got = self.read_byte()?;
-
-        if self.awaiting_command {
-            self.awaiting_command = false;
-            if self.handle_command(got) {
-                return None;
-            }
-            // Not a command — pass through to guest
-            return Some(got);
+        if self.pending.is_empty() {
+            self.pump();
         }
-
-        if got == 3 {
-            self.awaiting_command = true;
-            return None;
-        }
-
-        Some(got)
+        self.pending.pop_front()
     }
 }
 

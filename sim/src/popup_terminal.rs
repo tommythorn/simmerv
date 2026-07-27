@@ -55,6 +55,12 @@ impl SerialBackend for PopupTerminal {
         self.input.get_key().unwrap_or_default()
     }
 
+    fn poll_input(&mut self) {
+        // Drain host input and service the Ctrl-C menu even when the device's
+        // receive FIFO is full, so the menu stays responsive.
+        self.input.poll();
+    }
+
     // Wasm specific methods. No use.
     fn put_input(&mut self, _value: u8) {}
 

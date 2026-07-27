@@ -247,22 +247,28 @@ impl MemoryMapped for Uart {
 
     fn service(&mut self, ctx: &mut Context, _memory: &mut [(Range<u64>, Vec<u8>)]) {
         let mut rx_ip = false;
-        // Drain all available input into the FIFO. We always call get_input()
-        // at least once so break-key detection (Ctrl-C/Ctrl-X) fires even
-        // when the FIFO is full — the backend handles those via side-effects.
-        loop {
+        // Always let the backend drain host input and process host-side control
+        // keys (the Ctrl-C menu) first — even when our FIFO is full — so the
+        // menu stays responsive while the guest is not reading.
+        if let Some(b) = self.backend.as_mut() {
+            b.poll_input();
+        }
+        // Move buffered input into the FIFO only while there is room. When the
+        // FIFO fills we stop pulling so the excess stays buffered in the backend
+        // (delivered on later ticks as the guest drains the FIFO) rather than
+        // being read out and dropped — otherwise a paste longer than the FIFO
+        // would lose everything past the first FIFO_CAPACITY bytes.
+        while self.rx_fifo.len() < FIFO_CAPACITY {
             let value = self.backend.as_mut().map_or(0, |b| b.get_input());
             if value == 0 {
                 break;
             }
-            if self.rx_fifo.len() < FIFO_CAPACITY {
-                self.rx_fifo.push_back(value);
-                self.regs[RBR_THR] = self.rx_fifo.front().copied().unwrap_or(0);
-                self.regs[LSR] |= LSR_DATA_AVAILABLE;
-                self.update_iir();
-                if self.regs[IER] & IER_RXINT_BIT != 0 {
-                    rx_ip = true;
-                }
+            self.rx_fifo.push_back(value);
+            self.regs[RBR_THR] = self.rx_fifo.front().copied().unwrap_or(0);
+            self.regs[LSR] |= LSR_DATA_AVAILABLE;
+            self.update_iir();
+            if self.regs[IER] & IER_RXINT_BIT != 0 {
+                rx_ip = true;
             }
         }
         if self.thre_ip || rx_ip {

@@ -8,6 +8,12 @@ pub trait SerialBackend {
     fn put_byte(&mut self, value: u8);
     /// Poll a byte from the host into the emulated device. Returns 0 if none.
     fn get_input(&mut self) -> u8;
+    /// Drain host input and process host-side control keys, buffering any
+    /// guest-bound bytes for `get_input`. Called every device service tick even
+    /// when the device's receive FIFO is full, so host control keys (e.g. the
+    /// Ctrl-C menu) keep working while the guest is not reading. Default no-op
+    /// for backends with no host-side control keys.
+    fn poll_input(&mut self) {}
     /// (Host-side) inject a byte into the device's receive buffer.
     fn put_input(&mut self, data: u8);
     /// (Host-side) drain a byte from the device's transmit buffer. Returns 0 if
