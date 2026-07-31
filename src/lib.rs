@@ -169,6 +169,14 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
     }
 }
 
+/// Magic prefix of a snapshot file, bumped whenever the serialised layout
+/// changes so an older blob fails cleanly instead of being misparsed.
+///
+/// Anything that writes, validates, or sniffs a snapshot must use this rather
+/// than spelling the bytes out -- three hand-written copies is exactly how the
+/// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
+pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC9";
+
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
 /// Sample code to run the emulator.
@@ -450,7 +458,8 @@ impl Emulator {
 
     /// Write a snapshot of the current machine state to `path`.
     ///
-    /// The snapshot body is brotli-compressed; the magic is `SIMMERVC9`.
+    /// The snapshot body is brotli-compressed and prefixed with
+    /// [`SNAPSHOT_MAGIC`].
     ///
     /// # Errors
     /// Returns an error if the file cannot be written.
@@ -458,7 +467,7 @@ impl Emulator {
         let mut state = Vec::new();
         self.cpu.write_state(&mut state);
 
-        let mut data = b"SIMMERVC9".to_vec();
+        let mut data = SNAPSHOT_MAGIC.to_vec();
         {
             let params = brotli::enc::BrotliEncoderParams {
                 quality: 5,
@@ -478,11 +487,11 @@ impl Emulator {
     /// # Errors
     /// Returns an error if the data is not a valid snapshot or is corrupt.
     pub fn load_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        if data.len() < 9 || &data[..9] != b"SIMMERVC9" {
+        let Some(body) = data.strip_prefix(SNAPSHOT_MAGIC) else {
             bail!("not a valid snapshot");
-        }
+        };
         let mut state = Vec::new();
-        brotli::BrotliDecompress(&mut &data[9..], &mut state)
+        brotli::BrotliDecompress(&mut &body[..], &mut state)
             .map_err(|e| anyhow!("brotli decompress: {e}"))?;
 
         // Reclaim backends before clearing the device list so we can hand them

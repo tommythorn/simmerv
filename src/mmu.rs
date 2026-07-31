@@ -1346,7 +1346,7 @@ impl Mmu {
 
     // --- Snapshot ---
 
-    /// Serialises MMU state (SIMMERVC3 format).
+    /// Serialises MMU state; the container's version is `SNAPSHOT_MAGIC`.
     #[allow(clippy::cast_possible_truncation)]
     pub fn write_state(&self, out: &mut Vec<u8>) {
         {

@@ -51,7 +51,7 @@ fn ctrl_c_s_writes_snapshot_mid_run() {
     assert!(path.exists(), "snapshot file should exist after Ctrl-C s");
     let data = std::fs::read(&path).unwrap_or_default();
     assert!(
-        data.starts_with(b"SIMMERVC8"),
+        data.starts_with(simmerv::SNAPSHOT_MAGIC),
         "written file is not a valid snapshot"
     );
     assert!(
