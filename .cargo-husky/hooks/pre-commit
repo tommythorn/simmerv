@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# Installed into .git/hooks by cargo-husky's "user-hooks" feature. Edit it
+# HERE, not in .git/hooks -- that copy is regenerated from this one on build.
+#
+# Keep the test command in step with .github/workflows/rust.yml. It used to be
+# a bare `cargo test`, which only reaches the root package's unit tests and
+# silently skips everything in tests/ -- so the hook went green on a change
+# that broke CI. Anything weaker than CI is worse than no hook, because it
+# reads as a passing check.
+#
+# Not mirrored from CI, deliberately: run-riscv-tests.sh and the wasm build are
+# minutes-long, too slow for every commit. CI still gates them.
+
+set -e
+
+echo '+cargo test --all'
+cargo test --all
+
+echo '+cargo clippy --all-targets -- -D warnings'
+cargo clippy --all-targets -- -D warnings
+
+echo '+cargo fmt -- --check'
+cargo fmt -- --check
