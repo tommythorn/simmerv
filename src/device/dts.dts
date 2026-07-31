@@ -118,10 +118,10 @@
                         riscv,isa-base = "rv64i";
 #ifdef VECTOR
                         riscv,isa = "rv64imafdcv";
-                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b";
 #else
                         riscv,isa = "rv64imafdc";
-                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf";
 #endif
                         mmu-type = "riscv,sv39";
 
@@ -161,5 +161,47 @@
         memory@80000000 {
                 device_type = "memory";
                 reg = <0x0 0x80000000 0x0 0x20000000>;
+        };
+
+        /*
+         * PMU description consumed by OpenSBI (fdt_pmu_setup).  Without it
+         * OpenSBI's hardware-event map is empty and sbi_pmu_event_get_info()
+         * answers "unsupported" for every event -- which Linux >= 7.1 uses
+         * whenever the firmware speaks SBI 3.0, so even cycles and
+         * instructions come back -ENOENT ("<not supported>" in perf stat).
+         *
+         * CPU_CYCLES/INSTRUCTIONS list the programmable counters as well as
+         * their fixed one: mcycle/minstret have no OF or *INH bits (scountovf
+         * has no bits below 3), so OpenSBI steers them to an mhpmcounter when
+         * Sscofpmf is present -- that is what makes perf record and
+         * cycles:u / cycles:k work -- and falls back to the fixed counter only
+         * when all 13 are busy.  Selector values are csr::HPM_EV_* in
+         * src/csr.rs, and must be non-zero or OpenSBI refuses the counter.
+         */
+        pmu {
+                compatible = "riscv,pmu";
+
+                /* <event_idx_start event_idx_end counter_bitmap> */
+                riscv,event-to-mhpmcounters =
+                        <0x00000001 0x00000001 0x0000fff9>,   /* cycles       */
+                        <0x00000002 0x00000002 0x0000fffc>,   /* instructions */
+                        <0x00010009 0x00010009 0x0000fff8>;   /* L1I rd miss  */
+
+                /* <event_idx select_hi select_lo> */
+                riscv,event-to-mhpmevent =
+                        <0x00000001 0x00000000 0x00000008>,
+                        <0x00000002 0x00000000 0x00000009>,
+                        <0x00010009 0x00000000 0x00000001>;
+
+                /*
+                 * <select_hi select_lo mask_hi mask_lo counter_bitmap>
+                 * Raw selectors 0..15 on mhpmcounter3..15:
+                 *   r1 uop/bb miss  r2 cold miss  r3 conflict miss
+                 *   r4 block hit    r5 flushes    r6 itlb miss  r7 dtlb miss
+                 *   r8 cycles       r9 instructions
+                 * e.g. "perf stat -e r1,r4 ./prog".
+                 */
+                riscv,raw-event-to-mhpmcounters =
+                        <0x00000000 0x00000000 0xffffffff 0xfffffff0 0x0000fff8>;
         };
 };

@@ -73,6 +73,21 @@
                         status = "okay";
                         compatible = "riscv";
                         riscv,isa = "rv64imafdcsu";
+                        /*
+                         * Modern replacement for the deprecated riscv,isa string above
+                         * (which Linux warns about and which cannot express multi-letter
+                         * extensions). Listing sscofpmf is what lets the kernel arm the
+                         * counter-overflow interrupt and accept exclude_user/exclude_kernel
+                         * -- without it the PMU driver sets PERF_PMU_CAP_NO_EXCLUDE and
+                         * refuses perf record.
+                         *
+                         * Deliberately omits sstc: simmerv implements it and OpenSBI enables
+                         * menvcfg.STCE, but advertising it here would switch the kernel off
+                         * the SBI timer, which is a separate change.
+                         */
+                        riscv,isa-base = "rv64i";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr",
+                        		       "zifencei", "zicntr", "zihpm", "sscofpmf";
                         mmu-type = "riscv,sv39";
 
                         interrupt-controller {
@@ -112,4 +127,56 @@
                 device_type = "memory";
                 reg = <0x00 0x80000000 0x01 0xc0000000>;
         };
+
+	/*
+	 * PMU description consumed by OpenSBI (fdt_pmu_setup).  Without it
+	 * OpenSBI's hardware-event map is empty, so sbi_pmu_event_get_info()
+	 * answers "unsupported" for every event -- and Linux >= 7.1 uses that
+	 * call whenever the firmware speaks SBI 3.0, marking even cycles and
+	 * instructions -ENOENT ("<not supported>" in perf stat).  The older
+	 * COUNTER_CFG_MATCH path fell back to the fixed counters, which is why
+	 * this only started mattering on newer kernels.
+	 *
+	 * Event selector values must match csr::HPM_EV_* in src/csr.rs.
+	 */
+	pmu {
+		compatible = "riscv,pmu";
+
+		/*
+		 * <event_idx_start event_idx_end counter_bitmap>.
+		 * CPU_CYCLES/INSTRUCTIONS list the programmable counters as well
+		 * as their fixed one: mcycle/minstret have no OF or *INH bits, so
+		 * OpenSBI steers them to an mhpmcounter when Sscofpmf is present
+		 * (needed for perf record and for cycles:u / cycles:k) and only
+		 * falls back to the fixed counter when all 13 are busy.
+		 */
+		riscv,event-to-mhpmcounters =
+			/* SBI HW CPU_CYCLES    -> mcycle or hpm3..15 */
+			<0x00000001 0x00000001 0x0000fff9>,
+			/* SBI HW INSTRUCTIONS  -> minstret or hpm3..15 */
+			<0x00000002 0x00000002 0x0000fffc>,
+			/* SBI CACHE L1I/read/miss -> hpm3..15 */
+			<0x00010009 0x00010009 0x0000fff8>;
+
+		/*
+		 * <event_idx select_hi select_lo>: the mhpmevent value OpenSBI
+		 * programs. Must be non-zero or OpenSBI refuses the counter.
+		 * Selectors are csr::HPM_EV_* in src/csr.rs.
+		 */
+		riscv,event-to-mhpmevent =
+			<0x00000001 0x00000000 0x00000008>,  /* cycles       */
+			<0x00000002 0x00000000 0x00000009>,  /* instructions */
+			<0x00010009 0x00000000 0x00000001>;  /* uop/bb miss  */
+
+		/*
+		 * <select_hi select_lo mask_hi mask_lo counter_bitmap>
+		 * Raw selectors 0..15 on mhpmcounter3..15:
+		 *   r1 uop/bb miss   r2 cold miss   r3 conflict miss
+		 *   r4 block hit     r5 flushes     r6 itlb miss  r7 dtlb miss
+		 *   r8 cycles        r9 instructions
+		 * e.g. "perf stat -e r1,r4 ./prog".
+		 */
+		riscv,raw-event-to-mhpmcounters =
+			<0x00000000 0x00000000 0xffffffff 0xfffffff0 0x0000fff8>;
+	};
 };

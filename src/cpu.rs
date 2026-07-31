@@ -434,6 +434,21 @@ pub struct Cpu {
     // Pending uop-cache flush requested by the last executed instruction.
     pub icache_flush: IcacheFlushKind,
 
+    // Hardware performance monitor (mhpmcounter3..15).  The counters count
+    // simulator-internal events (uop/bb cache, TLB) whose running totals live
+    // outside the Cpu, so step_block mirrors the uop cache's totals into
+    // `hpm_bb` and hpm_sync() folds the delta since `hpm_last` into each
+    // counter on demand.  All of it is gated on `hpm_active`, which is false
+    // until software programs a non-zero selector into some mhpmeventN, so an
+    // unmonitored run pays one predictable branch per basic block.
+    hpm_bb: crate::uop_cache::UopCacheStats,
+    hpm_last: [u64; csr::HPM_LAST + 1],
+    hpm_active: bool,
+    // Set after a snapshot restore: the uop cache is not part of the snapshot,
+    // so the first mirror re-baselines `hpm_last` instead of charging the
+    // restored counters with the whole history of whatever cache it lands on.
+    hpm_rebase: bool,
+
     pub speedometer: Speedometer,
     pub speedometer_flag: Arc<AtomicBool>,
     speedometer_next_cycle: u64,
@@ -489,6 +504,10 @@ impl Cpu {
             mmu,
             reservation: None,
             icache_flush: IcacheFlushKind::None,
+            hpm_bb: crate::uop_cache::UopCacheStats::default(),
+            hpm_last: [0; csr::HPM_LAST + 1],
+            hpm_active: false,
+            hpm_rebase: false,
             speedometer: Speedometer::new(),
             speedometer_flag: Arc::new(AtomicBool::new(false)),
             speedometer_next_cycle: 0,
@@ -519,6 +538,10 @@ impl Cpu {
         self.csr = CsrFile::new();
         self.reservation = None;
         self.icache_flush = IcacheFlushKind::Full;
+        self.hpm_bb = crate::uop_cache::UopCacheStats::default();
+        self.hpm_last = [0; csr::HPM_LAST + 1];
+        self.hpm_active = false;
+        self.hpm_rebase = true;
         self.mmu.prv = PrivMode::M;
         self.mmu.mip = 0;
         self.mmu.satp = 0;
@@ -724,6 +747,20 @@ impl Cpu {
             }
         }
         self.icache_flush = IcacheFlushKind::None;
+
+        // Mirror the uop cache's running totals so the HPM counters can be
+        // read from deep inside execution, where `bb` is not reachable. Taken
+        // before this block's probe, so a counter read is exact as of the
+        // start of the block containing the read.
+        if self.hpm_active {
+            self.hpm_bb = bb.stats();
+            if self.hpm_rebase {
+                self.hpm_rebase = false;
+                for i in csr::HPM_FIRST..=csr::HPM_LAST {
+                    self.hpm_last[i] = self.hpm_source(self.csr.mhpmevent[i]);
+                }
+            }
+        }
 
         self.cycle = self.cycle.wrapping_add(1);
 
@@ -1114,6 +1151,7 @@ impl Cpu {
                 7 => MachineTimerInterrupt,
                 9 => SupervisorExternalInterrupt,
                 11 => MachineExternalInterrupt,
+                13 => Trap::CounterOverflowInterrupt,
                 _ => return,
             };
             let trap = Exception {
@@ -1141,6 +1179,7 @@ impl Cpu {
             (MIP_SEIP, SupervisorExternalInterrupt),
             (MIP_SSIP, SupervisorSoftwareInterrupt),
             (MIP_STIP, SupervisorTimerInterrupt),
+            (csr::MIP_LCOFIP, Trap::CounterOverflowInterrupt),
         ] {
             let trap = Exception {
                 trap: trap_type,
@@ -1291,6 +1330,9 @@ impl Cpu {
 
         // So, this trap should be taken
 
+        // Sscofpmf: charge everything counted so far to the mode we are
+        // leaving, before the *INH filtering switches meaning.
+        self.hpm_sync_if_active();
         self.mmu.update_priv_mode(new_priv_mode);
         let csr_epc_address = match self.mmu.prv {
             PrivMode::M => Csr::Mepc,
@@ -1348,6 +1390,102 @@ impl Cpu {
     }
 
     #[allow(clippy::cast_lossless)]
+    /// Running total of the event source selected by an `mhpmevent` value.
+    /// Every source is monotonic, so a counter is just the accumulated delta.
+    ///
+    /// The Sscofpmf/Smcntrpmf privilege-inhibit bits in `sel` are ignored: the
+    /// counters run in every mode.  See the `hpm` note in
+    /// `write_csr`/`Mcountinhibit` for the filtering that is honoured.
+    const fn hpm_source(&self, sel: u64) -> u64 {
+        let bb = &self.hpm_bb;
+        match sel & csr::MHPMEVENT_SEL_MASK {
+            csr::HPM_EV_BB_MISS => bb.cold_misses.wrapping_add(bb.conflict_misses),
+            csr::HPM_EV_BB_COLD_MISS => bb.cold_misses,
+            csr::HPM_EV_BB_CONFLICT_MISS => bb.conflict_misses,
+            csr::HPM_EV_BB_HIT => bb.block_hits,
+            csr::HPM_EV_BB_FLUSH => bb
+                .flush_full
+                .wrapping_add(bb.flush_asid)
+                .wrapping_add(bb.flush_vpage)
+                .wrapping_add(bb.flush_vpage_asid),
+            csr::HPM_EV_ITLB_MISS => self.mmu.tlb_stats().itlb_misses,
+            csr::HPM_EV_DTLB_MISS => self.mmu.tlb_stats().dtlb_misses,
+            csr::HPM_EV_CYCLES | csr::HPM_EV_INSTRET => self.cycle,
+            // HPM_EV_NONE and any selector the platform doesn't implement read
+            // as a counter that never advances.
+            _ => 0,
+        }
+    }
+
+    /// Sscofpmf `*INH` bit that silences a counter in `prv`.
+    const fn hpm_inhibit_bit(prv: PrivMode) -> u64 {
+        match prv {
+            PrivMode::M => csr::MHPMEVENT_MINH,
+            PrivMode::S => csr::MHPMEVENT_SINH,
+            PrivMode::U => csr::MHPMEVENT_UINH,
+        }
+    }
+
+    /// Folds the events seen since the last call into each running counter,
+    /// attributing them to the privilege mode in effect over that window.
+    ///
+    /// Called from every path that observes a counter, perturbs one, or leaves
+    /// the current privilege mode -- that last one is what makes the `*INH`
+    /// filtering meaningful, since the delta accumulated here is charged
+    /// wholesale to `self.mmu.prv`.  Counters are exact as of the start of the
+    /// current basic block (see the mirror in `step_block`).
+    fn hpm_sync(&mut self) {
+        let inhibit = Self::hpm_inhibit_bit(self.mmu.prv);
+        let mut overflowed = false;
+        for i in csr::HPM_FIRST..=csr::HPM_LAST {
+            let event = self.csr.mhpmevent[i];
+            let raw = self.hpm_source(event);
+            let running = self.csr.mcountinhibit & (1 << i) == 0 && event & inhibit == 0;
+            if running {
+                let delta = raw.wrapping_sub(self.hpm_last[i]);
+                let old = self.csr.mhpmcounter[i];
+                let new = old.wrapping_add(delta);
+                self.csr.mhpmcounter[i] = new;
+                // Wrapping past all-ones sets OF and requests LCOFI, but only
+                // on the 0->1 edge: while OF stays set the counter keeps
+                // counting and the interrupt stays quiet. Software (the perf
+                // handler, via SBI COUNTER_START) clears OF to re-arm.
+                if new < old && event & csr::MHPMEVENT_OF == 0 {
+                    self.csr.mhpmevent[i] |= csr::MHPMEVENT_OF;
+                    overflowed = true;
+                }
+            }
+            self.hpm_last[i] = raw;
+        }
+        if overflowed {
+            self.mmu.mip |= csr::MIP_LCOFIP;
+        }
+    }
+
+    /// `hpm_sync` on the paths that only need it when a counter is programmed
+    /// (privilege transitions, `scountovf` reads).
+    fn hpm_sync_if_active(&mut self) {
+        if self.hpm_active {
+            self.hpm_sync();
+        }
+    }
+
+    /// Reads `hpmcounter<idx>` / `mhpmcounter<idx>`, bringing it up to date
+    /// first.  Counters past `HPM_LAST` are hardwired 0.
+    fn read_hpm_counter(&mut self, idx: usize) -> u64 {
+        if idx > csr::HPM_LAST {
+            return 0;
+        }
+        self.hpm_sync();
+        self.csr.mhpmcounter[idx]
+    }
+
+    /// Recomputes the `hpm_active` gate after an `mhpmevent` write.
+    fn hpm_refresh_active(&mut self) {
+        self.hpm_active = (csr::HPM_FIRST..=csr::HPM_LAST)
+            .any(|i| self.csr.mhpmevent[i] & csr::MHPMEVENT_SEL_MASK != csr::HPM_EV_NONE);
+    }
+
     fn has_csr_access_privilege(&self, csrno: u16) -> Option<Csr> {
         let csr = FromPrimitive::from_u16(csrno)?;
 
@@ -1398,9 +1536,11 @@ impl Cpu {
         }
 
         // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
-        // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode). These count at a
-        // model-specific rate, so in cosim the DUT arms its read value and the
-        // two models agree; otherwise they read as 0.
+        // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode). Counters HPM_FIRST..=HPM_LAST
+        // are implemented and count the events named in csr::HPM_EV_*; the rest are
+        // hardwired 0 (which is also how OpenSBI discovers how many exist -- it
+        // writes a value and checks the read-back). These count at a model-specific
+        // rate, so in cosim the DUT arms its read value and the two models agree.
         if matches!(csrno, 0xC03..=0xC1F) {
             if self.mmu.prv != PrivMode::M {
                 let bit = 1u32 << (csrno - 0xC00);
@@ -1411,13 +1551,25 @@ impl Cpu {
                     return illegal;
                 }
             }
-            return Ok(armed.unwrap_or(0));
+            return Ok(armed.unwrap_or_else(|| self.read_hpm_counter(csrno as usize - 0xC00)));
         }
-        if matches!(csrno, 0xB03..=0xB1F | 0x323..=0x33F) {
+        if matches!(csrno, 0xB03..=0xB1F) {
             if u64::from(self.mmu.prv) < 3 {
                 return illegal;
             }
-            return Ok(armed.unwrap_or(0));
+            return Ok(armed.unwrap_or_else(|| self.read_hpm_counter(csrno as usize - 0xB00)));
+        }
+        if matches!(csrno, 0x323..=0x33F) {
+            if u64::from(self.mmu.prv) < 3 {
+                return illegal;
+            }
+            let idx = csrno as usize - 0x320;
+            let event = if idx <= csr::HPM_LAST {
+                self.csr.mhpmevent[idx]
+            } else {
+                0
+            };
+            return Ok(armed.unwrap_or(event));
         }
 
         let Some(csr) = self.has_csr_access_privilege(csrno) else {
@@ -1439,6 +1591,9 @@ impl Cpu {
                     return illegal;
                 }
             }
+            // Bring OF up to date so a counter that overflowed since the
+            // last sync is visible to the handler.
+            Csr::Scountovf => self.hpm_sync_if_active(),
             Csr::Satp => {
                 if self.mmu.prv == S && self.mmu.mstatus & MSTATUS_TVM != 0 {
                     return illegal;
@@ -1470,17 +1625,40 @@ impl Cpu {
             return Ok(());
         }
 
-        // Zihpm: hpmcounter3-31 are read-only; mhpmcounter/mhpmevent writes are
-        // silently ignored.
+        // Zihpm: hpmcounter3-31 are read-only. mhpmcounter/mhpmevent are
+        // writable for the implemented counters and ignored above HPM_LAST --
+        // OpenSBI sizes the PMU by writing each one and checking the read-back,
+        // so "ignored" is what makes counters 16-31 not exist.
         if matches!(csrno, 0xC03..=0xC1F) {
             return illegal; // read-only
         }
-        if matches!(csrno, 0xB03..=0xB1F | 0x323..=0x33F) {
-            return if u64::from(self.mmu.prv) < 3 {
-                illegal
-            } else {
-                Ok(())
-            };
+        if matches!(csrno, 0xB03..=0xB1F) {
+            if u64::from(self.mmu.prv) < 3 {
+                return illegal;
+            }
+            let idx = csrno as usize - 0xB00;
+            if idx <= csr::HPM_LAST {
+                // Settle the events counted so far, then take the new base.
+                self.hpm_sync();
+                self.csr.mhpmcounter[idx] = value;
+            }
+            return Ok(());
+        }
+        if matches!(csrno, 0x323..=0x33F) {
+            if u64::from(self.mmu.prv) < 3 {
+                return illegal;
+            }
+            let idx = csrno as usize - 0x320;
+            if idx <= csr::HPM_LAST {
+                // Charge the old event up to now, then re-base on the new one
+                // so the switch doesn't credit this counter with the new
+                // source's entire history.
+                self.hpm_sync();
+                self.csr.mhpmevent[idx] = value;
+                self.hpm_last[idx] = self.hpm_source(value);
+                self.hpm_refresh_active();
+            }
+            return Ok(());
         }
 
         let Some(csr) = self.has_csr_access_privilege(csrno) else {
@@ -1502,6 +1680,10 @@ impl Cpu {
                 log::info!("** deny cycle writing");
                 return illegal;
             }
+            // The inhibit bit decides whether a counter accrues, so settle
+            // every counter against the OLD mask before it changes. This is
+            // the start/stop that SBI_PMU_COUNTER_START/STOP bottoms out in.
+            Csr::Mcountinhibit => self.hpm_sync(),
             // Sstc: stimecmp is only accessible from S-mode when menvcfg.STCE=1
             Csr::Stimecmp
                 if self.mmu.prv == PrivMode::S && self.csr.menvcfg & MENVCFG_STCE == 0 =>
@@ -1561,7 +1743,11 @@ impl Cpu {
     #[allow(clippy::cast_sign_loss)]
     fn read_csr_raw(&self, csr: Csr) -> u64 {
         match csr {
-            Csr::Cycle | Csr::Mcycle | Csr::Minstret => self.cycle,
+            // Instret (0xC02) must alias Minstret (0xB02): the SBI PMU hands
+            // S-mode counter 2 as "CSR_CYCLE + 2" and Linux reads it directly,
+            // so leaving it out here made perf's "instructions" a stuck-at-0
+            // counter. IPC is therefore exactly 1 -- see the XXX in run_soc.
+            Csr::Cycle | Csr::Mcycle | Csr::Minstret | Csr::Instret => self.cycle,
             Csr::Fcsr => self.read_fcsr(),
             Csr::Fflags => u64::from(self.read_fflags()),
             Csr::Frm => self.read_frm() as u64,
@@ -1617,9 +1803,24 @@ impl Cpu {
             Csr::Mcountinhibit => self.csr.mcountinhibit,
             Csr::Mcyclecfg => self.csr.mcyclecfg,
             Csr::Minstretcfg => self.csr.minstretcfg,
-            // Scountovf (Sscofpmf) reads 0 via the `_ => 0` fallthrough below;
-            // the legal() entry stops the illegal trap. simmerv raises no HPM
-            // overflows, matching smolrv64 at boot (derived from mhpmevent.OF).
+            // Sscofpmf: shadow of mhpmevent3-31.OF. Outside M-mode a bit
+            // reads 0 unless mcounteren delegates that counter, so S-mode only
+            // learns about overflows of counters it may read.
+            Csr::Scountovf => {
+                let mut ovf = 0u64;
+                let mut i = csr::HPM_FIRST;
+                while i <= csr::HPM_LAST {
+                    if self.csr.mhpmevent[i] & csr::MHPMEVENT_OF != 0 {
+                        ovf |= 1 << i;
+                    }
+                    i += 1;
+                }
+                if matches!(self.mmu.prv, PrivMode::M) {
+                    ovf
+                } else {
+                    ovf & u64::from(self.csr.mcounteren)
+                }
+            }
             Csr::Scounteren => u64::from(self.csr.scounteren),
             Csr::Senvcfg => self.csr.senvcfg,
             Csr::Menvcfg => self.csr.menvcfg,
@@ -1693,7 +1894,9 @@ impl Cpu {
             Csr::Sideleg => self.csr.sideleg = value,
             // SIE mask includes LCOFIE (bit 13) to match the DUT (csr_mie & 0x2222).
             Csr::Sie => self.csr.mie = self.csr.mie & !0x2222 | value & 0x2222,
-            Csr::Sip => self.mmu.mip = value & 0x222 | self.mmu.mip & !0x222,
+            // 0x2222: SSIP/STIP/SEIP plus Sscofpmf's LCOFIP -- the perf
+            // overflow handler clears it with csr_clear(CSR_SIP, BIT(13)).
+            Csr::Sip => self.mmu.mip = value & 0x2222 | self.mmu.mip & !0x2222,
             Csr::Sscratch => self.csr.sscratch = value,
             Csr::Sstatus => {
                 // UXL[33:32] is read-only WARL (=2 on this RV64 hart): writable
@@ -1850,6 +2053,14 @@ impl Cpu {
             ] {
                 w.u64(v);
             }
+            // HPM: the counters and their selectors are architectural state.
+            // `hpm_last` is not -- the uop cache it baselines against is not in
+            // the snapshot, so read_state re-bases instead (see hpm_rebase).
+            w.u64(c.mcountinhibit);
+            for i in csr::HPM_FIRST..=csr::HPM_LAST {
+                w.u64(c.mhpmcounter[i]);
+                w.u64(c.mhpmevent[i]);
+            }
             w.u8(self.vs);
             w.bool(self.vector_enabled);
             w.u64(self.v.vtype);
@@ -1932,6 +2143,15 @@ impl Cpu {
         c.mcounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.senvcfg = r.u64()?;
+        c.mcountinhibit = r.u64()?;
+        for i in csr::HPM_FIRST..=csr::HPM_LAST {
+            c.mhpmcounter[i] = r.u64()?;
+            c.mhpmevent[i] = r.u64()?;
+        }
+        self.hpm_bb = crate::uop_cache::UopCacheStats::default();
+        self.hpm_last = [0; csr::HPM_LAST + 1];
+        self.hpm_rebase = true;
+        self.hpm_refresh_active();
         self.vs = r.u8()?;
         self.vector_enabled = r.bool()?;
         self.v.vtype = r.u64()?;
@@ -3202,6 +3422,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             // and override MPRV[17]
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
+            cpu.hpm_sync_if_active();
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
             ExecOut::ok(0)
         }
@@ -3224,6 +3445,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             // and override MPRV[17]
             let new_status = (status & !0x20122) | (mprv << 17) | (spie << 1) | (1 << 5);
             cpu.write_csr_raw(Csr::Sstatus, new_status);
+            cpu.hpm_sync_if_active();
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
             ExecOut::ok(0)
         }

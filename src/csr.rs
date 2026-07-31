@@ -100,6 +100,9 @@ pub const MENVCFG_STCE: u64 = 1 << 63; // Sstc: enables stimecmp in S-mode
 // in that (firmware-only) window.  Add CBZE/CBIE/CBCFE/PBMTE here and gate the
 // ops if exact enable-bit parity is ever needed.
 
+/// Sscofpmf local counter-overflow interrupt pending/enable (interrupt 13).
+pub const MIP_LCOFIP: u64 = 1 << 13;
+
 pub const MIP_MEIP: u64 = 0x800;
 pub const MIP_MTIP: u64 = 0x080;
 pub const MIP_MSIP: u64 = 0x008;
@@ -247,6 +250,52 @@ pub const fn legal(csr: Csr) -> bool {
     )
 }
 
+/// Lowest and highest implemented hardware performance monitor counter.
+/// mhpmcounter3..15 / mhpmevent3..15 -- 13 counters, matching the DUT
+/// (smolrv64) and the `mcountinhibit` WARL mask below.
+pub const HPM_FIRST: usize = 3;
+pub const HPM_LAST: usize = 15;
+
+/// `mhpmevent` event selectors.
+///
+/// These are platform-specific: `OpenSBI` learns them from the
+/// `riscv,event-to-mhpmevent` / `riscv,raw-event-to-mhpmcounters` properties of
+/// the device tree's `riscv,pmu` node and programs them into `mhpmeventN` on
+/// the kernel's behalf.  Keep `linux/*.dts` in sync.
+pub const HPM_EV_NONE: u64 = 0;
+pub const HPM_EV_BB_MISS: u64 = 1;
+pub const HPM_EV_BB_COLD_MISS: u64 = 2;
+pub const HPM_EV_BB_CONFLICT_MISS: u64 = 3;
+pub const HPM_EV_BB_HIT: u64 = 4;
+pub const HPM_EV_BB_FLUSH: u64 = 5;
+pub const HPM_EV_ITLB_MISS: u64 = 6;
+pub const HPM_EV_DTLB_MISS: u64 = 7;
+// Cycles and retired instructions are also available as *programmable* events.
+// mcycle/minstret themselves cannot be filtered or sampled -- Sscofpmf gives
+// `scountovf` no bits below 3 and the OF/*INH flags live in mhpmevent -- so
+// OpenSBI deliberately steers CPU_CYCLES/INSTRUCTIONS to an mhpmcounter when
+// Sscofpmf is present, falling back to the fixed counters only when none is
+// free. Both are simmerv's one free-running counter (IPC is 1).
+pub const HPM_EV_CYCLES: u64 = 8;
+pub const HPM_EV_INSTRET: u64 = 9;
+
+/// Sscofpmf flags in the top 6 bits of `mhpmevent`.
+///
+/// `OF` is set by hardware when the counter wraps and is sticky: while it is
+/// set no further overflow interrupt is raised, which is how the kernel avoids
+/// having to throttle in its handler.  The `*INH` bits stop the counter in the
+/// named privilege mode.  H is not implemented, so VSINH/VUINH are stored and
+/// never consulted.
+pub const MHPMEVENT_OF: u64 = 1 << 63;
+pub const MHPMEVENT_MINH: u64 = 1 << 62;
+pub const MHPMEVENT_SINH: u64 = 1 << 61;
+pub const MHPMEVENT_UINH: u64 = 1 << 60;
+pub const MHPMEVENT_VSINH: u64 = 1 << 59;
+pub const MHPMEVENT_VUINH: u64 = 1 << 58;
+
+/// Selector field of `mhpmevent`: everything below the Sscofpmf flags.
+pub const MHPMEVENT_SEL_MASK: u64 = (1 << 58) - 1;
+
 pub struct CsrFile {
     pub menvcfg: u64,
     pub stimecmp: u64,
@@ -273,6 +322,11 @@ pub struct CsrFile {
     pub mcountinhibit: u64,
     pub mcyclecfg: u64,
     pub minstretcfg: u64,
+    /// mhpmcounter3..15; entries 0..=2 are unused (those are
+    /// cycle/time/instret).
+    pub mhpmcounter: [u64; HPM_LAST + 1],
+    /// mhpmevent3..15; entries 0..=2 are unused.
+    pub mhpmevent: [u64; HPM_LAST + 1],
     pub senvcfg: u64,
     // PMP: the DUTs (smolrv64 + probe) store cfg/addr0 verbatim (no enforcement),
     // so simmerv stores them too -- OpenSBI writes then reads them back at boot.
@@ -318,6 +372,8 @@ impl CsrFile {
             mcountinhibit: 0,
             mcyclecfg: 0,
             minstretcfg: 0,
+            mhpmcounter: [0; HPM_LAST + 1],
+            mhpmevent: [0; HPM_LAST + 1],
             senvcfg: 0,
             pmpcfg0: 0,
             pmpaddr0: 0,

@@ -31,6 +31,10 @@ pub enum Trap {
     UserExternalInterrupt = 108,
     SupervisorExternalInterrupt = 109,
     MachineExternalInterrupt = 111,
+
+    // Sscofpmf local counter-overflow interrupt (interrupt 13).  The encoding
+    // here is 100 + interrupt number; see get_trap_cause.
+    CounterOverflowInterrupt = 113,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

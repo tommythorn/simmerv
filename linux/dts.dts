@@ -1,48 +1,48 @@
 /dts-v1/;
 
 / {
-        #address-cells = <2>;
-        #size-cells = <2>;
+        #address-cells = <0x2>;
+        #size-cells = <0x2>;
         compatible = "riscv-virtio";
         model = "riscv-virtio,qemu";
 
         chosen {
-                bootargs = "root=/dev/vda1 rw ttyS0";
+                bootargs = "root=/dev/vda rw ttyS0";
                 stdout-path = "/uart@10000000";
         };
 
         uart@10000000 {
-                interrupts = <10>;
-                interrupt-parent = <3>;
+                interrupts = <0xa>;
+                interrupt-parent = <0x3>;
                 clock-frequency = <0x384000>;
-                reg = <0 0x10000000 0 0x100>;
+                reg = <0x0 0x10000000 0x0 0x100>;
                 compatible = "ns16550a";
         };
 
         virtio_mmio@10001000 {
-                interrupts = <1>;
-                interrupt-parent = <3>;
-                reg = <0 0x10001000 0 0x1000>;
+                interrupts = <0x1>;
+                interrupt-parent = <0x3>;
+                reg = <0x0 0x10001000 0x0 0x1000>;
                 compatible = "virtio,mmio";
         };
 
         cpus {
-                #address-cells = <1>;
-                #size-cells = <0>;
+                #address-cells = <0x1>;
+                #size-cells = <0x0>;
                 timebase-frequency = <1000000>; // 1 MHz
 
                 cpu-map {
                         cluster0 {
                                 core0 {
-                                        cpu = <1>;
+                                        cpu = <0x1>;
                                 };
                         };
                 };
 
                 cpu@0 {
-                        phandle = <1>;
+                        phandle = <0x1>;
                         device_type = "cpu";
-                        reg = <0>;
+                        reg = <0x0>;
                         status = "okay";
                         compatible = "riscv";
                         riscv,isa = "rv64imafdcsu";
@@ -64,78 +64,89 @@
                         mmu-type = "riscv,sv39";
 
                         interrupt-controller {
-                                #interrupt-cells = <1>;
+                                #interrupt-cells = <0x1>;
                                 interrupt-controller;
                                 compatible = "riscv,cpu-intc";
-                                phandle = <2>;
+                                phandle = <0x2>;
                         };
                 };
         };
 
         soc {
-                #address-cells = <2>;
-                #size-cells = <2>;
+                #address-cells = <0x2>;
+                #size-cells = <0x2>;
                 compatible = "simple-bus";
                 ranges;
 
                 interrupt-controller@c000000 {
-                        phandle = <3>;
+                        phandle = <0x3>;
                         riscv,ndev = <0x35>;
-                        reg = <0 0xc000000 0 0x4000000>;
-                        interrupts-extended = <2 11 2 9>;
+                        reg = <0x0 0xc000000 0x0 0x4000000>;
+                        interrupts-extended = <0x2 0xb 0x2 0x9>;
                         interrupt-controller;
                         compatible = "riscv,plic0";
-                        #interrupt-cells = <1>;
-                        #address-cells = <0>;
+                        #interrupt-cells = <0x1>;
+                        #address-cells = <0x0>;
                 };
 
                 clint@2000000 {
-                        interrupts-extended = <2 3 2 7>;
-                        reg = <0 0x2000000 0 0x10000>;
+                        interrupts-extended = <0x2 0x3 0x2 0x7>;
+                        reg = <0x0 0x2000000 0x0 0x10000>;
                         compatible = "riscv,clint0";
                 };
         };
 
         memory@80000000 {
                 device_type = "memory";
-                reg = <0 0x80000000 0 0x20000000>;
+                reg = <0x0 0x80000000 0x0 0x20000000>;
         };
 
 	/*
 	 * PMU description consumed by OpenSBI (fdt_pmu_setup).  Without it
-	 * OpenSBI's hardware-event map is empty and sbi_pmu_event_get_info()
-	 * answers "unsupported" for every event -- which Linux >= 7.1 uses
-	 * whenever the firmware speaks SBI 3.0, so even cycles and
-	 * instructions come back -ENOENT ("<not supported>" in perf stat).
+	 * OpenSBI's hardware-event map is empty, so sbi_pmu_event_get_info()
+	 * answers "unsupported" for every event -- and Linux >= 7.1 uses that
+	 * call whenever the firmware speaks SBI 3.0, marking even cycles and
+	 * instructions -ENOENT ("<not supported>" in perf stat).  The older
+	 * COUNTER_CFG_MATCH path fell back to the fixed counters, which is why
+	 * this only started mattering on newer kernels.
 	 *
-	 * CPU_CYCLES/INSTRUCTIONS list the programmable counters as well as
-	 * their fixed one: mcycle/minstret have no OF or *INH bits (scountovf
-	 * has no bits below 3), so OpenSBI steers them to an mhpmcounter when
-	 * Sscofpmf is present -- that is what makes perf record and
-	 * cycles:u / cycles:k work.  Selectors are csr::HPM_EV_* in
-	 * src/csr.rs and must be non-zero or OpenSBI refuses the counter.
+	 * Event selector values must match csr::HPM_EV_* in src/csr.rs.
 	 */
 	pmu {
 		compatible = "riscv,pmu";
 
-		/* <event_idx_start event_idx_end counter_bitmap> */
+		/*
+		 * <event_idx_start event_idx_end counter_bitmap>.
+		 * CPU_CYCLES/INSTRUCTIONS list the programmable counters as well
+		 * as their fixed one: mcycle/minstret have no OF or *INH bits, so
+		 * OpenSBI steers them to an mhpmcounter when Sscofpmf is present
+		 * (needed for perf record and for cycles:u / cycles:k) and only
+		 * falls back to the fixed counter when all 13 are busy.
+		 */
 		riscv,event-to-mhpmcounters =
-			<0x00000001 0x00000001 0x0000fff9>,   /* cycles       */
-			<0x00000002 0x00000002 0x0000fffc>,   /* instructions */
-			<0x00010009 0x00010009 0x0000fff8>;   /* L1I rd miss  */
+			/* SBI HW CPU_CYCLES    -> mcycle or hpm3..15 */
+			<0x00000001 0x00000001 0x0000fff9>,
+			/* SBI HW INSTRUCTIONS  -> minstret or hpm3..15 */
+			<0x00000002 0x00000002 0x0000fffc>,
+			/* SBI CACHE L1I/read/miss -> hpm3..15 */
+			<0x00010009 0x00010009 0x0000fff8>;
 
-		/* <event_idx select_hi select_lo> */
+		/*
+		 * <event_idx select_hi select_lo>: the mhpmevent value OpenSBI
+		 * programs. Must be non-zero or OpenSBI refuses the counter.
+		 * Selectors are csr::HPM_EV_* in src/csr.rs.
+		 */
 		riscv,event-to-mhpmevent =
-			<0x00000001 0x00000000 0x00000008>,
-			<0x00000002 0x00000000 0x00000009>,
-			<0x00010009 0x00000000 0x00000001>;
+			<0x00000001 0x00000000 0x00000008>,  /* cycles       */
+			<0x00000002 0x00000000 0x00000009>,  /* instructions */
+			<0x00010009 0x00000000 0x00000001>;  /* uop/bb miss  */
 
 		/*
 		 * <select_hi select_lo mask_hi mask_lo counter_bitmap>
 		 * Raw selectors 0..15 on mhpmcounter3..15:
-		 *   r1 uop/bb miss  r2 cold miss  r3 conflict miss
-		 *   r4 block hit    r5 flushes    r6 itlb miss  r7 dtlb miss
-		 *   r8 cycles       r9 instructions
+		 *   r1 uop/bb miss   r2 cold miss   r3 conflict miss
+		 *   r4 block hit     r5 flushes     r6 itlb miss  r7 dtlb miss
+		 *   r8 cycles        r9 instructions
 		 * e.g. "perf stat -e r1,r4 ./prog".
 		 */
 		riscv,raw-event-to-mhpmcounters =

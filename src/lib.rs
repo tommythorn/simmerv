@@ -450,7 +450,7 @@ impl Emulator {
 
     /// Write a snapshot of the current machine state to `path`.
     ///
-    /// The snapshot body is brotli-compressed; the magic is `SIMMERVC2`.
+    /// The snapshot body is brotli-compressed; the magic is `SIMMERVC9`.
     ///
     /// # Errors
     /// Returns an error if the file cannot be written.
@@ -458,7 +458,7 @@ impl Emulator {
         let mut state = Vec::new();
         self.cpu.write_state(&mut state);
 
-        let mut data = b"SIMMERVC8".to_vec();
+        let mut data = b"SIMMERVC9".to_vec();
         {
             let params = brotli::enc::BrotliEncoderParams {
                 quality: 5,
@@ -478,7 +478,7 @@ impl Emulator {
     /// # Errors
     /// Returns an error if the data is not a valid snapshot or is corrupt.
     pub fn load_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        if data.len() < 9 || &data[..9] != b"SIMMERVC8" {
+        if data.len() < 9 || &data[..9] != b"SIMMERVC9" {
             bail!("not a valid snapshot");
         }
         let mut state = Vec::new();
