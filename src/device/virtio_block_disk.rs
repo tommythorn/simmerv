@@ -24,6 +24,9 @@ enum DiskStorage {
     /// Base image served from a URL, with local copy-on-write for writes.
     #[cfg(not(target_arch = "wasm32"))]
     Url(crate::device::url_disk::UrlStorage),
+    /// Blocks fetched on demand by the host (browser `fetch` + `Range`).
+    /// Reads of absent blocks defer rather than block; see `streamed_disk`.
+    Streamed(crate::device::streamed_disk::StreamedHandle),
 }
 
 #[allow(clippy::use_self)]
@@ -36,7 +39,12 @@ impl DiskStorage {
     /// request is retried by a later `service_disk` -- see the deferral in
     /// `try_handle_disk_access`.
     #[allow(clippy::unused_self)]
-    const fn is_resident(&self, _offset: usize, _len: usize) -> bool { true }
+    fn is_resident(&self, offset: usize, len: usize) -> bool {
+        match self {
+            DiskStorage::Streamed(s) => s.borrow_mut().is_resident(offset as u64, len),
+            _ => true,
+        }
+    }
 
     fn sector_count(&self) -> u64 {
         match self {
@@ -45,6 +53,7 @@ impl DiskStorage {
             DiskStorage::File(f) => f.metadata().map_or(0, |m| m.len()) / SECTOR_SIZE as u64,
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::Url(u) => u.sector_count(),
+            DiskStorage::Streamed(s) => s.borrow().sector_count(),
         }
     }
 
@@ -66,6 +75,7 @@ impl DiskStorage {
             }
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::Url(u) => u.read_at(offset, buf),
+            DiskStorage::Streamed(s) => s.borrow().read_at(offset, buf),
         }
     }
 
@@ -86,6 +96,7 @@ impl DiskStorage {
             }
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::Url(u) => u.write_at(offset, data),
+            DiskStorage::Streamed(s) => s.borrow_mut().write_at(offset, data),
         }
     }
 }
@@ -103,7 +114,7 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 // (i.e., the device writes into it — this is a READ from disk operation)
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-const SECTOR_SIZE: usize = 512;
+pub const SECTOR_SIZE: usize = 512;
 
 // VirtIO block device feature bits (section 5.2.3)
 const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
@@ -196,6 +207,14 @@ impl VirtioBlockDisk {
     pub fn new_with_contents(contents: Vec<u8>, irq: u32) -> Self {
         let mut d = Self::new(irq);
         d.storage = DiskStorage::Memory(contents);
+        d
+    }
+
+    /// Creates a disk whose blocks are supplied by the host on demand.
+    #[must_use]
+    pub fn new_streamed(handle: crate::device::streamed_disk::StreamedHandle, irq: u32) -> Self {
+        let mut d = Self::new(irq);
+        d.storage = DiskStorage::Streamed(handle);
         d
     }
 
@@ -589,7 +608,9 @@ impl VirtioBlockDisk {
         if self.defer_reads && matches!(data, Some((_, _, true))) {
             return false;
         }
-        if let Some((_, len, true)) = data
+        // Writes need residency too: a partial-sector write reads the base
+        // sector back first, which would otherwise silently pick up zeros.
+        if let Some((_, len, _)) = data
             && !self.storage.is_resident(blk_sector * SECTOR_SIZE, len)
         {
             return false;
@@ -693,6 +714,10 @@ impl MemoryMapped for VirtioBlockDisk {
             DiskStorage::Memory(v) => w.bytes(v),
             #[cfg(not(target_arch = "wasm32"))]
             DiskStorage::File(_) | DiskStorage::Url(_) => w.u64(0),
+            // Same sentinel: the base image is at the URL the host fetches
+            // from, so only the cached blocks would be ours to save, and
+            // restoring simply re-fetches them.
+            DiskStorage::Streamed(_) => w.u64(0),
         }
         w.u32(self.pending_requests);
         w.u32(self.irq);

@@ -49,6 +49,8 @@ const WASM_MEMORY_SIZE: usize = 512 * 1024 * 1024;
 #[wasm_bindgen]
 pub struct WasmRiscv {
     emulator: Emulator,
+    /// Set by `setup_streamed_filesystem`; shared with the block device.
+    streamed: Option<simmerv::device::streamed_disk::StreamedHandle>,
 }
 
 #[wasm_bindgen]
@@ -57,6 +59,7 @@ impl WasmRiscv {
     #[allow(clippy::new_without_default)] // #[wasm_bindgen] trait impls are not supported
     pub fn new() -> Self {
         WasmRiscv {
+            streamed: None,
             emulator: Emulator::new(
                 Box::new(BufferedSerialBackend::new()),
                 WASM_MEMORY_SIZE,
@@ -117,6 +120,57 @@ impl WasmRiscv {
             .cpu
             .get_mut_mmu()
             .write_memory_at(u64::from(addr), &content);
+    }
+
+    /// Attaches a disk whose blocks JavaScript fetches on demand.
+    ///
+    /// Use instead of [`Self::setup_filesystem`] when the image is too large
+    /// to download up front. The emulator never blocks on a fetch: a read of
+    /// an absent block is deferred and retried, so the guest just sees a slow
+    /// disk. Drive it from the run loop:
+    ///
+    /// ```ignore
+    /// riscv.setup_streamed_filesystem(totalBytes, 65536);
+    /// // ...after each run_cycles():
+    /// for (const b of riscv.take_wanted_blocks()) {
+    ///   const lo = b * 65536, hi = Math.min(lo + 65535, totalBytes - 1);
+    ///   fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } })
+    ///     .then(r => r.arrayBuffer())
+    ///     .then(a => riscv.provide_block(b, new Uint8Array(a)));
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    /// * `total_bytes` Size of the base image (from a HEAD request)
+    /// * `block_size` Fetch granularity in bytes
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn setup_streamed_filesystem(&mut self, total_bytes: f64, block_size: u32) {
+        self.streamed = Some(
+            self.emulator
+                .setup_filesystem_streamed(total_bytes as u64, u64::from(block_size)),
+        );
+    }
+
+    /// Blocks the disk is waiting for, as block indices. Each is reported
+    /// once, so a block already being fetched is not requested again.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn take_wanted_blocks(&mut self) -> Vec<u32> {
+        self.streamed.as_ref().map_or_else(Vec::new, |s| {
+            s.borrow_mut()
+                .take_wanted()
+                .into_iter()
+                .map(|b| b as u32)
+                .collect()
+        })
+    }
+
+    /// Hands a fetched block to the disk. The deferred read completes on the
+    /// next `run_cycles`.
+    pub fn provide_block(&mut self, index: u32, bytes: Vec<u8>) {
+        if let Some(s) = &self.streamed {
+            s.borrow_mut().provide(u64::from(index), bytes);
+        }
     }
 
     /// Runs program set by `load_image()`. The emulator won't stop forever

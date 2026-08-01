@@ -7,6 +7,12 @@ use std::ops::Range;
 
 pub mod clint;
 pub mod plic;
+/// Blocks fetched on demand by the host.
+///
+/// The browser counterpart of `url_disk`. Not gated on wasm: it needs nothing
+/// browser-specific, and keeping it buildable everywhere is what lets it be
+/// tested.
+pub mod streamed_disk;
 pub mod syscon;
 pub mod uart;
 #[cfg(not(target_arch = "wasm32"))]

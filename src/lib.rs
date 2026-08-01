@@ -871,6 +871,30 @@ impl Emulator {
         Ok(())
     }
 
+    /// Attaches a block device on disk 0 whose contents the *host* supplies on
+    /// demand, and returns the handle used to feed it.
+    ///
+    /// Reads of blocks that have not arrived defer rather than block (see
+    /// `streamed_disk`), so this is the browser's answer to a disk too large
+    /// to download up front: only the blocks actually touched are transferred.
+    ///
+    /// `total_bytes` is the size of the base image, which the guest needs at
+    /// probe time — long before any block has been fetched.
+    pub fn setup_filesystem_streamed(
+        &mut self,
+        total_bytes: u64,
+        block_size: u64,
+    ) -> crate::device::streamed_disk::StreamedHandle {
+        let handle = crate::device::streamed_disk::StreamedStorage::new(total_bytes, block_size);
+        if let Some((base, end, irq)) = Self::block_disk_slot(0) {
+            self.cpu.get_mut_mmu().replace_device(
+                base..end,
+                Box::new(VirtioBlockDisk::new_streamed(handle.clone(), irq)),
+            );
+        }
+        handle
+    }
+
     /// Replaces the network backend.  Call after `new()` to attach a TAP
     /// interface or other backend.
     pub fn setup_network(&mut self, backend: Box<dyn NetworkBackend>) {
