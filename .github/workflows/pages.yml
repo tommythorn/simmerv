@@ -33,15 +33,15 @@ jobs:
       - name: Add wasm target
         run: rustup target add wasm32-unknown-unknown
 
-      # wasm-pack and wasm-bindgen-cli take minutes to `cargo install`. build.sh
-      # skips the install when the binary is already present at the pinned
-      # version, so caching them turns that into a no-op.
+      # `cargo install wasm-pack` takes minutes; build.sh skips it when the
+      # binary is already there, so caching makes it a no-op. wasm-pack fetches
+      # its own matching wasm-bindgen and wasm-opt into ~/.cache/.wasm-pack.
       - name: Cache wasm toolchain
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/wasm-pack
-            ~/.cargo/bin/wasm-bindgen
+            ~/.cache/.wasm-pack
           key: wasm-tools-${{ runner.os }}-${{ hashFiles('wasm/build.sh') }}
 
       - name: Build
