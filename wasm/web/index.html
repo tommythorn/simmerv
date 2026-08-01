@@ -33,6 +33,14 @@
       const ROOTFS  = './linux/demo/rootfs.sqfs';
       const INITRD_ADDR = 0x9e000000;
 
+      // The root filesystem is streamed: rather than downloading it, we hand
+      // the emulator its size and serve 64 KiB blocks as the guest asks for
+      // them. A boot touches a small fraction of the image, so this starts
+      // sooner and transfers far less than fetching the whole thing.
+      // Must match the block size the squashfs was built with -- see
+      // linux/demo/mkdemo-image.sh.
+      const BLOCK = 65536;
+
       const COLUMNS = 80;
       const MINIMUM_ROWS = 24;
 
@@ -75,20 +83,63 @@
         return buf;
       };
 
+      // Feeds the streaming disk. The emulator never waits on the network: a
+      // read of a block that has not arrived is deferred and retried, so all
+      // this has to do is notice what is wanted and go and get it.
+      //
+      // A fetch that fails is simply not provided -- the guest retries the
+      // read, the device asks for the block again, and we try once more. The
+      // in-flight set is what stops that retry from piling up duplicate
+      // requests for a block already on its way.
+      const startBlockPump = (riscv, url, total) => {
+        const inFlight = new Set();
+        const pump = () => {
+          for (const b of riscv.take_wanted_blocks()) {
+            if (inFlight.has(b)) continue;
+            inFlight.add(b);
+            const lo = b * BLOCK;
+            const hi = Math.min(lo + BLOCK - 1, total - 1);
+            fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } })
+              .then(r => {
+                if (r.status !== 206) {
+                  throw new Error(`expected 206 Partial Content, got ${r.status}`);
+                }
+                return r.arrayBuffer();
+              })
+              .then(a => riscv.provide_block(b, new Uint8Array(a)))
+              .catch(err => terminal.writeln(`\r\n[disk] block ${b}: ${err.message}`))
+              .finally(() => inFlight.delete(b));
+          }
+          setTimeout(pump, 0);
+        };
+        pump();
+      };
+
       const boot = async () => {
         const kernel = await fetchWithProgress(KERNEL, 'kernel');
-        const rootfs = await fetchWithProgress(ROOTFS, 'Debian root filesystem');
-        const [dtb, initrd] = await Promise.all([
+        const [dtb, initrd, head] = await Promise.all([
           fetch(DTB).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
           fetch(INITRD).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+          fetch(ROOTFS, { method: 'HEAD' }),
         ]);
         terminal.write('\r\x1b[2K');
+
+        // The guest needs a disk capacity at probe time, long before any block
+        // has been fetched, so the size has to come from the server up front.
+        const total = Number(head.headers.get('content-length'));
+        if (!total) {
+          throw new Error(`${ROOTFS}: no content-length, cannot size the disk`);
+        }
+        if (head.headers.get('accept-ranges') !== 'bytes') {
+          terminal.writeln('[disk] server does not advertise range requests');
+        }
 
         const riscv = WasmRiscv.new();
         riscv.load_image(kernel);
         riscv.setup_dtb(dtb);
         riscv.load_blob_at(initrd, INITRD_ADDR);
-        riscv.setup_filesystem(rootfs);
+        riscv.setup_streamed_filesystem(total, BLOCK);
+        startBlockPump(riscv, ROOTFS, total);
         new App(riscv, terminal, { debugModeEnabled: false }).run();
       };
 
