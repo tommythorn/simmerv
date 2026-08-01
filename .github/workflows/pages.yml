@@ -53,10 +53,11 @@ jobs:
       # stage them next to it. ~83 MB, well inside the 1 GB Pages limit.
       - name: Assemble site
         run: |
-          mkdir -p _site/linux/bbl
+          mkdir -p _site/linux/demo
           cp -r wasm/web/. _site/
-          cp linux/fw_payload.elf linux/rootfs.img linux/vmlinux _site/linux/
-          cp linux/bbl/bbl _site/linux/bbl/
+          cp linux/fw_payload.bin _site/linux/
+          cp linux/demo/demo.dtb linux/demo/initramfs.cpio linux/demo/rootfs.sqfs \
+             _site/linux/demo/
           du -sh _site
 
       - name: Upload Pages artifact

@@ -101,6 +101,24 @@ impl WasmRiscv {
     /// * `content` DTB content binary
     pub fn setup_dtb(&mut self, content: Vec<u8>) { self.emulator.setup_dtb(&content).unwrap(); }
 
+    /// Places a raw blob at a physical address. Used for an initramfs, whose
+    /// location the guest learns from the device tree's `linux,initrd-start`
+    /// and `linux,initrd-end` -- so this must agree with the DTB passed to
+    /// [`Self::setup_dtb`].
+    ///
+    /// `addr` is a `u32` rather than a `u64` because every address involved
+    /// sits in the low 4 GB, and it spares the JS caller a `BigInt`.
+    ///
+    /// # Arguments
+    /// * `content` Blob to place
+    /// * `addr` Physical address to place it at
+    pub fn load_blob_at(&mut self, content: Vec<u8>, addr: u32) {
+        self.emulator
+            .cpu
+            .get_mut_mmu()
+            .write_memory_at(u64::from(addr), &content);
+    }
+
     /// Runs program set by `load_image()`. The emulator won't stop forever
     /// unless [`riscv-tests`](https://github.com/riscv/riscv-tests) programs.
     /// The emulator stops if program is `riscv-tests` program and it finishes.

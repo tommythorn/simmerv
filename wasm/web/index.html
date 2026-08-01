@@ -22,8 +22,16 @@
 
       // Everything the demo boots, in one place. The Pages site root is this
       // directory and .github/workflows/pages.yml stages linux/ beside it.
-      const KERNEL = './linux/fw_payload.elf';
-      const ROOTFS = './linux/rootfs.img';
+      //
+      // The root filesystem is a read-only squashfs, so the initramfs mounts a
+      // tmpfs over it before handing off to systemd; the device tree is what
+      // tells the kernel where that initramfs was placed, which is why the
+      // address below has to match linux/demo/build.sh.
+      const KERNEL  = './linux/fw_payload.bin';
+      const DTB     = './linux/demo/demo.dtb';
+      const INITRD  = './linux/demo/initramfs.cpio';
+      const ROOTFS  = './linux/demo/rootfs.sqfs';
+      const INITRD_ADDR = 0x9e000000;
 
       const COLUMNS = 80;
       const MINIMUM_ROWS = 24;
@@ -69,11 +77,17 @@
 
       const boot = async () => {
         const kernel = await fetchWithProgress(KERNEL, 'kernel');
-        const rootfs = await fetchWithProgress(ROOTFS, 'root filesystem');
+        const rootfs = await fetchWithProgress(ROOTFS, 'Debian root filesystem');
+        const [dtb, initrd] = await Promise.all([
+          fetch(DTB).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+          fetch(INITRD).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+        ]);
         terminal.write('\r\x1b[2K');
 
         const riscv = WasmRiscv.new();
         riscv.load_image(kernel);
+        riscv.setup_dtb(dtb);
+        riscv.load_blob_at(initrd, INITRD_ADDR);
         riscv.setup_filesystem(rootfs);
         new App(riscv, terminal, { debugModeEnabled: false }).run();
       };
