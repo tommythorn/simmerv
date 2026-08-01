@@ -24,5 +24,3 @@ jobs:
       run: cargo test --all
     - name: Run riscv-tests
       run: ./run-riscv-tests.sh
-    - name: Build Wasm
-      run: cd wasm;./build.sh

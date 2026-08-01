@@ -2,7 +2,7 @@
 
 ## Online Demo
 
-[index.html](https://tommythorn.github.io/simmerv/wasm/web/index.html)
+[index.html](https://tommythorn.github.io/simmerv/)
 
 ## How to import in a web page
 

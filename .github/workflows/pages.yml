@@ -1,0 +1,70 @@
+name: Wasm demo
+
+# Builds the browser demo and, on main, publishes wasm/web as the GitHub Pages
+# site. The generated simmerv_wasm.js / simmerv_wasm_bg.wasm used to be checked
+# in and served straight off the main branch, which meant the live demo only
+# refreshed when someone remembered to run build.sh and commit -- it had drifted
+# 28 commits behind. Building here keeps it in step with main automatically.
+#
+# Requires the repository's Pages source to be "GitHub Actions" (build_type
+# "workflow"); with the older branch-served setting this deploy step fails.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Let a running deploy finish rather than cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      # wasm-pack and wasm-bindgen-cli take minutes to `cargo install`. build.sh
+      # skips the install when the binary is already present at the pinned
+      # version, so caching them turns that into a no-op.
+      - name: Cache wasm toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-pack
+            ~/.cargo/bin/wasm-bindgen
+          key: wasm-tools-${{ runner.os }}-${{ hashFiles('wasm/build.sh') }}
+
+      - name: Build
+        run: cd wasm && ./build.sh
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: wasm/web
+
+  # Pull requests build only: deploying from a PR would publish unreviewed
+  # code, and forks do not get the write permissions anyway.
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
