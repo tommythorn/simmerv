@@ -14,10 +14,16 @@ use crate::cpu::MIP_MSIP;
 use crate::cpu::MIP_MTIP;
 use std::ops::Range;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use wasm_timer::SystemTime as Instant;
+// wasm_timer::Instant re-exports std::time::Instant off wasm and wraps
+// performance.now() on it, so one import serves both targets.
+//
+// NOT wasm_timer::SystemTime: its elapsed() is implemented backwards --
+//     self.duration_since(SystemTime::now())   // self - now, always negative
+// -- so it returns Err for any instant in the past. Paired with a
+// `map_or(0, ..)` here that silently swallowed it, mtime read as 0 forever:
+// every printk timestamp was 0.000000 and the guest hung the moment it needed
+// a timer (mounting root), with no error anywhere to say so.
+use wasm_timer::Instant;
 
 /// Emulates CLINT known as Timer. Refer to the [specification](https://sifive.cdn.prismic.io/sifive%2Fc89f6e5a-cf9e-44c3-a3db-04420702dcc1_sifive+e31+manual+v19.08.pdf)
 /// for the detail.
@@ -51,11 +57,6 @@ impl Clint {
     ///
     /// # Arguments
     #[allow(clippy::cast_possible_truncation)]
-    #[cfg(target_arch = "wasm32")]
-    fn now_micros(&self) -> u64 { self.t0.elapsed().map_or(0, |t| t.as_micros() as u64) }
-
-    #[allow(clippy::cast_possible_truncation)]
-    #[cfg(not(target_arch = "wasm32"))]
     fn now_micros(&self) -> u64 { self.t0.elapsed().as_micros() as u64 }
 
     /// `Clint` can raise interrupt. If it does it rises a certain bit
