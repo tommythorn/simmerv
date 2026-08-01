@@ -9,7 +9,11 @@
       import App from './App.js';
       import init, { WasmRiscv } from "./simmerv_wasm.js";
 
-      const resourcePath = '../../';
+      // The Pages site root is this directory (see .github/workflows/pages.yml),
+      // which stages the linux/ assets alongside it. This used to be '../../'
+      // back when Pages served the whole repository and the demo reached up
+      // into the checked-in tree.
+      const resourcePath = './';
       const COLUMNS = 80;
       const MINIMUM_ROWS = 24;
 

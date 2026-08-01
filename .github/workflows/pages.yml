@@ -47,11 +47,23 @@ jobs:
       - name: Build
         run: cd wasm && ./build.sh
 
+      # The demo fetches its kernel and rootfs at run time (see resourcePath in
+      # index.html). They used to come from the checked-in tree because Pages
+      # served the whole repository; now the site is just this directory, so
+      # stage them next to it. ~83 MB, well inside the 1 GB Pages limit.
+      - name: Assemble site
+        run: |
+          mkdir -p _site/linux/bbl
+          cp -r wasm/web/. _site/
+          cp linux/fw_payload.elf linux/rootfs.img linux/vmlinux _site/linux/
+          cp linux/bbl/bbl _site/linux/bbl/
+          du -sh _site
+
       - name: Upload Pages artifact
         if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: wasm/web
+          path: _site
 
   # Pull requests build only: deploying from a PR would publish unreviewed
   # code, and forks do not get the write permissions anyway.
