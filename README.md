@@ -15,7 +15,7 @@ and off-the-shelf Linux distributions.
 You can run Linux on the emulator in your browser: [online demo is
 here](https://tommythorn.github.io/simmerv/)
 
-## Booting Ubuntu on Simmerv
+## Booting Ubuntu on Simmerv (sped up 50 X)
 
 ![Installing and running Ubuntu](screenshots/simmerv.gif)
 
