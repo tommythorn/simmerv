@@ -1,0 +1,12 @@
+# linux/.gitattributes sends *.cpio through Git LFS, which is right for the
+# multi-megabyte test images but wrong for this 6.6 KB initramfs: the Pages
+# workflow checks out without LFS, so an LFS-tracked file is staged as a
+# ~130-byte pointer. The kernel then reports
+#
+#   Initramfs unpacking failed: invalid magic at start of compressed archive
+#
+# and, finding no /init, falls through to prepare_namespace() and panics.
+#
+# Keep it a plain blob. Fetching LFS in CI instead would work, but would pull
+# every LFS object in the tree on every run.
+initramfs.cpio !filter !diff !merge -text

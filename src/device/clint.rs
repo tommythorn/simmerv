@@ -179,13 +179,18 @@ fn sanity_mtime() {
 
     assert!(clint.read_mtime() < 1000);
 
+    // mtime is wall-clock derived: write_mtime(v) stores v - now, and
+    // read_mtime() returns now + that. Any microsecond that elapses between
+    // the two shows up in the result, so these are bounds rather than
+    // equalities -- asserting == only passed when both calls landed inside the
+    // same microsecond.
     clint.write_mtime(2000);
-    assert_eq!(clint.read_mtime(), 2000);
+    assert!((2000..3000).contains(&clint.read_mtime()));
     clint.service(&mut dummy);
     assert!(clint.read_mtime() < 3000);
 
     clint.write_mtime(0);
-    assert_eq!(clint.read_mtime(), 0);
+    assert!(clint.read_mtime() < 1000);
     clint.service(&mut dummy);
     assert!(clint.read_mtime() < 1000);
 }
