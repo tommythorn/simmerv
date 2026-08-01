@@ -28,6 +28,16 @@ enum DiskStorage {
 
 #[allow(clippy::use_self)]
 impl DiskStorage {
+    /// Whether a read of `len` bytes at `offset` can be served right now.
+    ///
+    /// Every backend here is synchronous, so this is always true. It exists
+    /// for a backend that fetches blocks on demand (HTTP range requests from
+    /// the browser): such a backend returns false, starts the fetch, and the
+    /// request is retried by a later `service_disk` -- see the deferral in
+    /// `try_handle_disk_access`.
+    #[allow(clippy::unused_self)]
+    const fn is_resident(&self, _offset: usize, _len: usize) -> bool { true }
+
     fn sector_count(&self) -> u64 {
         match self {
             DiskStorage::Memory(v) => v.len() as u64 / SECTOR_SIZE as u64,
@@ -137,6 +147,10 @@ pub struct VirtioBlockDisk {
     pub status: u32,
     /// Number of pending disk requests.
     pub pending_requests: u32,
+    /// Test-only: make the next read report itself as not-yet-available, so
+    /// the deferral path can be exercised without a backend that fetches.
+    #[cfg(test)]
+    pub(crate) defer_reads: bool,
     storage: DiskStorage,
     pub block_size: u32,
     pub writeback: bool,
@@ -168,6 +182,8 @@ impl VirtioBlockDisk {
             interrupt_status: 0,
             status: 0,
             pending_requests: 0,
+            #[cfg(test)]
+            defer_reads: false,
             storage: DiskStorage::Memory(Vec::new()),
             block_size: DEFAULT_BLOCK_SIZE,
             writeback: false,
@@ -254,11 +270,27 @@ impl VirtioBlockDisk {
         if self.pending_requests > 0 {
             // avail->idx lives at queue_driver_addr + 2 (u16, wrapping counter).
             let avail_idx = dma_read_u16(memory, self.queue_driver_addr.wrapping_add(2));
+            let mut completed = 0u32;
             while self.used_ring_index != avail_idx {
-                self.handle_disk_access(memory);
+                if !self.try_handle_disk_access(memory) {
+                    // The backend does not have these bytes yet. Leave the
+                    // request in the available ring, do not advance
+                    // used_ring_index, and keep pending_requests non-zero so a
+                    // later service_disk retries it. The guest simply sees a
+                    // slow disk, which is what the virtqueue is built for.
+                    break;
+                }
+                completed += 1;
             }
-            self.interrupt_status |= 1;
-            self.pending_requests = 0;
+            // Only raise the used-buffer interrupt if something was actually
+            // put in the used ring; signalling on an empty pass would have the
+            // driver wake for nothing.
+            if completed > 0 {
+                self.interrupt_status |= 1;
+            }
+            if self.used_ring_index == avail_idx {
+                self.pending_requests = 0;
+            }
         }
         if self.is_interrupting() {
             Some(self.irq)
@@ -477,7 +509,14 @@ impl VirtioBlockDisk {
     //   desc[1]  data    buffer                                   RO or WO
     //   desc[2]  status  { status:u8 }                           WO
     #[allow(clippy::cast_possible_truncation)]
-    fn handle_disk_access(&mut self, memory: &mut [(Range<u64>, Vec<u8>)]) {
+    /// Completes the request at the head of the available ring, or returns
+    /// false without touching any device state if the backend cannot serve it
+    /// yet.
+    ///
+    /// The descriptor chain is walked in full before anything is performed:
+    /// walking is side-effect free, so collecting first is what makes the
+    /// deferral clean -- there is no half-finished request to unwind.
+    fn try_handle_disk_access(&mut self, memory: &mut [(Range<u64>, Vec<u8>)]) -> bool {
         let base_desc_addr = self.queue_desc_addr;
         let base_avail_addr = self.queue_driver_addr;
         let base_used_addr = self.queue_device_addr;
@@ -490,10 +529,13 @@ impl VirtioBlockDisk {
             .wrapping_add(avail_ring_idx * 2);
         let desc_head_index = u64::from(dma_read_u16(memory, desc_index_addr)) % queue_size;
 
-        // Walk the descriptor chain (expected length: 3).
+        // Walk the descriptor chain (expected length: 3), recording what it
+        // asks for; nothing is performed until the whole chain is known.
         let mut blk_sector: usize = 0;
         let mut desc_num = 0u32;
         let mut desc_next = desc_head_index;
+        let mut data: Option<(u64, usize, bool)> = None;
+        let mut status: Option<u64> = None;
 
         loop {
             let desc_elem_addr = base_desc_addr.wrapping_add(16 * desc_next);
@@ -511,21 +553,11 @@ impl VirtioBlockDisk {
                 }
                 1 => {
                     // Data buffer: WRITE flag means device writes here (read from disk).
-                    if desc_flags & VIRTQ_DESC_F_WRITE != 0 {
-                        self.transfer_from_disk(
-                            memory,
-                            desc_addr,
-                            blk_sector * SECTOR_SIZE,
-                            desc_len as usize,
-                        );
-                    } else {
-                        self.transfer_to_disk(
-                            memory,
-                            desc_addr,
-                            blk_sector * SECTOR_SIZE,
-                            desc_len as usize,
-                        );
-                    }
+                    data = Some((
+                        desc_addr,
+                        desc_len as usize,
+                        desc_flags & VIRTQ_DESC_F_WRITE != 0,
+                    ));
                 }
                 2 => {
                     // Status byte: 0 = VIRTIO_BLK_S_OK
@@ -534,9 +566,7 @@ impl VirtioBlockDisk {
                         "VirtIO: status descriptor must be device-writable"
                     );
                     assert!(desc_len == 1, "VirtIO: status descriptor length must be 1");
-                    if !dma_write_u8(memory, desc_addr, 0) {
-                        log::warn!("VirtIO: status write outside RAM — continuing");
-                    }
+                    status = Some(desc_addr);
                 }
                 _ => {}
             }
@@ -551,6 +581,32 @@ impl VirtioBlockDisk {
             desc_num == 3,
             "VirtIO: expected 3-descriptor chain, got {desc_num}"
         );
+
+        // Bail out before any state changes if this is a read the backend
+        // cannot satisfy yet. Nothing has been written, used_ring_index is
+        // untouched, so the caller can simply try again later.
+        #[cfg(test)]
+        if self.defer_reads && matches!(data, Some((_, _, true))) {
+            return false;
+        }
+        if let Some((_, len, true)) = data
+            && !self.storage.is_resident(blk_sector * SECTOR_SIZE, len)
+        {
+            return false;
+        }
+
+        if let Some((desc_addr, len, is_read)) = data {
+            if is_read {
+                self.transfer_from_disk(memory, desc_addr, blk_sector * SECTOR_SIZE, len);
+            } else {
+                self.transfer_to_disk(memory, desc_addr, blk_sector * SECTOR_SIZE, len);
+            }
+        }
+        if let Some(status_addr) = status
+            && !dma_write_u8(memory, status_addr, 0)
+        {
+            log::warn!("VirtIO: status write outside RAM — continuing");
+        }
 
         // Update the used ring.
         let used_elem_addr = base_used_addr
@@ -570,6 +626,8 @@ impl VirtioBlockDisk {
         } else {
             log::warn!("VirtIO: used-idx write outside RAM — continuing");
         }
+
+        true
     }
 }
 
@@ -671,5 +729,131 @@ impl MemoryMapped for VirtioBlockDisk {
         MemoryMappedInfo {
             name: "VirtIO Block".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod deferral_tests {
+    use super::*;
+
+    const DESC: u64 = 0x8000_1000;
+    const AVAIL: u64 = 0x8000_2000;
+    const USED: u64 = 0x8000_3000;
+    const HDR: u64 = 0x8000_0100;
+    const DATA: u64 = 0x8000_0200;
+    const STATUS: u64 = 0x8000_0300;
+    const QSIZE: u64 = 8;
+
+    fn le(memory: &mut [(Range<u64>, Vec<u8>)], pa: u64, bytes: &[u8]) {
+        dma_slice(memory, pa, bytes.len())
+            .expect("test address outside RAM")
+            .copy_from_slice(bytes);
+    }
+
+    /// A disk with one queued 512-byte read of sector 0.
+    fn queued_read() -> (VirtioBlockDisk, Vec<(Range<u64>, Vec<u8>)>) {
+        let mut disk = VirtioBlockDisk::new_with_contents(vec![0xAB; 4096], 7);
+        for (off, val) in [
+            (0x070u64, 0x0fu8), // STATUS: DRIVER_OK
+            (0x080, 0x00),
+            (0x081, 0x10),
+            (0x082, 0x00),
+            (0x083, 0x80), // desc
+            (0x090, 0x00),
+            (0x091, 0x20),
+            (0x092, 0x00),
+            (0x093, 0x80), // avail
+            (0x0a0, 0x00),
+            (0x0a1, 0x30),
+            (0x0a2, 0x00),
+            (0x0a3, 0x80),        // used
+            (0x038, QSIZE as u8), // QueueNum
+            (0x044, 1),           // QueueReady
+        ] {
+            disk.store(off, val);
+        }
+
+        let mut memory = vec![(0x8000_0000u64..0x8000_4000u64, vec![0u8; 0x4000])];
+        let m = &mut memory[..];
+        // header: type=IN(0), reserved, sector=0
+        le(m, HDR, &[0u8; 16]);
+        // desc[0] header -> desc[1] data -> desc[2] status
+        le(m, DESC, &HDR.to_le_bytes());
+        le(m, DESC + 8, &16u32.to_le_bytes());
+        le(m, DESC + 12, &VIRTQ_DESC_F_NEXT.to_le_bytes());
+        le(m, DESC + 14, &1u16.to_le_bytes());
+        le(m, DESC + 16, &DATA.to_le_bytes());
+        le(m, DESC + 24, &512u32.to_le_bytes());
+        le(
+            m,
+            DESC + 28,
+            &(VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE).to_le_bytes(),
+        );
+        le(m, DESC + 30, &2u16.to_le_bytes());
+        le(m, DESC + 32, &STATUS.to_le_bytes());
+        le(m, DESC + 40, &1u32.to_le_bytes());
+        le(m, DESC + 44, &VIRTQ_DESC_F_WRITE.to_le_bytes());
+        le(m, DESC + 46, &0u16.to_le_bytes());
+        // avail: idx=1, ring[0]=desc chain head 0
+        le(m, AVAIL + 2, &1u16.to_le_bytes());
+        le(m, AVAIL + 4, &0u16.to_le_bytes());
+        // status byte starts non-zero so we can see it written
+        le(m, STATUS, &[0xFF]);
+
+        // QueueNotify is a 32-bit register; the device only counts the request
+        // when the final byte lands, so write all four.
+        for off in 0x050..=0x053 {
+            disk.store(off, 0);
+        }
+        (disk, memory)
+    }
+
+    /// A backend that cannot serve the read yet must leave the request exactly
+    /// where it was: nothing in the used ring, no interrupt, still pending.
+    #[test]
+    fn deferred_read_leaves_the_request_queued() {
+        let (mut disk, mut memory) = queued_read();
+        disk.defer_reads = true;
+
+        assert_eq!(disk.service_disk(&mut memory), None, "must not interrupt");
+        assert_eq!(disk.used_ring_index, 0, "used ring must not advance");
+        assert!(disk.pending_requests > 0, "request must stay queued");
+        assert_eq!(
+            dma_slice(&mut memory, STATUS, 1).unwrap()[0],
+            0xFF,
+            "status must not be written for a deferred request"
+        );
+        assert_eq!(
+            dma_slice(&mut memory, DATA, 1).unwrap()[0],
+            0x00,
+            "no data may be transferred for a deferred request"
+        );
+    }
+
+    /// ...and once the bytes arrive, the same request completes normally.
+    #[test]
+    fn deferred_read_completes_on_retry() {
+        let (mut disk, mut memory) = queued_read();
+        disk.defer_reads = true;
+        assert_eq!(disk.service_disk(&mut memory), None);
+
+        disk.defer_reads = false;
+        assert_eq!(
+            disk.service_disk(&mut memory),
+            Some(7),
+            "should interrupt now"
+        );
+        assert_eq!(disk.used_ring_index, 1, "used ring should advance");
+        assert_eq!(disk.pending_requests, 0, "queue should be drained");
+        assert_eq!(
+            dma_slice(&mut memory, STATUS, 1).unwrap()[0],
+            0,
+            "VIRTIO_BLK_S_OK"
+        );
+        assert_eq!(
+            dma_slice(&mut memory, DATA, 4).unwrap(),
+            &[0xAB; 4],
+            "disk contents should land in the data buffer"
+        );
     }
 }
