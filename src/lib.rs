@@ -308,16 +308,16 @@ impl Emulator {
 
     /// Enable (or disable) the V vector extension.
     ///
-    /// This is a machine-construction switch: it gates vector instruction
-    /// decoding, the `misa` V bit and the vector CSRs. When enabling it we also
-    /// swap in the vector build of the device tree (`dtb-v.dtb`), whose cpu
-    /// node advertises V via both `riscv,isa` and `riscv,isa-extensions` so
-    /// a modern guest kernel enables vector. The vector DTB differs in
-    /// size, so it is re-placed at the top of RAM and its memory node
-    /// re-patched.
+    /// This is a machine-construction switch: it gates decoding of every
+    /// RVA23-only encoding, the `misa` V bit and the vector CSRs. When enabling
+    /// it we also swap in the RVA23 build of the device tree (`dtb-v.dtb`),
+    /// whose cpu node advertises the profile via both `riscv,isa` and
+    /// `riscv,isa-extensions` so a modern guest kernel enables vector and
+    /// reports the rest through hwprobe. The RVA23 DTB differs in size, so it
+    /// is re-placed at the top of RAM and its memory node re-patched.
     #[allow(clippy::cast_possible_truncation, clippy::missing_panics_doc)]
-    pub fn set_vector_enabled(&mut self, on: bool) {
-        self.cpu.set_vector_enabled(on);
+    pub fn set_rva23_enabled(&mut self, on: bool) {
+        self.cpu.set_rva23_enabled(on);
         if !on {
             return;
         }
@@ -380,7 +380,7 @@ impl Emulator {
                 print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
                 if let Ok(insn) = insn_word {
                     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                    let uop = cpu::decode(insn_addr, insn as u32, self.cpu.vector_enabled);
+                    let uop = cpu::decode(insn_addr, insn as u32, self.cpu.rva23_enabled);
                     if !uop.rd.is_x0_dest() && !exceptional {
                         print!("{:16x}", self.cpu.read_register(uop.rd));
                         if self.cpu.fflags != fflags {
@@ -563,7 +563,7 @@ impl Emulator {
             print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
             if let Ok(insn) = insn_word {
                 #[allow(clippy::cast_sign_loss)]
-                let uop = cpu::decode(insn_addr, insn as u32, self.cpu.vector_enabled);
+                let uop = cpu::decode(insn_addr, insn as u32, self.cpu.rva23_enabled);
                 if !uop.rd.is_x0_dest() && !exceptional {
                     print!("{:16x}", self.cpu.read_register(uop.rd));
                     if self.cpu.fflags != fflags {

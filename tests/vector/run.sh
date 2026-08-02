@@ -20,20 +20,33 @@ python3 "$here/gen_vtest.py" > "$out/vtest.S"
 echo "== assembling =="
 # The linker script puts _start at exactly 0x80000000 with no ELF headers in
 # the loaded image, which is what both QEMU's -kernel and simmerv expect.
-$CC -march=rv64gcv_zvfh -mabi=lp64d -nostdlib -nostartfiles -static \
+# Zcb's c.sext.b/c.zext.h/c.zext.w are only assemblable with Zbb/Zba in the
+# arch string, since they abbreviate instructions from those extensions.
+#
+# A failure here must be fatal: `|| true` on this step once let a stale
+# vtest.elf survive an assembly error, and the run then "passed" by comparing
+# two simulators on the *previous* build.
+rm -f "$out/vtest.elf"
+if ! $CC -march=rv64gcv_zvfh_zba_zbb_zbs_zcb_zfa_zacas_zabha_zvbb_zvkb_zimop_zcmop_zawrs \
+    -mabi=lp64d -nostdlib -nostartfiles -static \
     -Wl,-T,"$here/link.ld" -Wl,--no-warn-rwx-segments \
-    -o "$out/vtest.elf" "$out/vtest.S" 2>&1 | grep -v 'build-id' || true
+    -o "$out/vtest.elf" "$out/vtest.S" 2>"$out/as.err"; then
+    grep -v 'build-id' "$out/as.err" >&2 || true
+    echo "FAIL: assembling vtest.S" >&2
+    exit 1
+fi
+grep -v 'build-id' "$out/as.err" >&2 || true
 
 echo "== qemu =="
 # Never -nographic here: it takes over the controlling terminal.
-timeout 900 "$QEMU" -M virt -cpu rv64,v=true,vlen=128,elen=64,zvfh=true \
+timeout 900 "$QEMU" -M virt -cpu rv64,v=true,vlen=128,elen=64,zvfh=true,zcb=true,zfa=true,zacas=true,zabha=true,zvbb=true,zvkb=true,zimop=true,zcmop=true,zawrs=true \
     -bios none -kernel "$out/vtest.elf" -display none -monitor none \
     -serial "file:$out/qemu.txt" < /dev/null 2>"$out/qemu.err" || true
 grep -c '' "$out/qemu.txt" | sed 's/^/qemu lines: /'
 
 echo "== simmerv =="
 (cd "$root" && cargo build --release -q)
-timeout 900 "$root/target/release/simmerv_cli" -V -n "$out/vtest.elf" \
+timeout 900 "$root/target/release/simmerv_cli" --rva23 -n "$out/vtest.elf" \
     > "$out/simmerv.txt" 2>"$out/simmerv.err" < /dev/null || true
 grep -c '' "$out/simmerv.txt" | sed 's/^/simmerv lines: /'
 

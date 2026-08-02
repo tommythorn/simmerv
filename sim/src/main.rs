@@ -87,9 +87,10 @@ struct Args {
     #[argh(option)]
     fw_dynamic: Option<String>,
 
-    /// enable the V vector extension (RVV 1.0, VLEN=128)
-    #[argh(switch, short = 'V')]
-    vector: bool,
+    /// build an RVA23 machine: V (RVV 1.0, VLEN=128) plus Zcb, Zimop, Zcmop,
+    /// Zfa, Zawrs, Zacas, Zabha, Zvbb and Zvkt
+    #[argh(switch)]
+    rva23: bool,
 
     /// uop cache mode: "direct" or "skew" (default: skew)
     #[argh(option)]
@@ -185,8 +186,8 @@ fn main() -> anyhow::Result<()> {
     emulator.exit_flag = Arc::clone(&exit_flag);
     emulator.snapshot_flag = Arc::clone(&snapshot_flag);
     emulator.verbose = Arc::clone(&verbose_flag);
-    if args.vector {
-        emulator.set_vector_enabled(true);
+    if args.rva23 {
+        emulator.set_rva23_enabled(true);
     }
     emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
     emulator.tracing_flag = Arc::clone(&tracing_flag);

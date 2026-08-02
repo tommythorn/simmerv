@@ -117,8 +117,18 @@
                         compatible = "riscv";
                         riscv,isa-base = "rv64i";
 #ifdef VECTOR
-                        riscv,isa = "rv64imafdcv";
-                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b";
+                        /*
+                         * The --rva23 machine.  Beyond V this advertises the
+                         * RVA23 members we implement, plus the bitmanip and
+                         * cache-op extensions the decoder has always had but
+                         * the tree never named.
+                         * Zvkb is a strict subset of Zvbb, and Zvkt is a
+                         * data-independent-latency guarantee with no
+                         * instructions, which a functional model meets
+                         * trivially.
+                         */
+                        riscv,isa = "rv64imafdcv_zicsr_zifencei_zicntr_zihpm_zicond_zicbom_zicbop_zicboz_zba_zbb_zbc_zbs_zca_zcb_zcd_zfa_zfhmin_zimop_zcmop_zawrs_zacas_zabha_zvbb_zvkb_zvkt";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "zicond", "zicbom", "zicbop", "zicboz", "zba", "zbb", "zbc", "zbs", "zca", "zcb", "zcd", "zfa", "zfhmin", "zimop", "zcmop", "zawrs", "zacas", "zabha", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b", "zvbb", "zvkb", "zvkt";
 #else
                         riscv,isa = "rv64imafdc";
                         riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf";

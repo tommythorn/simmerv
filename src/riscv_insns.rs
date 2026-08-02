@@ -6,7 +6,7 @@
 /// `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Svinval_Zicbom_Zicbop_Zicboz_Zfhmin`
 /// instructions, useful for deriving decoders etc.  There is simple utility
 /// function that generates the corresponding enum.
-pub const INSTRUCTIONS: [(u32, u32, &str); 282] = [
+pub const INSTRUCTIONS: [(u32, u32, &str); 337] = [
     (0xffff, 0x0000, "c.unimp"), // is a sub-pattern of c.addi4spn
     (0xe003, 0x0000, "c.addi4spn"),
     (0xe003, 0x2000, "c.fld"),
@@ -313,6 +313,78 @@ pub const INSTRUCTIONS: [(u32, u32, &str); 282] = [
     (0x0000707f, 0x00004057, "vop.ivx"),
     (0x0000707f, 0x00005057, "vop.fvf"),
     (0x0000707f, 0x00006057, "vop.mvx"),
+    // ---------------------------------------------------------------------
+    // RVA23-only encodings.  These decode to Op::Unimp unless the machine was
+    // built with --rva23 (see new_decoder::Decoder::rva23).
+    //
+    // Zcb: compressed byte/halfword memory ops and short ALU forms.  Every one
+    // is architecturally identical to an existing 32-bit instruction, so they
+    // decode straight to that uop and need no new execution path.
+    (0xfc03, 0x8000, "c.lbu"),
+    (0xfc43, 0x8400, "c.lhu"),
+    (0xfc43, 0x8440, "c.lh"),
+    (0xfc03, 0x8800, "c.sb"),
+    (0xfc43, 0x8c00, "c.sh"),
+    (0xfc63, 0x9c41, "c.mul"),
+    (0xfc7f, 0x9c61, "c.zext.b"),
+    (0xfc7f, 0x9c65, "c.sext.b"),
+    (0xfc7f, 0x9c69, "c.zext.h"),
+    (0xfc7f, 0x9c6d, "c.sext.h"),
+    (0xfc7f, 0x9c71, "c.zext.w"),
+    (0xfc7f, 0x9c75, "c.not"),
+    // Zcmop: c.mop.1/3/../15, all architectural no-ops.  A sub-pattern of
+    // c.lui, but the longer mask sorts it ahead of c.lui in the decoder.
+    (0xf8ff, 0x6081, "c.mop"),
+    // Zimop: mop.r.0..31 / mop.rr.0..7 simply write 0 to rd.  SYSTEM funct3=100
+    // is otherwise unused.  mop.r has bit25=0, mop.rr bit25=1, so they do not
+    // overlap each other.
+    (0xb3c0707f, 0x81c04073, "mop.r"),
+    (0xb200707f, 0x82004073, "mop.rr"),
+    // Zawrs: wrs.nto/wrs.sto may always retire immediately, so both are nops.
+    (0xffffffff, 0x00d00073, "wrs.nto"),
+    (0xffffffff, 0x01d00073, "wrs.sto"),
+    // Zacas: compare-and-swap AMOs (funct5=00101).
+    (0xf800707f, 0x2800202f, "amocas.w"),
+    (0xf800707f, 0x2800302f, "amocas.d"),
+    (0xf800707f, 0x2800402f, "amocas.q"),
+    // Zabha: byte and halfword forms of the existing AMOs, plus amocas.b/h.
+    (0xf800707f, 0x0800002f, "amoswap.b"),
+    (0xf800707f, 0x0000002f, "amoadd.b"),
+    (0xf800707f, 0x2000002f, "amoxor.b"),
+    (0xf800707f, 0x6000002f, "amoand.b"),
+    (0xf800707f, 0x4000002f, "amoor.b"),
+    (0xf800707f, 0x8000002f, "amomin.b"),
+    (0xf800707f, 0xa000002f, "amomax.b"),
+    (0xf800707f, 0xc000002f, "amominu.b"),
+    (0xf800707f, 0xe000002f, "amomaxu.b"),
+    (0xf800707f, 0x2800002f, "amocas.b"),
+    (0xf800707f, 0x0800102f, "amoswap.h"),
+    (0xf800707f, 0x0000102f, "amoadd.h"),
+    (0xf800707f, 0x2000102f, "amoxor.h"),
+    (0xf800707f, 0x6000102f, "amoand.h"),
+    (0xf800707f, 0x4000102f, "amoor.h"),
+    (0xf800707f, 0x8000102f, "amomin.h"),
+    (0xf800707f, 0xa000102f, "amomax.h"),
+    (0xf800707f, 0xc000102f, "amominu.h"),
+    (0xf800707f, 0xe000102f, "amomaxu.h"),
+    (0xf800707f, 0x2800102f, "amocas.h"),
+    // Zfa.  The half-precision members (fli.h, ...) need full Zfh, which RVA23
+    // does not mandate and we do not implement, so they are left out.
+    (0xfff0707f, 0xf0100053, "fli.s"),
+    (0xfff0707f, 0xf2100053, "fli.d"),
+    (0xfe00707f, 0x28002053, "fminm.s"),
+    (0xfe00707f, 0x28003053, "fmaxm.s"),
+    (0xfe00707f, 0x2a002053, "fminm.d"),
+    (0xfe00707f, 0x2a003053, "fmaxm.d"),
+    (0xfff0007f, 0x40400053, "fround.s"),
+    (0xfff0007f, 0x40500053, "froundnx.s"),
+    (0xfff0007f, 0x42400053, "fround.d"),
+    (0xfff0007f, 0x42500053, "froundnx.d"),
+    (0xfff0707f, 0xc2801053, "fcvtmod.w.d"),
+    (0xfe00707f, 0xa0004053, "fleq.s"),
+    (0xfe00707f, 0xa0005053, "fltq.s"),
+    (0xfe00707f, 0xa2004053, "fleq.d"),
+    (0xfe00707f, 0xa2005053, "fltq.d"),
     (0xffffffff, 0x00100073, "end"), // sentinel — should match (overlap ebreak)
 ];
 
@@ -1596,6 +1668,226 @@ mod test {
         }
         fn vop_mvx(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
             s.s = "vop_mvx";
+            0
+        }
+        fn c_lbu(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_lbu";
+            0
+        }
+        fn c_lhu(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_lhu";
+            0
+        }
+        fn c_lh(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_lh";
+            0
+        }
+        fn c_sb(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_sb";
+            0
+        }
+        fn c_sh(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_sh";
+            0
+        }
+        fn c_mul(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_mul";
+            0
+        }
+        fn c_zext_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_zext_b";
+            0
+        }
+        fn c_sext_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_sext_b";
+            0
+        }
+        fn c_zext_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_zext_h";
+            0
+        }
+        fn c_sext_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_sext_h";
+            0
+        }
+        fn c_zext_w(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_zext_w";
+            0
+        }
+        fn c_not(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_not";
+            0
+        }
+        fn c_mop(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "c_mop";
+            0
+        }
+        fn mop_r(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "mop_r";
+            0
+        }
+        fn mop_rr(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "mop_rr";
+            0
+        }
+        fn wrs_nto(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "wrs_nto";
+            0
+        }
+        fn wrs_sto(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "wrs_sto";
+            0
+        }
+        fn amocas_w(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amocas_w";
+            0
+        }
+        fn amocas_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amocas_d";
+            0
+        }
+        fn amocas_q(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amocas_q";
+            0
+        }
+        fn amoswap_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoswap_b";
+            0
+        }
+        fn amoadd_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoadd_b";
+            0
+        }
+        fn amoxor_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoxor_b";
+            0
+        }
+        fn amoand_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoand_b";
+            0
+        }
+        fn amoor_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoor_b";
+            0
+        }
+        fn amomin_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amomin_b";
+            0
+        }
+        fn amomax_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amomax_b";
+            0
+        }
+        fn amominu_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amominu_b";
+            0
+        }
+        fn amomaxu_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amomaxu_b";
+            0
+        }
+        fn amocas_b(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amocas_b";
+            0
+        }
+        fn amoswap_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoswap_h";
+            0
+        }
+        fn amoadd_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoadd_h";
+            0
+        }
+        fn amoxor_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoxor_h";
+            0
+        }
+        fn amoand_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoand_h";
+            0
+        }
+        fn amoor_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amoor_h";
+            0
+        }
+        fn amomin_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amomin_h";
+            0
+        }
+        fn amomax_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amomax_h";
+            0
+        }
+        fn amominu_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amominu_h";
+            0
+        }
+        fn amomaxu_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amomaxu_h";
+            0
+        }
+        fn amocas_h(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "amocas_h";
+            0
+        }
+        fn fli_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fli_s";
+            0
+        }
+        fn fli_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fli_d";
+            0
+        }
+        fn fminm_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fminm_s";
+            0
+        }
+        fn fmaxm_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fmaxm_s";
+            0
+        }
+        fn fminm_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fminm_d";
+            0
+        }
+        fn fmaxm_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fmaxm_d";
+            0
+        }
+        fn fround_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fround_s";
+            0
+        }
+        fn froundnx_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "froundnx_s";
+            0
+        }
+        fn fround_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fround_d";
+            0
+        }
+        fn froundnx_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "froundnx_d";
+            0
+        }
+        fn fcvtmod_w_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fcvtmod_w_d";
+            0
+        }
+        fn fleq_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fleq_s";
+            0
+        }
+        fn fltq_s(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fltq_s";
+            0
+        }
+        fn fleq_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fleq_d";
+            0
+        }
+        fn fltq_d(_a: u64, _w: u32, s: &mut Self::Context) -> usize {
+            s.s = "fltq_d";
             0
         }
         fn unimp(_a: u64, _w: u32, s: &mut Self::Context) -> usize {

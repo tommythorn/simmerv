@@ -23,7 +23,9 @@ here](https://tommythorn.github.io/simmerv/)
 
 - Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Svpbmt_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
   (CLINT, PLIC, NS16550A UART, virtio block device, and VirtIO ethernet)
-- Optional `V` vector extension (RVV 1.0, `VLEN`=128, `ELEN`=64), enabled with `-V`
+- Optional RVA23 mode, enabled with `--rva23`: the `V` vector extension
+  (RVV 1.0, `VLEN`=128, `ELEN`=64) plus Zcb, Zimop, Zcmop, Zfa, Zawrs, Zacas,
+  Zabha, Zvbb and Zvkt.  Boots the RVA23 port of Ubuntu 26.04.
 - Targets native and WASM
 - Snapshots
 - Speedometer
@@ -70,10 +72,23 @@ The emulator supports all instructions listed above.
       model with no data-dependent timing
 - [x] Zicond, Zfhmin, Zicbom/z/p, Svinval, Svnapot, Svpbmt, Sstc, Svade
       (inherited from RVA22)
-- [ ] Zcb, Zcmop, Zimop — the newer compressed and may-be-operation encodings
-- [ ] Zfa — additional scalar floating-point instructions
-- [ ] Zvbb — vector basic bit manipulation
-- [ ] Zawrs — wait-on-reservation-set
+- [x] Zcb — the newer compressed encodings.  Each one abbreviates an
+      instruction the emulator already had, so all twelve decode straight to
+      that uop rather than to a parallel execution path.
+- [x] Zimop, Zcmop — may-be-operations.  `mop.r.n` / `mop.rr.n` write zero to
+      `rd`; `c.mop.n` changes no architectural state at all.
+- [x] Zfa — `fli` (both constant tables), `fminm`/`fmaxm`, the quiet compares
+      `fleq`/`fltq`, `fround`/`froundnx` and `fcvtmod.w.d`.  The
+      half-precision members are omitted: they need full `Zfh`, which RVA23
+      does not mandate and this emulator does not implement.
+- [x] Zvbb — vector basic bit manipulation (`vandn`, `vbrev`, `vbrev8`,
+      `vrev8`, `vclz`, `vctz`, `vcpop`, `vrol`, `vror`, `vwsll`), and with it
+      `Zvkb`, which is a strict subset
+- [x] Zawrs — wait-on-reservation-set.  Both forms may terminate the wait
+      immediately and for any reason, so both retire as no-ops.
+- [x] Zacas — `amocas.b/h/w/d/q`, including the quadword form over even/odd
+      register pairs
+- [x] Zabha — byte and halfword forms of every AMO
 - [ ] Zihintntl — non-temporal locality hints
 - [ ] Supm / Ssnpm / Smnpm — pointer masking
 - [ ] Sscofpmf — count-overflow interrupts (the CSR reads exist, no overflows
@@ -83,17 +98,35 @@ The emulator supports all instructions listed above.
 - [ ] Sv48, Sv57 in `satp` (the page-table walker handles them, but `satp`
       writes currently accept only Bare and Sv39)
 
-The vector extension is off by default and enabled with `-V`, so that a run
-without the flag still models a hart that traps every vector encoding.
+`V`, Zcb, Zimop, Zcmop, Zfa, Zvbb, Zawrs, Zacas and Zabha are off by default and
+enabled together by `--rva23`, so that a run without the flag still models a hart
+that traps every one of those encodings.  (The entries inherited from RVA22 are
+always on.)  RVA23 mandates `V`, so one switch covers the lot: it gates
+instruction decoding, the `misa` `V` bit and the vector CSRs, and swaps in a
+device tree whose cpu node advertises the profile.
 
 ```sh
-$ cargo r -r -- -V -n my-vector-program.elf
+$ cargo r -r -- --rva23 -n my-vector-program.elf
 ```
 
-`tests/vector/run.sh` builds a bare-metal RVV exerciser — ~1440 instruction
-cases across every SEW, LMUL, rounding mode and addressing form — and diffs
-simmerv's transcript against QEMU's `virt` machine, which shares simmerv's
-memory map.  All 1437 transcript lines currently match exactly.
+To boot the RVA23 port of Ubuntu, the guest kernel must also have been built
+with `CONFIG_RISCV_ISA_V=y` — without it the kernel drops `v` from the ISA it
+parses out of the device tree, and an RVA23 userland dies on the first vector
+instruction in `ld.so`, because the profile lets glibc emit vector code with no
+scalar fallback.  `riscv: base ISA extensions` in the boot log is the thing to
+check: it should read `acdfimv`.
+
+```sh
+$ cargo r -r -- --rva23 -f ubuntu-26.04-preinstalled-server-riscv64.img \
+      fw_payload.bin,0x80000000
+```
+
+`tests/vector/run.sh` builds a bare-metal exerciser — 1994 instruction cases
+across every SEW, LMUL, rounding mode and addressing form, covering the RVA23
+additions as well as base RVV — and diffs simmerv's transcript against QEMU's
+`virt` machine, which shares simmerv's memory map.  All 1994 transcript lines
+currently match exactly, with three traps on both sides: `vwsll` at `SEW`=64,
+where the widened element exceeds `ELEN` and the encoding must be illegal.
 
 One deliberate difference: simmerv enforces `vill`, register-group alignment,
 EMUL range and the "masked instruction may not write v0" rule, but not the

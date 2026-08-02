@@ -318,6 +318,106 @@ t("vadd.vv v1, v2, v3", avl=0)
 t("vadd.vv v1, v2, v3", avl=64)
 t("vredsum.vs v1, v2, v3", avl=0)
 
+# ── RVA23 additions ──────────────────────────────────────────────────────────
+# Zvbb is plain vector work, so the dump picks it up for free.  The scalar
+# extensions below land their result in the scratch area (which is dumped) and
+# are covered for their fflags too, so they ride in the same harness.
+
+for sew in (8, 16, 32, 64):
+    t("vandn.vv v4, v8, v12", sew=sew)
+    t("vandn.vx v4, v8, a2", sew=sew)
+    t("vandn.vv v4, v8, v12, v0.t", sew=sew)
+    t("vbrev.v v4, v8", sew=sew)
+    t("vbrev8.v v4, v8", sew=sew)
+    t("vrev8.v v4, v8", sew=sew)
+    t("vclz.v v4, v8", sew=sew)
+    t("vctz.v v4, v8", sew=sew)
+    t("vcpop.v v4, v8", sew=sew)
+    t("vcpop.v v4, v8, v0.t", sew=sew)
+    t("vrol.vv v4, v8, v12", sew=sew)
+    t("vrol.vx v4, v8, a2", sew=sew)
+    t("vror.vv v4, v8, v12", sew=sew)
+    t("vror.vx v4, v8, a2", sew=sew)
+    t("vror.vi v4, v8, 3", sew=sew)
+    # A .vi rotate of 33 only encodes because funct6[0] carries the immediate's
+    # top bit -- the case that distinguishes vror.vi from vrol.
+    t("vror.vi v4, v8, 33", sew=sew)
+    # At SEW=64 the widened element exceeds ELEN, so vwsll must trap; the
+    # handler prints mcause, so agreeing on the trap is part of the diff.
+    t("vwsll.vv v4, v8, v12", sew=sew)
+    t("vwsll.vx v4, v8, a2", sew=sew)
+    t("vwsll.vi v4, v8, 5", sew=sew)
+
+# Zfa.  fli materialises the operands, so the constant table is itself covered.
+FLI_CONSTANTS = [
+    "-1.0", "min", "0x1p-16", "0x1p-15", "0x1p-8", "0x1p-7", "0.0625", "0.125",
+    "0.25", "0.3125", "0.375", "0.4375", "0.5", "0.625", "0.75", "0.875",
+    "1.0", "1.25", "1.5", "1.75", "2.0", "2.5", "3.0", "4.0", "8.0", "16.0",
+    "128.0", "256.0", "32768.0", "65536.0", "inf", "nan",
+]
+for v in FLI_CONSTANTS:
+    t(f"fli.s ft1, {v}\n\tfsw ft1, 128(a1)")
+    t(f"fli.d ft1, {v}\n\tfsd ft1, 136(a1)")
+
+# NaN and infinity are where fminm/fmaxm and the quiet compares differ from the
+# ordinary ones, so pair them against normal values in both operand positions.
+for a in ("1.5", "-1.0", "nan", "inf", "0.3125"):
+    for b in ("2.5", "nan", "-1.0", "inf"):
+        for f in ("fminm", "fmaxm"):
+            t(f"fli.s ft1, {a}\n\tfli.s ft2, {b}\n\t{f}.s ft3, ft1, ft2\n\tfsw ft3, 128(a1)")
+            t(f"fli.d ft1, {a}\n\tfli.d ft2, {b}\n\t{f}.d ft3, ft1, ft2\n\tfsd ft3, 136(a1)")
+        for f in ("fleq", "fltq"):
+            t(f"fli.s ft1, {a}\n\tfli.s ft2, {b}\n\t{f}.s a3, ft1, ft2\n\tsd a3, 128(a1)")
+            t(f"fli.d ft1, {a}\n\tfli.d ft2, {b}\n\t{f}.d a3, ft1, ft2\n\tsd a3, 136(a1)")
+
+# fround must not raise inexact where froundnx must, so both run over every
+# rounding mode and over values that do and do not already sit on an integer.
+for v in ("0.3125", "1.25", "2.5", "-1.0", "0.5", "inf", "nan", "65536.0"):
+    for rm in ("rne", "rtz", "rdn", "rup", "rmm", "dyn"):
+        t(f"fli.s ft1, {v}\n\tfround.s ft3, ft1, {rm}\n\tfsw ft3, 128(a1)")
+        t(f"fli.s ft1, {v}\n\tfroundnx.s ft3, ft1, {rm}\n\tfsw ft3, 128(a1)")
+        t(f"fli.d ft1, {v}\n\tfround.d ft3, ft1, {rm}\n\tfsd ft3, 136(a1)")
+        t(f"fli.d ft1, {v}\n\tfroundnx.d ft3, ft1, {rm}\n\tfsd ft3, 136(a1)")
+    t(f"fli.d ft1, {v}\n\tfcvtmod.w.d a3, ft1, rtz\n\tsd a3, 128(a1)")
+
+# Zabha: every AMO in both narrow widths, against the pseudo-random scratch.
+for op in ("amoswap", "amoadd", "amoxor", "amoand", "amoor",
+           "amomin", "amomax", "amominu", "amomaxu"):
+    for w in ("b", "h"):
+        t(f"{op}.{w} a3, a2, (a1)\n\tsd a3, 128(a1)")
+
+# Zacas: exercise both outcomes -- a comparand that cannot match, and one
+# loaded from the location itself so the swap must happen.
+for w, ld in (("b", "lbu"), ("h", "lhu"), ("w", "lw"), ("d", "ld")):
+    t(f"li a3, -1\n\tamocas.{w} a3, a2, (a1)\n\tsd a3, 128(a1)")
+    t(f"{ld} a3, 0(a1)\n\tamocas.{w} a3, a2, (a1)\n\tsd a3, 128(a1)")
+# The quadword form needs 16-byte alignment and even register pairs.
+t("andi a4, a1, -16\n\tli a2, -1\n\tli a3, -1\n\tamocas.q a2, a6, (a4)\n\tsd a2, 128(a1)\n\tsd a3, 136(a1)")
+t("andi a4, a1, -16\n\tld a2, 0(a4)\n\tld a3, 8(a4)\n\tamocas.q a2, a6, (a4)\n\tsd a2, 128(a1)\n\tsd a3, 136(a1)")
+
+# Zcb, Zimop, Zcmop, Zawrs.  The Zcb forms are spelled explicitly so the
+# assembler cannot quietly pick the 32-bit encoding instead.
+t("c.lbu a3, 0(a1)\n\tsd a3, 128(a1)")
+t("c.lhu a3, 0(a1)\n\tsd a3, 128(a1)")
+t("c.lh a3, 0(a1)\n\tsd a3, 128(a1)")
+t("c.sb a2, 2(a1)")
+t("c.sh a2, 2(a1)")
+t("c.zext.b a2\n\tsd a2, 128(a1)")
+t("c.sext.b a2\n\tsd a2, 128(a1)")
+t("c.zext.h a2\n\tsd a2, 128(a1)")
+t("c.sext.h a2\n\tsd a2, 128(a1)")
+t("c.zext.w a2\n\tsd a2, 128(a1)")
+t("c.not a2\n\tsd a2, 128(a1)")
+t("c.mul a2, a3\n\tsd a2, 128(a1)")
+for n in range(1, 16, 2):
+    t(f"c.mop.{n}\n\tsd a2, 128(a1)")
+for n in (0, 1, 15, 31):
+    t(f"mop.r.{n} a3, a2\n\tsd a3, 128(a1)")
+for n in (0, 3, 7):
+    t(f"mop.rr.{n} a3, a2, a4\n\tsd a3, 128(a1)")
+t("wrs.nto")
+t("wrs.sto")
+
 # ── emit ─────────────────────────────────────────────────────────────────────
 
 PROLOGUE = r"""

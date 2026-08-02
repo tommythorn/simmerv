@@ -113,7 +113,7 @@ const fn sign_extend(value: u32, bits: u32) -> i32 {
 /// every vector encoding decodes to `Op::Unimp` (illegal instruction), which is
 /// exactly what a hart without V does.
 pub struct Decoder {
-    pub vector: bool,
+    pub rva23: bool,
 }
 
 impl RiscvDecoder for Decoder {
@@ -872,13 +872,13 @@ impl RiscvDecoder for Decoder {
     // the x (or f) source of a .vx/.vf/vset form, and rd is set only for the
     // handful of vector instructions that write a scalar register.
     fn vsetvli(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         decode_vset(insn, Op::Vsetvli)
     }
     fn vsetivli(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         // AVL is the 5-bit uimm in the rs1 field, not a register read.
@@ -890,7 +890,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vsetvl(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -925,19 +925,19 @@ impl RiscvDecoder for Decoder {
     }
 
     fn vop_ivv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         decode_vop(insn, Op::VopIvv)
     }
     fn vop_ivi(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         decode_vop(insn, Op::VopIvi)
     }
     fn vop_ivx(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -946,7 +946,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_mvv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -960,7 +960,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_mvx(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -969,7 +969,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_fvv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -983,7 +983,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_fvf(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.vector {
+        if !c.rva23 {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -991,6 +991,157 @@ impl RiscvDecoder for Decoder {
             ..decode_vop(insn, Op::VopFvf)
         }
     }
+
+    // ---------------- Zcb ----------------
+    // Every Zcb encoding is a shorter spelling of an instruction we already
+    // execute, so each decodes to that existing Op and gets its execution and
+    // its cosim coverage for free.  `insn_size` is derived from the low two
+    // bits of the word in `decode()`, not from the Op, so reusing a 32-bit Op
+    // for a 16-bit encoding still advances the PC by 2.
+    fn c_lbu(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cb_mem(a, insn, c, Op::Lbu, false)
+    }
+    fn c_lhu(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cb_mem(a, insn, c, Op::Lhu, true)
+    }
+    fn c_lh(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cb_mem(a, insn, c, Op::Lh, true)
+    }
+    fn c_sb(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cb_mem(a, insn, c, Op::Sb, false)
+    }
+    fn c_sh(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cb_mem(a, insn, c, Op::Sh, true)
+    }
+    fn c_mul(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.rva23 {
+            return Self::unimp(a, insn, c);
+        }
+        decode_ca(a, insn, Op::Mul)
+    }
+    fn c_zext_b(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        // c.zext.b rd' == andi rd', rd', 255
+        decode_cu(a, insn, c, Op::Andi, 255)
+    }
+    fn c_sext_b(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cu(a, insn, c, Op::SextB, 0)
+    }
+    fn c_zext_h(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cu(a, insn, c, Op::ZextH, 0)
+    }
+    fn c_sext_h(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        decode_cu(a, insn, c, Op::SextH, 0)
+    }
+    fn c_zext_w(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        // c.zext.w rd' == add.uw rd', rd', x0, so rs2 must read as zero.
+        decode_cu(a, insn, c, Op::AddUw, 0)
+    }
+    fn c_not(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        // c.not rd' == xori rd', rd', -1
+        decode_cu(a, insn, c, Op::Xori, -1)
+    }
+
+    // ---------------- Zcmop / Zimop ----------------
+    // c.mop.n is defined to leave all architectural state alone, so it is a
+    // plain nop with no destination.
+    fn c_mop(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.rva23 {
+            return Self::unimp(a, insn, c);
+        }
+        Uop {
+            op: Op::CNop,
+            ..Uop::default()
+        }
+    }
+    // mop.r.n / mop.rr.n are "may be operations": absent any extension that
+    // gives them meaning they must write 0 to rd and touch nothing else.
+    // Op::CNop yields 0, so naming a real rd is all that is needed.  The source
+    // registers are deliberately left unread — the spec lets an implementation
+    // ignore them, and not naming them keeps the uop free of false
+    // dependencies.
+    fn mop_r(a: u64, insn: u32, c: &mut Self::Context) -> Uop { decode_mop(a, insn, c) }
+    fn mop_rr(a: u64, insn: u32, c: &mut Self::Context) -> Uop { decode_mop(a, insn, c) }
+
+    // ---------------- Zawrs ----------------
+    // Both wait-on-reservation-set forms are permitted to terminate the wait
+    // immediately and for any reason, so retiring them as nops is compliant.
+    fn wrs_nto(a: u64, insn: u32, c: &mut Self::Context) -> Uop { decode_wrs(a, insn, c) }
+    fn wrs_sto(a: u64, insn: u32, c: &mut Self::Context) -> Uop { decode_wrs(a, insn, c) }
+
+    // ---------------- Zabha ----------------
+    fn amoswap_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoswapB) }
+    fn amoadd_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoaddB) }
+    fn amoxor_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoxorB) }
+    fn amoand_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoandB) }
+    fn amoor_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoorB) }
+    fn amomin_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmominB) }
+    fn amomax_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmomaxB) }
+    fn amominu_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmominuB) }
+    fn amomaxu_b(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmomaxuB) }
+    fn amoswap_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoswapH) }
+    fn amoadd_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoaddH) }
+    fn amoxor_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoxorH) }
+    fn amoand_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoandH) }
+    fn amoor_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmoorH) }
+    fn amomin_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmominH) }
+    fn amomax_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmomaxH) }
+    fn amominu_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmominuH) }
+    fn amomaxu_h(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_amo(a, i, c, Op::AmomaxuH) }
+
+    // ---------------- Zacas ----------------
+    fn amocas_b(a: u64, i: u32, c: &mut Self::Context) -> Uop {
+        decode_amocas(a, i, c, Op::AmocasB)
+    }
+    fn amocas_h(a: u64, i: u32, c: &mut Self::Context) -> Uop {
+        decode_amocas(a, i, c, Op::AmocasH)
+    }
+    fn amocas_w(a: u64, i: u32, c: &mut Self::Context) -> Uop {
+        decode_amocas(a, i, c, Op::AmocasW)
+    }
+    fn amocas_d(a: u64, i: u32, c: &mut Self::Context) -> Uop {
+        decode_amocas(a, i, c, Op::AmocasD)
+    }
+    fn amocas_q(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.rva23 {
+            return Self::unimp(a, insn, c);
+        }
+        // The quadword form names even/odd register *pairs* for both the
+        // comparand (rd) and the swap value (rs2); odd numbers are reserved.
+        let rd = (insn >> 7) & 31;
+        let rs2 = (insn >> 20) & 31;
+        if rd & 1 == 1 || rs2 & 1 == 1 {
+            return decode_exceptional(a, insn, Op::Unimp);
+        }
+        // Execution needs the odd halves of both pairs, which the three uop
+        // source slots cannot name, so pass the raw register numbers along in
+        // the otherwise-unused immediate and read the high halves directly.
+        Uop {
+            imm: (rd | (rs2 << 8)) as i32,
+            ..decode_amocas(a, insn, c, Op::AmocasQ)
+        }
+    }
+
+    // ---------------- Zfa ----------------
+    fn fli_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_fli(a, i, c, Op::FliS) }
+    fn fli_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { decode_fli(a, i, c, Op::FliD) }
+    fn fminm_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_fff(a, i, c, Op::FminmS) }
+    fn fmaxm_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_fff(a, i, c, Op::FmaxmS) }
+    fn fminm_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_fff(a, i, c, Op::FminmD) }
+    fn fmaxm_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_fff(a, i, c, Op::FmaxmD) }
+    fn fround_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_ff(a, i, c, Op::FroundS) }
+    fn froundnx_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_ff(a, i, c, Op::FroundnxS) }
+    fn fround_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_ff(a, i, c, Op::FroundD) }
+    fn froundnx_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_ff(a, i, c, Op::FroundnxD) }
+    fn fcvtmod_w_d(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
+        if !c.rva23 {
+            return Self::unimp(a, insn, c);
+        }
+        decode_r_xf(a, insn, Op::FcvtmodWD)
+    }
+    fn fleq_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_xff(a, i, c, Op::FleqS) }
+    fn fltq_s(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_xff(a, i, c, Op::FltqS) }
+    fn fleq_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_xff(a, i, c, Op::FleqD) }
+    fn fltq_d(a: u64, i: u32, c: &mut Self::Context) -> Uop { gate_xff(a, i, c, Op::FltqD) }
 
     fn unimp(a: u64, insn: u32, _c: &mut Self::Context) -> Uop {
         log::warn!("Unknown instruction: {a:016x} {insn:08x} -> unimp");
@@ -1240,7 +1391,7 @@ fn decode_vset(word: u32, op: Op) -> Uop {
 /// scalar only for the strided forms (mop=0b10) — for the indexed forms it
 /// names a vector index register instead, so we must not claim to read it.
 fn decode_vmem(a: u64, word: u32, c: &mut Decoder, op: Op) -> Uop {
-    if !c.vector {
+    if !c.rva23 {
         return Decoder::unimp(a, word, c);
     }
     let strided = (word >> 26) & 3 == 0b10;
@@ -1253,6 +1404,153 @@ fn decode_vmem(a: u64, word: u32, c: &mut Decoder, op: Op) -> Uop {
             ZEROREG
         },
         imm: word as i32,
+        ..Uop::default()
+    }
+}
+
+/// Zcb byte/halfword load or store.  Both use the CL/CS register fields —
+/// base in insn[9:7], data in insn[4:2], both offset by 8 — and differ only in
+/// the immediate: the byte forms take a 2-bit offset from insn[5] (high) and
+/// insn[6] (low), while the halfword forms take a single bit from insn[5]
+/// scaled by 2.  `halfword` selects between the two.
+///
+/// A load names rd and a store names rs2; `Op::Sb`/`Op::Sh` are the only stores
+/// here, so keying off the op keeps one helper for both directions.
+fn decode_cb_mem(a: u64, insn: u32, c: &mut Decoder, op: Op, halfword: bool) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    let base = ((insn >> 7) & 7) + 8;
+    let data = ((insn >> 2) & 7) + 8;
+    let imm = if halfword {
+        ((insn >> 5) & 1) << 1
+    } else {
+        (((insn >> 5) & 1) << 1) | ((insn >> 6) & 1)
+    } as i32;
+
+    if matches!(op, Op::Sb | Op::Sh) {
+        Uop {
+            op,
+            rs1: x(base),
+            rs2: x(data),
+            imm,
+            ..Uop::default()
+        }
+    } else {
+        Uop {
+            op,
+            rd: xd(data),
+            rs1: x(base),
+            imm,
+            ..Uop::default()
+        }
+    }
+}
+
+/// Zcb single-register ALU form (c.zext.b, c.not, ...): rd and rs1 are the same
+/// 3-bit register field at insn[9:7], and the operation is expressed as an
+/// existing op plus a fixed immediate.
+fn decode_cu(a: u64, insn: u32, c: &mut Decoder, op: Op, imm: i32) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    let r = ((insn >> 7) & 7) + 8;
+    Uop {
+        op,
+        rd: xd(r),
+        rs1: x(r),
+        rs2: ZEROREG,
+        imm,
+        ..Uop::default()
+    }
+}
+
+/// Zimop: write 0 to rd, leave everything else alone.
+fn decode_mop(a: u64, insn: u32, c: &mut Decoder) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    Uop {
+        op: Op::CNop,
+        rd: xd((insn >> 7) & 31),
+        ..Uop::default()
+    }
+}
+
+/// A Zabha byte/halfword AMO: same shape as the existing word/doubleword AMOs.
+fn decode_amo(a: u64, insn: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    decode_r(a, insn, op)
+}
+
+/// A Zacas compare-and-swap.  Unlike every other AMO, rd is *also* a source —
+/// it supplies the comparand — so it is named again through the third source
+/// slot.
+fn decode_amocas(a: u64, insn: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    Uop {
+        rs3: x((insn >> 7) & 31),
+        ..decode_r(a, insn, op)
+    }
+}
+
+/// Zfa fli: the "source" is a 5-bit index into a table of 32 constants held in
+/// the rs1 field, so nothing is read from the register file.
+fn decode_fli(a: u64, insn: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    Uop {
+        op,
+        rd: f((insn >> 7) & 31),
+        imm: ((insn >> 15) & 31) as i32,
+        ..Uop::default()
+    }
+}
+
+/// rva23-gated wrappers over the existing FP operand-shape decoders.
+fn gate_fff(a: u64, insn: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    decode_r_fff(a, insn, op)
+}
+
+fn gate_xff(a: u64, insn: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    decode_r_xff(a, insn, op)
+}
+
+/// One FP source and one FP destination (fround/froundnx).  The rs2 field holds
+/// the opcode selector rather than a register, so — unlike `decode_r_fff` — it
+/// must not be named as a source.
+fn gate_ff(a: u64, insn: u32, c: &mut Decoder, op: Op) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Uop {
+        op,
+        rd: f((insn >> 7) & 31),
+        rs1: f((insn >> 15) & 31),
+        rm: ((insn >> 12) & 7) as u8,
+        ..Uop::default()
+    }
+}
+
+/// Zawrs: retire immediately, writing nothing.
+fn decode_wrs(a: u64, insn: u32, c: &mut Decoder) -> Uop {
+    if !c.rva23 {
+        return Decoder::unimp(a, insn, c);
+    }
+    Uop {
+        op: Op::CNop,
         ..Uop::default()
     }
 }

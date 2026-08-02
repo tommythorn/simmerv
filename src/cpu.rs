@@ -362,12 +362,14 @@ pub struct Cpu {
     pub fflags: u8,
     pub fs: u8,
 
-    // The vector unit and its mstatus.VS field.  `vector_enabled` is the
-    // build-the-machine-with-V switch: with it clear the decoder rejects every
-    // vector encoding and none of this state is reachable.
+    // The vector unit and its mstatus.VS field.  `rva23_enabled` is the
+    // build-the-machine-as-RVA23 switch: with it clear the decoder rejects
+    // every vector encoding and none of this state is reachable.  RVA23
+    // mandates V, so the same switch gates the other RVA23-only extensions
+    // (Zcb, Zimop, Zcmop, Zfa, Zawrs, Zacas, Zabha, Zvbb, Zvkt).
     pub v: VectorUnit,
     pub vs: u8,
-    pub vector_enabled: bool,
+    pub rva23_enabled: bool,
 
     // Supervisor and CSR
     pub cycle: u64,
@@ -490,7 +492,7 @@ impl Cpu {
 
             v: VectorUnit::new(),
             vs: 1,
-            vector_enabled: false,
+            rva23_enabled: false,
 
             seqno: 0,
             cycle: 0,
@@ -616,13 +618,13 @@ impl Cpu {
     /// vector state. The kernel's syscall path gates `riscv_v_vstate_discard`
     /// on `sstatus.VS != Off`, not on `has_vector()`, so a nonzero VS here
     /// sends it into vector code that then executes an illegal V instruction.
-    const fn exposed_vs(&self) -> u8 { if self.vector_enabled { self.vs } else { 0 } }
+    const fn exposed_vs(&self) -> u8 { if self.rva23_enabled { self.vs } else { 0 } }
 
-    /// Turn the vector extension on or off.  This is a machine-construction
+    /// Turn the RVA23 extension set on or off.  This is a machine-construction
     /// switch rather than architectural state: it gates instruction decoding,
     /// the `misa` V bit and the vector CSRs.
-    pub const fn set_vector_enabled(&mut self, on: bool) {
-        self.vector_enabled = on;
+    pub const fn set_rva23_enabled(&mut self, on: bool) {
+        self.rva23_enabled = on;
         let v_bit = 1u64 << (b'V' - b'A');
         if on {
             self.csr.misa |= v_bit;
@@ -881,7 +883,7 @@ impl Cpu {
                 break;
             }
 
-            let uop = decode(fetch_pc, insn, self.vector_enabled);
+            let uop = decode(fetch_pc, insn, self.rva23_enabled);
 
             if matches!(uop.op, Op::CUnimp | Op::End) {
                 if i == 0 {
@@ -973,7 +975,7 @@ impl Cpu {
         let insn_addr = self.pc;
         let insn = self.memop_code(insn_addr)? as u32;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
-        let uop = decode(insn_addr, insn, self.vector_enabled);
+        let uop = decode(insn_addr, insn, self.rva23_enabled);
         if matches!(uop.op, Op::CUnimp | Op::End) {
             return Err(Exception {
                 trap: Trap::IllegalInstruction,
@@ -1067,7 +1069,7 @@ impl Cpu {
         };
         cap.insn = insn;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
-        let uop = decode(insn_addr, insn, self.vector_enabled);
+        let uop = decode(insn_addr, insn, self.rva23_enabled);
         if matches!(uop.op, Op::CUnimp | Op::End) {
             let exc = Exception {
                 trap: Trap::IllegalInstruction,
@@ -1576,7 +1578,7 @@ impl Cpu {
             return illegal;
         };
 
-        if Self::is_vector_csr(csr) && (!self.vector_enabled || self.vs == 0) {
+        if Self::is_vector_csr(csr) && (!self.rva23_enabled || self.vs == 0) {
             return illegal;
         }
 
@@ -1670,7 +1672,7 @@ impl Cpu {
             return illegal;
         }
 
-        if Self::is_vector_csr(csr) && (!self.vector_enabled || self.vs == 0) {
+        if Self::is_vector_csr(csr) && (!self.rva23_enabled || self.vs == 0) {
             return illegal;
         }
 
@@ -1882,7 +1884,7 @@ impl Cpu {
                 self.mmu.mstatus = value & mask | self.mmu.mstatus & !mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
                 // Without V the VS field is hardwired to zero (WARL).
-                if self.vector_enabled {
+                if self.rva23_enabled {
                     self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
                 }
             }
@@ -1905,7 +1907,7 @@ impl Cpu {
                 self.mmu.mstatus &= !mask;
                 self.mmu.mstatus |= value & mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
-                if self.vector_enabled {
+                if self.rva23_enabled {
                     self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
                 }
             }
@@ -1968,7 +1970,7 @@ impl Cpu {
             rs2,
             imm,
             ..
-        } = decode(addr, insn as u32, self.vector_enabled);
+        } = decode(addr, insn as u32, self.rva23_enabled);
 
         let op = format!("{op:?}").to_lowercase(); // XXX More clever CAdd -> c.add
 
@@ -1999,7 +2001,7 @@ impl Cpu {
     ///   [1 B] wfi
     ///   [1 B] reservation flag (0=None, 1=Some) + [8 B] value
     ///   [20×8 B] CSR fields (fixed order, see `read_state`)
-    ///   [1 B] vs (mstatus.VS) + [1 B] `vector_enabled`
+    ///   [1 B] vs (mstatus.VS) + [1 B] `rva23_enabled`
     ///   [4×8 B] vtype, vl, vstart, vcsr
     ///   [32·VLENB B] the vector register file
     ///   [? B] MMU state (via `Mmu::write_state`)
@@ -2062,7 +2064,7 @@ impl Cpu {
                 w.u64(c.mhpmevent[i]);
             }
             w.u8(self.vs);
-            w.bool(self.vector_enabled);
+            w.bool(self.rva23_enabled);
             w.u64(self.v.vtype);
             w.u64(self.v.vl);
             w.u64(self.v.vstart);
@@ -2153,7 +2155,7 @@ impl Cpu {
         self.hpm_rebase = true;
         self.hpm_refresh_active();
         self.vs = r.u8()?;
-        self.vector_enabled = r.bool()?;
+        self.rva23_enabled = r.bool()?;
         self.v.vtype = r.u64()?;
         self.v.vl = r.u64()?;
         self.v.vstart = r.u64()?;
@@ -2514,7 +2516,7 @@ impl Cpu {
     /// Returns `Err(())` if the instruction word is illegal or cannot be
     /// decoded.
     pub fn get_register_info(&self, addr: u64, insn: u32) -> anyhow::Result<Uop> {
-        Ok(decode(addr, insn, self.vector_enabled))
+        Ok(decode(addr, insn, self.rva23_enabled))
     }
 }
 
@@ -2533,8 +2535,8 @@ pub const fn get_trap_cause(exc: &Exception) -> u64 {
 }
 
 #[must_use]
-pub fn decode(a: u64, word: u32, vector: bool) -> Uop {
-    let mut uop = decoder(a, word, &mut new_decoder::Decoder { vector });
+pub fn decode(a: u64, word: u32, rva23: bool) -> Uop {
+    let mut uop = decoder(a, word, &mut new_decoder::Decoder { rva23 });
     let size: u8 = if word & 3 == 3 { 4 } else { 2 };
     let branch_flag: u8 = if Cpu::is_branch(uop.op) { 0x80 } else { 0 };
     uop.insn_size = size | branch_flag;
@@ -3608,9 +3610,438 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         | Op::VopFvf
         | Op::VopMvx => vector::execute(cpu, uop.op, uop.imm as u32, s1, s2),
         // End is the sentinel for unrecognised 32-bit instructions; CUnimp for compressed.
+        // ---------------- Zabha: byte and halfword AMOs ----------------
+        Op::AmoswapB => amo_narrow(cpu, s1, s2, 1, |_, s| s),
+        Op::AmoaddB => amo_narrow(cpu, s1, s2, 1, u64::wrapping_add),
+        Op::AmoxorB => amo_narrow(cpu, s1, s2, 1, |o, s| o ^ s),
+        Op::AmoandB => amo_narrow(cpu, s1, s2, 1, |o, s| o & s),
+        Op::AmoorB => amo_narrow(cpu, s1, s2, 1, |o, s| o | s),
+        Op::AmominB => amo_narrow(cpu, s1, s2, 1, |o, s| amo_min_s(o, s, 1)),
+        Op::AmomaxB => amo_narrow(cpu, s1, s2, 1, |o, s| amo_max_s(o, s, 1)),
+        Op::AmominuB => amo_narrow(cpu, s1, s2, 1, |o, s| amo_min_u(o, s, 1)),
+        Op::AmomaxuB => amo_narrow(cpu, s1, s2, 1, |o, s| amo_max_u(o, s, 1)),
+        Op::AmoswapH => amo_narrow(cpu, s1, s2, 2, |_, s| s),
+        Op::AmoaddH => amo_narrow(cpu, s1, s2, 2, u64::wrapping_add),
+        Op::AmoxorH => amo_narrow(cpu, s1, s2, 2, |o, s| o ^ s),
+        Op::AmoandH => amo_narrow(cpu, s1, s2, 2, |o, s| o & s),
+        Op::AmoorH => amo_narrow(cpu, s1, s2, 2, |o, s| o | s),
+        Op::AmominH => amo_narrow(cpu, s1, s2, 2, |o, s| amo_min_s(o, s, 2)),
+        Op::AmomaxH => amo_narrow(cpu, s1, s2, 2, |o, s| amo_max_s(o, s, 2)),
+        Op::AmominuH => amo_narrow(cpu, s1, s2, 2, |o, s| amo_min_u(o, s, 2)),
+        Op::AmomaxuH => amo_narrow(cpu, s1, s2, 2, |o, s| amo_max_u(o, s, 2)),
+
+        // ---------------- Zacas ----------------
+        // s3 is rd read back as a source: for a CAS it supplies the comparand.
+        Op::AmocasB => amo_cas(cpu, s1, s2, s3, 1),
+        Op::AmocasH => amo_cas(cpu, s1, s2, s3, 2),
+        Op::AmocasW => amo_cas(cpu, s1, s2, s3, 4),
+        Op::AmocasD => amo_cas(cpu, s1, s2, s3, 8),
+        Op::AmocasQ => {
+            // rd and rs2 name even/odd register pairs; the uop's three source
+            // slots cannot reach the odd halves, so the decoder passed the raw
+            // register numbers through the immediate.
+            let rd = (uop.imm & 31) as usize;
+            let rs2 = ((uop.imm >> 8) & 31) as usize;
+            // An x0 pair reads as zero and is never written back.
+            let cmp_hi = if rd == 0 { 0 } else { cpu.rf[rd + 1] };
+            let swap_hi = if rs2 == 0 { 0 } else { cpu.rf[rs2 + 1] };
+            // amocas.q is 16-byte aligned, so both halves share a page: if the
+            // first access translates, the second cannot fault part-way and
+            // leave memory half-updated.
+            let old_lo = etry!(cpu.memop_read(s1, 0, 8));
+            let old_hi = etry!(cpu.memop_read(s1, 8, 8));
+            if old_lo == s3 && old_hi == cmp_hi {
+                etry!(cpu.memop_write(s1, 0, s2, 8));
+                etry!(cpu.memop_write(s1, 8, swap_hi, 8));
+            }
+            cpu.reservation = None;
+            if rd != 0 {
+                cpu.rf[rd + 1] = old_hi;
+            }
+            ExecOut::ok(old_lo)
+        }
+
+        // ---------------- Zfa ----------------
+        Op::FliS => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(fp::NAN_BOX_F32 | FLI_S[(uop.imm & 31) as usize])
+        }
+        Op::FliD => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::ok(FLI_D[(uop.imm & 31) as usize])
+        }
+        // fminm/fmaxm differ from fmin/fmax only in NaN handling: any NaN
+        // operand (not just two) yields the canonical NaN.
+        Op::FminmS => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(minmax_m::<Sf32>(s1, s2, false))
+        }
+        Op::FmaxmS => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(minmax_m::<Sf32>(s1, s2, true))
+        }
+        Op::FminmD => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(minmax_m::<Sf64>(s1, s2, false))
+        }
+        Op::FmaxmD => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(minmax_m::<Sf64>(s1, s2, true))
+        }
+        // fleq/fltq are the quiet comparisons: unlike fle/flt they signal only
+        // for a signalling NaN, not for any NaN.
+        Op::FleqS => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(compare_q::<Sf32>(s1, s2, false))
+        }
+        Op::FltqS => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(compare_q::<Sf32>(s1, s2, true))
+        }
+        Op::FleqD => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(compare_q::<Sf64>(s1, s2, false))
+        }
+        Op::FltqD => {
+            etry!(cpu.check_float_access_and_dirty(0));
+            ExecOut::from_wf(compare_q::<Sf64>(s1, s2, true))
+        }
+        Op::FroundS => {
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fround_s(s1, cpu.get_rm(uop.rm), false))
+        }
+        Op::FroundnxS => {
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fround_s(s1, cpu.get_rm(uop.rm), true))
+        }
+        Op::FroundD => {
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fround_d(s1, cpu.get_rm(uop.rm), false))
+        }
+        Op::FroundnxD => {
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fround_d(s1, cpu.get_rm(uop.rm), true))
+        }
+        Op::FcvtmodWD => {
+            etry!(cpu.check_float_access_and_dirty(uop.rm));
+            ExecOut::from_wf(fcvtmod_w_d(s1))
+        }
+
+        // These RVA23 encodings are recognised by the decoder but never reach
+        // execution: each is a shorter spelling of an instruction we already
+        // have, so `new_decoder` rewrites it to that op (Zcb), or to a nop
+        // (Zcmop, Zawrs) or a write of zero (Zimop).  Trapping keeps the
+        // failure loud should one ever be constructed by mistake.
+        Op::CLbu
+        | Op::CLhu
+        | Op::CLh
+        | Op::CSb
+        | Op::CSh
+        | Op::CMul
+        | Op::CZextB
+        | Op::CSextB
+        | Op::CZextH
+        | Op::CSextH
+        | Op::CZextW
+        | Op::CNot
+        | Op::CMop
+        | Op::MopR
+        | Op::MopRr
+        | Op::WrsNto
+        | Op::WrsSto => ExecOut::err(Trap::IllegalInstruction, 0),
+
         Op::End | Op::Unimp | Op::CUnimp => ExecOut::err(Trap::IllegalInstruction, 0),
     }
 }
+
+/// Sign-extend the low `size` bytes of `v` to 64 bits.
+const fn sext_n(v: u64, size: u64) -> u64 {
+    let sh = 64 - size * 8;
+    ((v << sh) as i64 >> sh) as u64
+}
+
+/// Zero-extend (i.e. truncate to) the low `size` bytes of `v`.
+const fn zext_n(v: u64, size: u64) -> u64 {
+    let sh = 64 - size * 8;
+    (v << sh) >> sh
+}
+
+const fn amo_min_s(a: u64, b: u64, size: u64) -> u64 {
+    if (sext_n(a, size) as i64) < (sext_n(b, size) as i64) {
+        a
+    } else {
+        b
+    }
+}
+const fn amo_max_s(a: u64, b: u64, size: u64) -> u64 {
+    if (sext_n(a, size) as i64) > (sext_n(b, size) as i64) {
+        a
+    } else {
+        b
+    }
+}
+const fn amo_min_u(a: u64, b: u64, size: u64) -> u64 {
+    if zext_n(a, size) < zext_n(b, size) {
+        a
+    } else {
+        b
+    }
+}
+const fn amo_max_u(a: u64, b: u64, size: u64) -> u64 {
+    if zext_n(a, size) > zext_n(b, size) {
+        a
+    } else {
+        b
+    }
+}
+
+/// A Zabha byte or halfword AMO.  Like the .w and .d forms, the value returned
+/// in rd is the *original* memory contents, sign-extended to XLEN.
+fn amo_narrow(
+    cpu: &mut Cpu,
+    addr: u64,
+    src: u64,
+    size: u64,
+    f: impl FnOnce(u64, u64) -> u64,
+) -> ExecOut {
+    let old = etry!(cpu.memop_read(addr, 0, size));
+    let new = f(old, src);
+    etry!(cpu.memop_write(addr, 0, new, size));
+    cpu.reservation = None;
+    ExecOut::ok(sext_n(old, size))
+}
+
+/// A Zacas compare-and-swap of `size` bytes.  The store happens only on a
+/// match, but rd is written with the original contents either way.
+fn amo_cas(cpu: &mut Cpu, addr: u64, swap: u64, cmp: u64, size: u64) -> ExecOut {
+    let old = etry!(cpu.memop_read(addr, 0, size));
+    if old == zext_n(cmp, size) {
+        etry!(cpu.memop_write(addr, 0, swap, size));
+    }
+    cpu.reservation = None;
+    ExecOut::ok(sext_n(old, size))
+}
+
+/// Zfa fminm/fmaxm.  Identical to fmin/fmax except that a NaN in *either*
+/// operand produces the canonical NaN rather than the other operand.
+fn minmax_m<S: Sf>(a: u64, b: u64, want_max: bool) -> (u64, u8)
+where
+    <S as Sf>::F: PartialOrd,
+{
+    let (ua, ub) = (S::unbox(a), S::unbox(b));
+    if S::is_nan(ua) || S::is_nan(ub) {
+        let flags = if S::is_signan(ua) || S::is_signan(ub) {
+            fp::fflag::INVALIDOP
+        } else {
+            0
+        };
+        return (S::qnan(), flags);
+    }
+    if want_max { S::max(a, b) } else { S::min(a, b) }
+}
+
+/// Zfa fleq/fltq: the quiet comparisons.  Only a signalling NaN raises the
+/// invalid flag; a quiet NaN simply compares false.
+fn compare_q<S: Sf>(a: u64, b: u64, less_than: bool) -> (u64, u8) {
+    let (ua, ub) = (S::unbox(a), S::unbox(b));
+    if S::is_nan(ua) || S::is_nan(ub) {
+        let flags = if S::is_signan(ua) || S::is_signan(ub) {
+            fp::fflag::INVALIDOP
+        } else {
+            0
+        };
+        return (0, flags);
+    }
+    // Neither operand is NaN, so the signalling comparison cannot raise and its
+    // ordering logic can be reused verbatim.
+    if less_than {
+        S::flt(a, b)
+    } else {
+        S::fle(a, b)
+    }
+}
+
+/// Shared body of fround/froundnx: round to an integral value *in the same
+/// format*.  `nx` selects froundnx, which raises inexact when the value
+/// actually changed; fround never does.
+///
+/// `integral_exp` is the biased exponent at and above which every value is
+/// already an integer.  Returning those unchanged is not just an optimisation:
+/// it keeps the round-trip through i64 below in range.
+fn fround_generic<S: Sf>(
+    a: u64,
+    rm: RoundingMode,
+    nx: bool,
+    integral_exp: u64,
+    to_int: fn(u64, RoundingMode) -> (u64, u8),
+    from_int: fn(u64, RoundingMode) -> (u64, u8),
+) -> (u64, u8) {
+    let ua = S::unbox(a);
+    if S::is_nan(ua) {
+        let flags = if S::is_signan(ua) {
+            fp::fflag::INVALIDOP
+        } else {
+            0
+        };
+        return (S::qnan(), flags);
+    }
+    if S::exp(ua) >= integral_exp {
+        // Infinities land here too, and are likewise returned unchanged.
+        return (S::nanbox(ua), 0);
+    }
+    let (i, _) = to_int(a, rm);
+    let (r, _) = from_int(i, rm);
+    // The round trip through an integer loses the sign of a zero result, but
+    // fround(-0.3) must be -0.0, so restore it from the input.
+    let r = if r & S::MASKSIGN == 0 {
+        S::nanbox(ua & S::SIGN_MASK)
+    } else {
+        S::nanbox(r)
+    };
+    let flags = if nx && r != S::nanbox(ua) {
+        fp::fflag::INEXACT
+    } else {
+        0
+    };
+    (r, flags)
+}
+
+fn fround_s(a: u64, rm: RoundingMode, nx: bool) -> (u64, u8) {
+    // f32: bias 127, 23 mantissa bits.
+    fround_generic::<Sf32>(a, rm, nx, 127 + 23, fp::cvt_sf32_i64, fp::cvt_i64_sf32)
+}
+
+fn fround_d(a: u64, rm: RoundingMode, nx: bool) -> (u64, u8) {
+    // f64: bias 1023, 52 mantissa bits.
+    fround_generic::<Sf64>(a, rm, nx, 1023 + 52, fp::cvt_sf64_i64, fp::cvt_i64_sf64)
+}
+
+/// Zfa fcvtmod.w.d: truncate toward zero, then take the result modulo 2^32 and
+/// sign-extend, instead of saturating the way fcvt.w.d does.  (This is exactly
+/// JavaScript's `ToInt32`.)  The rounding mode is architecturally fixed at rtz.
+///
+/// NaN and infinity produce zero and raise invalid; everything else wraps
+/// silently, raising only inexact when a fractional part was discarded.
+// The truncating casts below are the point of the instruction, not an
+// oversight: taking the value modulo 2^32 is exactly a truncation to u32.  The
+// exponent cast is likewise safe, as it holds an 11-bit field.
+#[allow(clippy::cast_possible_truncation)]
+fn fcvtmod_w_d(a: u64) -> (u64, u8) {
+    if Sf64::exp(a) == Sf64::EXP_MASK {
+        // NaN or infinity.
+        return (0, fp::fflag::INVALIDOP);
+    }
+    let exp = Sf64::exp(a);
+    let mant = Sf64::mant(a);
+    let negative = Sf64::sign(a) != 0;
+
+    // Subnormals and zero: magnitude below 1, so the integral part is zero.
+    if exp == 0 {
+        return (0, if mant == 0 { 0 } else { fp::fflag::INEXACT });
+    }
+    let significand = mant | (1 << 52);
+    // Value is significand * 2^(exp - 1023 - 52).
+    let shift = i64::from(exp as i32 - 1023 - 52);
+
+    let (low32, inexact) = if shift >= 0 {
+        // Already an integer.  Anything shifted past bit 31 vanishes mod 2^32.
+        let v = if shift >= 32 {
+            0
+        } else {
+            (significand << shift) as u32
+        };
+        (v, false)
+    } else {
+        let rshift = -shift;
+        if rshift >= 64 {
+            // Magnitude below 1.
+            (0, significand != 0)
+        } else {
+            let dropped = significand & ((1u64 << rshift) - 1);
+            ((significand >> rshift) as u32, dropped != 0)
+        }
+    };
+
+    let wrapped = if negative {
+        low32.wrapping_neg()
+    } else {
+        low32
+    };
+    let flags = if inexact { fp::fflag::INEXACT } else { 0 };
+    // Sign-extend the 32-bit result into the destination register.
+    (i64::from(wrapped as i32) as u64, flags)
+}
+
+/// The 32 constants selectable by Zfa's fli, in encoding order.
+const FLI_D: [u64; 32] = [
+    0xbff0_0000_0000_0000, //  0  -1.0
+    0x0010_0000_0000_0000, //  1  minimum positive normal
+    0x3ef0_0000_0000_0000, //  2  2^-16
+    0x3f00_0000_0000_0000, //  3  2^-15
+    0x3f70_0000_0000_0000, //  4  2^-8
+    0x3f80_0000_0000_0000, //  5  2^-7
+    0x3fb0_0000_0000_0000, //  6  0.0625
+    0x3fc0_0000_0000_0000, //  7  0.125
+    0x3fd0_0000_0000_0000, //  8  0.25
+    0x3fd4_0000_0000_0000, //  9  0.3125
+    0x3fd8_0000_0000_0000, // 10  0.375
+    0x3fdc_0000_0000_0000, // 11  0.4375
+    0x3fe0_0000_0000_0000, // 12  0.5
+    0x3fe4_0000_0000_0000, // 13  0.625
+    0x3fe8_0000_0000_0000, // 14  0.75
+    0x3fec_0000_0000_0000, // 15  0.875
+    0x3ff0_0000_0000_0000, // 16  1.0
+    0x3ff4_0000_0000_0000, // 17  1.25
+    0x3ff8_0000_0000_0000, // 18  1.5
+    0x3ffc_0000_0000_0000, // 19  1.75
+    0x4000_0000_0000_0000, // 20  2.0
+    0x4004_0000_0000_0000, // 21  2.5
+    0x4008_0000_0000_0000, // 22  3.0
+    0x4010_0000_0000_0000, // 23  4.0
+    0x4020_0000_0000_0000, // 24  8.0
+    0x4030_0000_0000_0000, // 25  16.0
+    0x4060_0000_0000_0000, // 26  128.0
+    0x4070_0000_0000_0000, // 27  256.0
+    0x40e0_0000_0000_0000, // 28  32768.0
+    0x40f0_0000_0000_0000, // 29  65536.0
+    0x7ff0_0000_0000_0000, // 30  +inf
+    0x7ff8_0000_0000_0000, // 31  canonical NaN
+];
+
+const FLI_S: [u64; 32] = [
+    0xbf80_0000, //  0  -1.0
+    0x0080_0000, //  1  minimum positive normal
+    0x3780_0000, //  2  2^-16
+    0x3800_0000, //  3  2^-15
+    0x3b80_0000, //  4  2^-8
+    0x3c00_0000, //  5  2^-7
+    0x3d80_0000, //  6  0.0625
+    0x3e00_0000, //  7  0.125
+    0x3e80_0000, //  8  0.25
+    0x3ea0_0000, //  9  0.3125
+    0x3ec0_0000, // 10  0.375
+    0x3ee0_0000, // 11  0.4375
+    0x3f00_0000, // 12  0.5
+    0x3f20_0000, // 13  0.625
+    0x3f40_0000, // 14  0.75
+    0x3f60_0000, // 15  0.875
+    0x3f80_0000, // 16  1.0
+    0x3fa0_0000, // 17  1.25
+    0x3fc0_0000, // 18  1.5
+    0x3fe0_0000, // 19  1.75
+    0x4000_0000, // 20  2.0
+    0x4020_0000, // 21  2.5
+    0x4040_0000, // 22  3.0
+    0x4080_0000, // 23  4.0
+    0x4100_0000, // 24  8.0
+    0x4180_0000, // 25  16.0
+    0x4300_0000, // 26  128.0
+    0x4380_0000, // 27  256.0
+    0x4700_0000, // 28  32768.0
+    0x4780_0000, // 29  65536.0
+    0x7f80_0000, // 30  +inf
+    0x7fc0_0000, // 31  canonical NaN
+];
 
 #[cfg(test)]
 mod test_cpu {
@@ -3688,7 +4119,7 @@ mod test_cpu {
 
     fn vector_cpu() -> Cpu {
         let mut cpu = create_cpu();
-        cpu.set_vector_enabled(true);
+        cpu.set_rva23_enabled(true);
         cpu
     }
 
@@ -3725,6 +4156,90 @@ mod test_cpu {
             run_one(&mut cpu, VADD_VV_V4_V8_V12).unwrap_err().trap,
             Trap::IllegalInstruction
         );
+    }
+
+    /// The rest of the RVA23 profile rides on the same switch as V, and the Zcb
+    /// members in particular must decode to the plain instruction they
+    /// abbreviate.
+    #[test]
+    fn rva23_encodings_are_gated_and_alias_correctly() {
+        // c.zext.w a4 -- the instruction that aborted the RVA23 Ubuntu userland
+        // before Zcb was implemented.
+        const C_ZEXT_W_A4: u32 = 0x9f71;
+        const C_NOT_A4: u32 = 0x9f75;
+        const C_MUL_S0_S1: u32 = 0x9c45;
+        const C_LBU_S0_S1: u32 = 0x8080;
+        const C_MOP_1: u32 = 0x6081;
+        const MOP_R_0: u32 = 0x81c0_4073;
+        const WRS_NTO: u32 = 0x00d0_0073;
+        const AMOCAS_W: u32 = 0x2800_202f;
+        const AMOADD_B: u32 = 0x0000_002f;
+        const FLI_D_1P0: u32 = 0xf218_0053;
+
+        for insn in [
+            C_ZEXT_W_A4,
+            C_NOT_A4,
+            C_MUL_S0_S1,
+            C_LBU_S0_S1,
+            C_MOP_1,
+            MOP_R_0,
+            WRS_NTO,
+            AMOCAS_W,
+            AMOADD_B,
+            FLI_D_1P0,
+        ] {
+            assert_eq!(
+                decode(MEMORY_BASE, insn, false).op,
+                Op::Unimp,
+                "{insn:08x} must not decode without --rva23"
+            );
+        }
+
+        // Zcb aliases: same op, and the same register named as both source and
+        // destination.
+        let uop = decode(MEMORY_BASE, C_ZEXT_W_A4, true);
+        assert_eq!(uop.op, Op::AddUw, "c.zext.w is add.uw rd, rd, x0");
+        assert_eq!(uop.rs1, x(14), "c.zext.w a4 reads a4");
+        assert_eq!(uop.rs2, ZEROREG, "c.zext.w must add zero");
+        assert_eq!(uop.get_insn_size(), 2, "still a 16-bit instruction");
+
+        let uop = decode(MEMORY_BASE, C_NOT_A4, true);
+        assert_eq!(uop.op, Op::Xori);
+        assert_eq!(uop.imm, -1, "c.not is xori rd, rd, -1");
+
+        assert_eq!(decode(MEMORY_BASE, C_MUL_S0_S1, true).op, Op::Mul);
+        let uop = decode(MEMORY_BASE, C_LBU_S0_S1, true);
+        assert_eq!(uop.op, Op::Lbu);
+        assert_eq!(uop.rs1, x(9), "base register is s1");
+        assert_eq!(uop.imm, 0);
+
+        // Zcmop and Zawrs retire as nops; Zimop writes zero to a real rd.
+        assert_eq!(decode(MEMORY_BASE, C_MOP_1, true).op, Op::CNop);
+        assert_eq!(decode(MEMORY_BASE, WRS_NTO, true).op, Op::CNop);
+        let uop = decode(MEMORY_BASE, MOP_R_0, true);
+        assert_eq!(uop.op, Op::CNop);
+        assert!(uop.rd.is_x0_dest(), "mop.r.0 x0, x0 writes nothing");
+
+        assert_eq!(decode(MEMORY_BASE, AMOCAS_W, true).op, Op::AmocasW);
+        assert_eq!(decode(MEMORY_BASE, AMOADD_B, true).op, Op::AmoaddB);
+        let uop = decode(MEMORY_BASE, FLI_D_1P0, true);
+        assert_eq!(uop.op, Op::FliD);
+        assert_eq!(FLI_D[uop.imm as usize], 1.0f64.to_bits(), "fli.d index 16");
+    }
+
+    /// A c.zext.w must actually clear the high half, and Zimop must land a
+    /// zero.
+    #[test]
+    fn rva23_executes() {
+        let mut cpu = vector_cpu();
+        cpu.write_register(x(14), 0xdead_beef_0000_00ff);
+        run_one(&mut cpu, 0x9f71).expect("c.zext.w a4");
+        assert_eq!(cpu.read_register(x(14)), 0x0000_00ff);
+
+        // mop.r.0 a0, a0 -- rd is written with zero whatever the source held.
+        cpu.write_register(x(10), 0x1234);
+        run_one(&mut cpu, 0x81c0_4073 | (10 << 7) | (10 << 15)).expect("mop.r.0");
+        assert_eq!(cpu.read_register(x(10)), 0);
     }
 
     #[test]

@@ -10,31 +10,26 @@ use crate::riscv_decoding::RiscvDecoder;
 )]
 pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: &mut C) -> R {
     match (w >> 5 & 0x780) + (w & 0x7f) {
-        11 | 31 | 43 | 47 | 63 | 91 | 95 | 107 | 119 | 123 | 127 | 139 | 159 | 171 | 175 | 191
-        | 219 | 223 | 231 | 235 | 247 | 251 | 255 | 267 | 283 | 287 | 299 | 319 | 347 | 351
-        | 355 | 359 | 363 | 375 | 379 | 383 | 395 | 399 | 411 | 415 | 427 | 443 | 447 | 475
-        | 479 | 483 | 487 | 491 | 503 | 507 | 511 | 519 | 523 | 527 | 539 | 543 | 547 | 551
-        | 555 | 559 | 575 | 603 | 607 | 615 | 619 | 627 | 631 | 635 | 639 | 651 | 655 | 671
-        | 675 | 683 | 687 | 703 | 731 | 735 | 743 | 747 | 759 | 763 | 767 | 779 | 783 | 795
-        | 799 | 803 | 811 | 815 | 831 | 859 | 863 | 871 | 875 | 887 | 891 | 895 | 899 | 907
-        | 911 | 923 | 927 | 931 | 939 | 943 | 959 | 987 | 991 | 999 | 1003 | 1015 | 1019 | 1023
-        | 1024 | 1028 | 1032 | 1035 | 1036 | 1040 | 1044 | 1048 | 1052 | 1055 | 1056 | 1060
-        | 1064 | 1067 | 1068 | 1071 | 1072 | 1076 | 1080 | 1084 | 1087 | 1088 | 1092 | 1096
-        | 1100 | 1104 | 1108 | 1112 | 1115 | 1116 | 1119 | 1120 | 1124 | 1128 | 1131 | 1132
-        | 1136 | 1140 | 1143 | 1144 | 1147 | 1148 | 1151 | 1152 | 1156 | 1160 | 1163 | 1164
-        | 1167 | 1168 | 1172 | 1176 | 1180 | 1183 | 1184 | 1188 | 1192 | 1195 | 1196 | 1199
-        | 1200 | 1204 | 1208 | 1212 | 1215 | 1216 | 1220 | 1224 | 1228 | 1232 | 1236 | 1240
-        | 1243 | 1244 | 1247 | 1248 | 1252 | 1255 | 1256 | 1259 | 1260 | 1264 | 1268 | 1271
-        | 1272 | 1275 | 1276 | 1279 | 1291 | 1307 | 1311 | 1323 | 1343 | 1371 | 1375 | 1379
-        | 1383 | 1387 | 1399 | 1403 | 1407 | 1419 | 1423 | 1435 | 1439 | 1451 | 1467 | 1471
-        | 1499 | 1503 | 1507 | 1511 | 1515 | 1527 | 1531 | 1535 | 1543 | 1547 | 1551 | 1563
-        | 1567 | 1571 | 1575 | 1579 | 1583 | 1599 | 1627 | 1631 | 1639 | 1643 | 1651 | 1655
-        | 1659 | 1663 | 1675 | 1679 | 1695 | 1699 | 1707 | 1711 | 1727 | 1755 | 1759 | 1767
-        | 1771 | 1783 | 1787 | 1791 | 1803 | 1807 | 1819 | 1823 | 1827 | 1835 | 1839 | 1855
-        | 1883 | 1887 | 1895 | 1899 | 1911 | 1915 | 1919 | 1923 | 1931 | 1935 | 1947 | 1951
-        | 1955 | 1963 | 1967 | 1983 | 2011 | 2015 | 2023 | 2027 | 2039 | 2043 | 2047 => {
-            C::unimp(a, w, c)
-        }
+        11 | 31 | 43 | 63 | 91 | 95 | 107 | 119 | 123 | 127 | 139 | 159 | 171 | 191 | 219 | 223
+        | 231 | 235 | 247 | 251 | 255 | 267 | 283 | 287 | 299 | 319 | 347 | 351 | 355 | 359
+        | 363 | 375 | 379 | 383 | 395 | 399 | 411 | 415 | 427 | 443 | 447 | 475 | 479 | 483
+        | 487 | 491 | 503 | 507 | 511 | 519 | 523 | 527 | 539 | 543 | 547 | 551 | 555 | 575
+        | 603 | 607 | 615 | 619 | 631 | 635 | 639 | 651 | 655 | 671 | 675 | 683 | 687 | 703
+        | 731 | 735 | 743 | 747 | 759 | 763 | 767 | 779 | 783 | 795 | 799 | 803 | 811 | 815
+        | 831 | 859 | 863 | 871 | 875 | 887 | 891 | 895 | 899 | 907 | 911 | 923 | 927 | 931
+        | 939 | 943 | 959 | 987 | 991 | 999 | 1003 | 1015 | 1019 | 1023 | 1035 | 1055 | 1067
+        | 1087 | 1115 | 1119 | 1131 | 1143 | 1147 | 1151 | 1152 | 1156 | 1160 | 1163 | 1164
+        | 1167 | 1168 | 1172 | 1176 | 1180 | 1183 | 1184 | 1188 | 1192 | 1195 | 1196 | 1200
+        | 1204 | 1208 | 1212 | 1215 | 1216 | 1220 | 1224 | 1228 | 1232 | 1236 | 1240 | 1243
+        | 1244 | 1247 | 1248 | 1252 | 1255 | 1256 | 1259 | 1260 | 1264 | 1268 | 1271 | 1272
+        | 1275 | 1276 | 1279 | 1291 | 1307 | 1311 | 1323 | 1343 | 1371 | 1375 | 1379 | 1383
+        | 1387 | 1399 | 1403 | 1407 | 1419 | 1423 | 1435 | 1439 | 1451 | 1467 | 1471 | 1499
+        | 1503 | 1507 | 1511 | 1515 | 1527 | 1531 | 1535 | 1543 | 1547 | 1551 | 1563 | 1567
+        | 1571 | 1575 | 1579 | 1599 | 1627 | 1631 | 1639 | 1643 | 1655 | 1659 | 1663 | 1675
+        | 1679 | 1695 | 1699 | 1707 | 1711 | 1727 | 1755 | 1759 | 1767 | 1771 | 1783 | 1787
+        | 1791 | 1803 | 1807 | 1819 | 1823 | 1827 | 1835 | 1839 | 1855 | 1883 | 1887 | 1895
+        | 1899 | 1911 | 1915 | 1919 | 1923 | 1931 | 1935 | 1947 | 1951 | 1955 | 1963 | 1967
+        | 1983 | 2011 | 2015 | 2023 | 2027 | 2039 | 2043 | 2047 => C::unimp(a, w, c),
         0 => {
             if (w >> 7) & 0x1f == 0x0 {
                 C::c_unimp(a, w, c)
@@ -102,19 +97,27 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         | 629 | 633 | 637 | 641 | 645 | 649 | 653 | 657 | 661 | 665 | 669 | 673 | 677 | 681
         | 685 | 689 | 693 | 697 | 701 | 705 | 709 | 713 | 717 | 721 | 725 | 729 | 733 | 737
         | 741 | 745 | 749 | 753 | 757 | 761 | 765 => C::c_li(a, w, c),
-        769 | 773 | 777 | 781 | 785 | 789 | 793 | 797 | 801 | 805 | 809 | 813 | 817 | 821 | 825
-        | 829 | 833 | 837 | 841 | 845 | 849 | 853 | 857 | 861 | 865 | 869 | 873 | 877 | 881
-        | 885 | 889 | 893 | 897 | 901 | 905 | 909 | 913 | 917 | 921 | 925 | 929 | 933 | 937
-        | 941 | 945 | 949 | 953 | 957 | 961 | 965 | 969 | 973 | 977 | 981 | 985 | 989 | 993
-        | 997 | 1001 | 1005 | 1009 | 1013 | 1017 | 1021 => {
+        773 | 777 | 781 | 785 | 789 | 793 | 797 | 801 | 805 | 809 | 813 | 817 | 821 | 825 | 829
+        | 833 | 837 | 841 | 845 | 849 | 853 | 857 | 861 | 865 | 869 | 873 | 877 | 881 | 885
+        | 889 | 893 | 897 | 901 | 905 | 909 | 913 | 917 | 921 | 925 | 929 | 933 | 937 | 941
+        | 945 | 949 | 953 | 957 | 961 | 965 | 969 | 973 | 977 | 981 | 985 | 989 | 993 | 997
+        | 1001 | 1005 | 1009 | 1013 | 1017 | 1021 => {
             if (w >> 7) & 0x1f == 0x2 {
                 C::c_addi16sp(a, w, c)
             } else {
                 C::c_lui(a, w, c)
             }
         }
-        1217 | 1221 | 1225 | 1229 | 1233 | 1237 | 1241 | 1245 | 1249 | 1253 | 1257 | 1261
-        | 1265 | 1269 | 1273 | 1277 => {
+        769 => {
+            if (w >> 7) & 0x11 == 0x1 {
+                C::c_mop(a, w, c)
+            } else if (w >> 7) & 0x1f == 0x2 {
+                C::c_addi16sp(a, w, c)
+            } else {
+                C::c_lui(a, w, c)
+            }
+        }
+        1273 | 1277 => {
             if (w >> 10) & 0x3 == 0x0 {
                 C::c_srli(a, w, c)
             } else if (w >> 10) & 0x3 == 0x1 {
@@ -193,6 +196,97 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         1185 | 1189 | 1193 | 1197 | 1201 | 1205 | 1209 | 1213 => {
             if (w >> 10) & 0x3 == 0x3 {
                 C::c_addw(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1217 | 1221 | 1225 | 1229 | 1233 | 1237 | 1241 | 1245 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_mul(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1249 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_zext_b(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1253 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_sext_b(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1257 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_zext_h(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1261 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_sext_h(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1265 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_zext_w(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_srli(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x1 {
+                C::c_srai(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_andi(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1269 => {
+            if (w >> 10) & 0x3 == 0x3 {
+                C::c_not(a, w, c)
             } else if (w >> 10) & 0x3 == 0x0 {
                 C::c_srli(a, w, c)
             } else if (w >> 10) & 0x3 == 0x1 {
@@ -444,6 +538,10 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::ebreak(a, w, c)
             } else if (w >> 7) & 0xfffffe1f == 0x2000 {
                 C::end(a, w, c)
+            } else if (w >> 7) & 0xfffffe1f == 0x1a000 {
+                C::wrs_nto(a, w, c)
+            } else if (w >> 7) & 0xfffffe1f == 0x3a000 {
+                C::wrs_sto(a, w, c)
             } else if (w >> 7) & 0xfffffe1f == 0x204000 {
                 C::sret(a, w, c)
             } else if (w >> 7) & 0xfffffe1f == 0x20a000 {
@@ -620,6 +718,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sc_w(a, w, c)
             } else if (w >> 20) & 0xffffff80 == 0x200 {
                 C::amoxor_w(a, w, c)
+            } else if (w >> 20) & 0xffffff80 == 0x280 {
+                C::amocas_w(a, w, c)
             } else if (w >> 20) & 0xffffff80 == 0x400 {
                 C::amoor_w(a, w, c)
             } else if (w >> 20) & 0xffffff80 == 0x600 {
@@ -647,6 +747,8 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::sc_d(a, w, c)
             } else if (w >> 20) & 0xffffff80 == 0x200 {
                 C::amoxor_d(a, w, c)
+            } else if (w >> 20) & 0xffffff80 == 0x280 {
+                C::amocas_d(a, w, c)
             } else if (w >> 20) & 0xffffff80 == 0x400 {
                 C::amoor_d(a, w, c)
             } else if (w >> 20) & 0xffffff80 == 0x600 {
@@ -714,18 +816,30 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::fmv_x_h(a, w, c)
             } else if (w >> 20) == 0xf00 {
                 C::fmv_w_x(a, w, c)
+            } else if (w >> 20) == 0xf01 {
+                C::fli_s(a, w, c)
             } else if (w >> 20) == 0xf20 {
                 C::fmv_d_x(a, w, c)
+            } else if (w >> 20) == 0xf21 {
+                C::fli_d(a, w, c)
             } else if (w >> 20) == 0xf40 {
                 C::fmv_h_x(a, w, c)
             } else if (w >> 20) == 0x401 {
                 C::fcvt_s_d(a, w, c)
             } else if (w >> 20) == 0x402 {
                 C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
             } else if (w >> 20) == 0x420 {
                 C::fcvt_d_s(a, w, c)
             } else if (w >> 20) == 0x422 {
                 C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
             } else if (w >> 20) == 0x440 {
                 C::fcvt_h_s(a, w, c)
             } else if (w >> 20) == 0x441 {
@@ -799,7 +913,9 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
             }
         }
         211 | 1235 => {
-            if (w >> 20) == 0xe00 {
+            if (w >> 20) == 0xc28 {
+                C::fcvtmod_w_d(a, w, c)
+            } else if (w >> 20) == 0xe00 {
                 C::fclass_s(a, w, c)
             } else if (w >> 20) == 0xe20 {
                 C::fclass_d(a, w, c)
@@ -807,10 +923,18 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::fcvt_s_d(a, w, c)
             } else if (w >> 20) == 0x402 {
                 C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
             } else if (w >> 20) == 0x420 {
                 C::fcvt_d_s(a, w, c)
             } else if (w >> 20) == 0x422 {
                 C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
             } else if (w >> 20) == 0x440 {
                 C::fcvt_h_s(a, w, c)
             } else if (w >> 20) == 0x441 {
@@ -888,10 +1012,18 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::fcvt_s_d(a, w, c)
             } else if (w >> 20) == 0x402 {
                 C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
             } else if (w >> 20) == 0x420 {
                 C::fcvt_d_s(a, w, c)
             } else if (w >> 20) == 0x422 {
                 C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
             } else if (w >> 20) == 0x440 {
                 C::fcvt_h_s(a, w, c)
             } else if (w >> 20) == 0x441 {
@@ -936,6 +1068,10 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::fsgnjx_s(a, w, c)
             } else if (w >> 20) & 0xffffffe0 == 0x220 {
                 C::fsgnjx_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x280 {
+                C::fminm_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x2a0 {
+                C::fminm_d(a, w, c)
             } else if (w >> 20) & 0xffffffe0 == 0xa00 {
                 C::feq_s(a, w, c)
             } else if (w >> 20) & 0xffffffe0 == 0xa20 {
@@ -960,15 +1096,23 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::unimp(a, w, c)
             }
         }
-        467 | 595 | 723 | 851 | 979 | 1491 | 1619 | 1747 | 1875 | 2003 => {
+        467 | 1491 => {
             if (w >> 20) == 0x401 {
                 C::fcvt_s_d(a, w, c)
             } else if (w >> 20) == 0x402 {
                 C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
             } else if (w >> 20) == 0x420 {
                 C::fcvt_d_s(a, w, c)
             } else if (w >> 20) == 0x422 {
                 C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
             } else if (w >> 20) == 0x440 {
                 C::fcvt_h_s(a, w, c)
             } else if (w >> 20) == 0x441 {
@@ -1009,6 +1153,249 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
                 C::fcvt_d_l(a, w, c)
             } else if (w >> 20) == 0xd23 {
                 C::fcvt_d_lu(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x280 {
+                C::fmaxm_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x2a0 {
+                C::fmaxm_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x0 {
+                C::fadd_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x20 {
+                C::fadd_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x80 {
+                C::fsub_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa0 {
+                C::fsub_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x100 {
+                C::fmul_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x120 {
+                C::fmul_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x180 {
+                C::fdiv_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
+                C::fdiv_d(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        851 | 979 | 1875 | 2003 => {
+            if (w >> 20) == 0x401 {
+                C::fcvt_s_d(a, w, c)
+            } else if (w >> 20) == 0x402 {
+                C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
+            } else if (w >> 20) == 0x420 {
+                C::fcvt_d_s(a, w, c)
+            } else if (w >> 20) == 0x422 {
+                C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
+            } else if (w >> 20) == 0x440 {
+                C::fcvt_h_s(a, w, c)
+            } else if (w >> 20) == 0x441 {
+                C::fcvt_h_d(a, w, c)
+            } else if (w >> 20) == 0x580 {
+                C::fsqrt_s(a, w, c)
+            } else if (w >> 20) == 0x5a0 {
+                C::fsqrt_d(a, w, c)
+            } else if (w >> 20) == 0xc00 {
+                C::fcvt_w_s(a, w, c)
+            } else if (w >> 20) == 0xc01 {
+                C::fcvt_wu_s(a, w, c)
+            } else if (w >> 20) == 0xc02 {
+                C::fcvt_l_s(a, w, c)
+            } else if (w >> 20) == 0xc03 {
+                C::fcvt_lu_s(a, w, c)
+            } else if (w >> 20) == 0xc20 {
+                C::fcvt_w_d(a, w, c)
+            } else if (w >> 20) == 0xc21 {
+                C::fcvt_wu_d(a, w, c)
+            } else if (w >> 20) == 0xc22 {
+                C::fcvt_l_d(a, w, c)
+            } else if (w >> 20) == 0xc23 {
+                C::fcvt_lu_d(a, w, c)
+            } else if (w >> 20) == 0xd00 {
+                C::fcvt_s_w(a, w, c)
+            } else if (w >> 20) == 0xd01 {
+                C::fcvt_s_wu(a, w, c)
+            } else if (w >> 20) == 0xd02 {
+                C::fcvt_s_l(a, w, c)
+            } else if (w >> 20) == 0xd03 {
+                C::fcvt_s_lu(a, w, c)
+            } else if (w >> 20) == 0xd20 {
+                C::fcvt_d_w(a, w, c)
+            } else if (w >> 20) == 0xd21 {
+                C::fcvt_d_wu(a, w, c)
+            } else if (w >> 20) == 0xd22 {
+                C::fcvt_d_l(a, w, c)
+            } else if (w >> 20) == 0xd23 {
+                C::fcvt_d_lu(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x0 {
+                C::fadd_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x20 {
+                C::fadd_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x80 {
+                C::fsub_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa0 {
+                C::fsub_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x100 {
+                C::fmul_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x120 {
+                C::fmul_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x180 {
+                C::fdiv_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
+                C::fdiv_d(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        595 | 1619 => {
+            if (w >> 20) == 0x401 {
+                C::fcvt_s_d(a, w, c)
+            } else if (w >> 20) == 0x402 {
+                C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
+            } else if (w >> 20) == 0x420 {
+                C::fcvt_d_s(a, w, c)
+            } else if (w >> 20) == 0x422 {
+                C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
+            } else if (w >> 20) == 0x440 {
+                C::fcvt_h_s(a, w, c)
+            } else if (w >> 20) == 0x441 {
+                C::fcvt_h_d(a, w, c)
+            } else if (w >> 20) == 0x580 {
+                C::fsqrt_s(a, w, c)
+            } else if (w >> 20) == 0x5a0 {
+                C::fsqrt_d(a, w, c)
+            } else if (w >> 20) == 0xc00 {
+                C::fcvt_w_s(a, w, c)
+            } else if (w >> 20) == 0xc01 {
+                C::fcvt_wu_s(a, w, c)
+            } else if (w >> 20) == 0xc02 {
+                C::fcvt_l_s(a, w, c)
+            } else if (w >> 20) == 0xc03 {
+                C::fcvt_lu_s(a, w, c)
+            } else if (w >> 20) == 0xc20 {
+                C::fcvt_w_d(a, w, c)
+            } else if (w >> 20) == 0xc21 {
+                C::fcvt_wu_d(a, w, c)
+            } else if (w >> 20) == 0xc22 {
+                C::fcvt_l_d(a, w, c)
+            } else if (w >> 20) == 0xc23 {
+                C::fcvt_lu_d(a, w, c)
+            } else if (w >> 20) == 0xd00 {
+                C::fcvt_s_w(a, w, c)
+            } else if (w >> 20) == 0xd01 {
+                C::fcvt_s_wu(a, w, c)
+            } else if (w >> 20) == 0xd02 {
+                C::fcvt_s_l(a, w, c)
+            } else if (w >> 20) == 0xd03 {
+                C::fcvt_s_lu(a, w, c)
+            } else if (w >> 20) == 0xd20 {
+                C::fcvt_d_w(a, w, c)
+            } else if (w >> 20) == 0xd21 {
+                C::fcvt_d_wu(a, w, c)
+            } else if (w >> 20) == 0xd22 {
+                C::fcvt_d_l(a, w, c)
+            } else if (w >> 20) == 0xd23 {
+                C::fcvt_d_lu(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa00 {
+                C::fleq_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa20 {
+                C::fleq_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x0 {
+                C::fadd_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x20 {
+                C::fadd_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x80 {
+                C::fsub_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa0 {
+                C::fsub_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x100 {
+                C::fmul_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x120 {
+                C::fmul_d(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x180 {
+                C::fdiv_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0x1a0 {
+                C::fdiv_d(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        723 | 1747 => {
+            if (w >> 20) == 0x401 {
+                C::fcvt_s_d(a, w, c)
+            } else if (w >> 20) == 0x402 {
+                C::fcvt_s_h(a, w, c)
+            } else if (w >> 20) == 0x404 {
+                C::fround_s(a, w, c)
+            } else if (w >> 20) == 0x405 {
+                C::froundnx_s(a, w, c)
+            } else if (w >> 20) == 0x420 {
+                C::fcvt_d_s(a, w, c)
+            } else if (w >> 20) == 0x422 {
+                C::fcvt_d_h(a, w, c)
+            } else if (w >> 20) == 0x424 {
+                C::fround_d(a, w, c)
+            } else if (w >> 20) == 0x425 {
+                C::froundnx_d(a, w, c)
+            } else if (w >> 20) == 0x440 {
+                C::fcvt_h_s(a, w, c)
+            } else if (w >> 20) == 0x441 {
+                C::fcvt_h_d(a, w, c)
+            } else if (w >> 20) == 0x580 {
+                C::fsqrt_s(a, w, c)
+            } else if (w >> 20) == 0x5a0 {
+                C::fsqrt_d(a, w, c)
+            } else if (w >> 20) == 0xc00 {
+                C::fcvt_w_s(a, w, c)
+            } else if (w >> 20) == 0xc01 {
+                C::fcvt_wu_s(a, w, c)
+            } else if (w >> 20) == 0xc02 {
+                C::fcvt_l_s(a, w, c)
+            } else if (w >> 20) == 0xc03 {
+                C::fcvt_lu_s(a, w, c)
+            } else if (w >> 20) == 0xc20 {
+                C::fcvt_w_d(a, w, c)
+            } else if (w >> 20) == 0xc21 {
+                C::fcvt_wu_d(a, w, c)
+            } else if (w >> 20) == 0xc22 {
+                C::fcvt_l_d(a, w, c)
+            } else if (w >> 20) == 0xc23 {
+                C::fcvt_lu_d(a, w, c)
+            } else if (w >> 20) == 0xd00 {
+                C::fcvt_s_w(a, w, c)
+            } else if (w >> 20) == 0xd01 {
+                C::fcvt_s_wu(a, w, c)
+            } else if (w >> 20) == 0xd02 {
+                C::fcvt_s_l(a, w, c)
+            } else if (w >> 20) == 0xd03 {
+                C::fcvt_s_lu(a, w, c)
+            } else if (w >> 20) == 0xd20 {
+                C::fcvt_d_w(a, w, c)
+            } else if (w >> 20) == 0xd21 {
+                C::fcvt_d_wu(a, w, c)
+            } else if (w >> 20) == 0xd22 {
+                C::fcvt_d_l(a, w, c)
+            } else if (w >> 20) == 0xd23 {
+                C::fcvt_d_lu(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa00 {
+                C::fltq_s(a, w, c)
+            } else if (w >> 20) & 0xffffffe0 == 0xa20 {
+                C::fltq_d(a, w, c)
             } else if (w >> 20) & 0xffffffe0 == 0x0 {
                 C::fadd_s(a, w, c)
             } else if (w >> 20) & 0xffffffe0 == 0x20 {
@@ -1088,6 +1475,98 @@ pub fn decoder<R, C: RiscvDecoder<Context = C, Returns = R>>(a: u64, w: u32, c: 
         599 | 1623 => C::vop_ivx(a, w, c),
         727 | 1751 => C::vop_fvf(a, w, c),
         855 | 1879 => C::vop_mvx(a, w, c),
+        1024 | 1028 | 1032 | 1036 | 1040 | 1044 | 1048 | 1052 | 1056 | 1060 | 1064 | 1068
+        | 1072 | 1076 | 1080 | 1084 => {
+            if (w >> 10) & 0x3 == 0x1 {
+                C::c_lhu(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x3 {
+                C::c_sh(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_lbu(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_sb(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        1088 | 1092 | 1096 | 1100 | 1104 | 1108 | 1112 | 1116 | 1120 | 1124 | 1128 | 1132
+        | 1136 | 1140 | 1144 | 1148 => {
+            if (w >> 10) & 0x3 == 0x1 {
+                C::c_lh(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x0 {
+                C::c_lbu(a, w, c)
+            } else if (w >> 10) & 0x3 == 0x2 {
+                C::c_sb(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        627 | 1651 => {
+            if (w >> 22) & 0xfffffecf == 0x207 {
+                C::mop_r(a, w, c)
+            } else if (w >> 22) & 0xfffffec8 == 0x208 {
+                C::mop_rr(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        559 | 1583 => {
+            if (w >> 27) == 0x5 {
+                C::amocas_q(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        47 | 1071 => {
+            if (w >> 27) == 0x0 {
+                C::amoadd_b(a, w, c)
+            } else if (w >> 27) == 0x1 {
+                C::amoswap_b(a, w, c)
+            } else if (w >> 27) == 0x4 {
+                C::amoxor_b(a, w, c)
+            } else if (w >> 27) == 0x5 {
+                C::amocas_b(a, w, c)
+            } else if (w >> 27) == 0x8 {
+                C::amoor_b(a, w, c)
+            } else if (w >> 27) == 0xc {
+                C::amoand_b(a, w, c)
+            } else if (w >> 27) == 0x10 {
+                C::amomin_b(a, w, c)
+            } else if (w >> 27) == 0x14 {
+                C::amomax_b(a, w, c)
+            } else if (w >> 27) == 0x18 {
+                C::amominu_b(a, w, c)
+            } else if (w >> 27) == 0x1c {
+                C::amomaxu_b(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
+        175 | 1199 => {
+            if (w >> 27) == 0x0 {
+                C::amoadd_h(a, w, c)
+            } else if (w >> 27) == 0x1 {
+                C::amoswap_h(a, w, c)
+            } else if (w >> 27) == 0x4 {
+                C::amoxor_h(a, w, c)
+            } else if (w >> 27) == 0x5 {
+                C::amocas_h(a, w, c)
+            } else if (w >> 27) == 0x8 {
+                C::amoor_h(a, w, c)
+            } else if (w >> 27) == 0xc {
+                C::amoand_h(a, w, c)
+            } else if (w >> 27) == 0x10 {
+                C::amomin_h(a, w, c)
+            } else if (w >> 27) == 0x14 {
+                C::amomax_h(a, w, c)
+            } else if (w >> 27) == 0x18 {
+                C::amominu_h(a, w, c)
+            } else if (w >> 27) == 0x1c {
+                C::amomaxu_h(a, w, c)
+            } else {
+                C::unimp(a, w, c)
+            }
+        }
         _ => C::unimp(a, w, c),
     }
 }
@@ -1376,6 +1855,61 @@ pub enum Op {
     VopIvx,
     VopFvf,
     VopMvx,
+    CLbu,
+    CLhu,
+    CLh,
+    CSb,
+    CSh,
+    CMul,
+    CZextB,
+    CSextB,
+    CZextH,
+    CSextH,
+    CZextW,
+    CNot,
+    CMop,
+    MopR,
+    MopRr,
+    WrsNto,
+    WrsSto,
+    AmocasW,
+    AmocasD,
+    AmocasQ,
+    AmoswapB,
+    AmoaddB,
+    AmoxorB,
+    AmoandB,
+    AmoorB,
+    AmominB,
+    AmomaxB,
+    AmominuB,
+    AmomaxuB,
+    AmocasB,
+    AmoswapH,
+    AmoaddH,
+    AmoxorH,
+    AmoandH,
+    AmoorH,
+    AmominH,
+    AmomaxH,
+    AmominuH,
+    AmomaxuH,
+    AmocasH,
+    FliS,
+    FliD,
+    FminmS,
+    FmaxmS,
+    FminmD,
+    FmaxmD,
+    FroundS,
+    FroundnxS,
+    FroundD,
+    FroundnxD,
+    FcvtmodWD,
+    FleqS,
+    FltqS,
+    FleqD,
+    FltqD,
     End,
     Unimp,
 }

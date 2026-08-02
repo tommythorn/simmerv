@@ -787,6 +787,48 @@ fn op_integer(cpu: &mut Cpu, c: &Ctx, op: Op) -> Result<u64, Exception> {
     let mut sat = false;
 
     match c.funct6 {
+        // Zvbb vandn: vd = vs2 & ~vs1.  No immediate form.
+        0b000001 if !vi => {
+            require_vm(cpu)?;
+            ew(cpu, c, |a, b| a & !b);
+        }
+        // Zvbb vror/vrol.  The rotate amount is taken modulo the element width.
+        // vror.vi carries a *six*-bit immediate whose top bit is funct6[0], so
+        // the two funct6 values are one instruction in the .vi form and two
+        // different ones otherwise.
+        0b010100 | 0b010101 => {
+            require_vm(cpu)?;
+            let rotate_left = !vi && c.funct6 == 0b010101;
+            let imm_high = u64::from(vi && c.funct6 == 0b010101) << 5;
+            ew(cpu, c, |a, b| {
+                let n = (b | imm_high) % u64::from(bits);
+                if n == 0 {
+                    a
+                } else if rotate_left {
+                    (a << n) | (a >> (u64::from(bits) - n))
+                } else {
+                    (a >> n) | (a << (u64::from(bits) - n))
+                }
+            });
+        }
+        // Zvbb vwsll: zero-extend each element, then shift left into a
+        // double-width destination.
+        0b110101 => {
+            require_vm(cpu)?;
+            let wide = sew * 2;
+            if wide > ELEN / 8 || scale_lmul(cpu.v.vlmul(), wide, sew).is_none() {
+                return Err(illegal());
+            }
+            for i in c.vstart..c.vl {
+                if !c.active(&cpu.v, i) {
+                    continue;
+                }
+                let a = cpu.v.eget(c.vs2, i, sew);
+                // The shift amount is masked to log2 of the *widened* width.
+                let n = bop(&cpu.v, c, i) & (((wide * 8) - 1) as u64);
+                cpu.v.eset(c.vd, i, wide, a << n);
+            }
+        }
         0b000000 => {
             require_vm(cpu)?;
             ew(cpu, c, u64::wrapping_add);
@@ -1256,6 +1298,52 @@ fn op_mvx(cpu: &mut Cpu, c: &Ctx, op: Op) -> Result<u64, Exception> {
             }
             if c.vl > 0 && c.vstart < c.vl {
                 cpu.v.eset(c.vd, 0, sew, c.scalar);
+            }
+        }
+        // VXUNARY0 (vv): Zvbb's bit-manipulation unaries share this group with
+        // vzext/vsext, selected by the vs1 field rather than by funct6.  All of
+        // them are same-width, element-wise and read only vs2.
+        0b010010 if vv && matches!(c.vs1, 0b01000..=0b01010 | 0b01100..=0b01110) => {
+            let vs1 = c.vs1;
+            for i in c.vstart..c.vl {
+                if !c.active(&cpu.v, i) {
+                    continue;
+                }
+                let e = cpu.v.eget(c.vs2, i, sew);
+                let r = match vs1 {
+                    // vbrev8: reverse the bits within each byte
+                    0b01000 => {
+                        let mut v = 0u64;
+                        for byte in 0..sew {
+                            let b = ((e >> (byte * 8)) & 0xff) as u8;
+                            v |= u64::from(b.reverse_bits()) << (byte * 8);
+                        }
+                        v
+                    }
+                    // vrev8: reverse the byte order within the element
+                    0b01001 => {
+                        let mut v = 0u64;
+                        for byte in 0..sew {
+                            let b = (e >> (byte * 8)) & 0xff;
+                            v |= b << ((sew - 1 - byte) * 8);
+                        }
+                        v
+                    }
+                    // vbrev: reverse every bit of the element
+                    0b01010 => e.reverse_bits() >> (64 - bits),
+                    // vclz / vctz: counts saturate at the element width
+                    0b01100 => u64::from(e.leading_zeros()) - u64::from(64 - bits),
+                    0b01101 => {
+                        if e == 0 {
+                            u64::from(bits)
+                        } else {
+                            u64::from(e.trailing_zeros())
+                        }
+                    }
+                    // vcpop
+                    _ => u64::from(e.count_ones()),
+                };
+                cpu.v.eset(c.vd, i, sew, r);
             }
         }
         // VXUNARY0 (vv): vzext / vsext by a factor of 2, 4 or 8
