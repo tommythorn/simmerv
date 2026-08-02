@@ -18,6 +18,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The demo's root filesystem is 208 MB, past GitHub's 100 MB file limit, so
+  # it is a release asset rather than a tracked file. Rebuild it with
+  # linux/demo/mkdemo-image.sh and re-upload to this tag.
+  ROOTFS_TAG: demo-image
+  ROOTFS_URL: https://github.com/tommythorn/simmerv/releases/download/demo-image/rootfs.sqfs
 
 # Let a running deploy finish rather than cancelling it half-published.
 concurrency:
@@ -47,6 +52,21 @@ jobs:
       - name: Build
         run: cd wasm && ./build.sh
 
+      # Fetched rather than checked out, and staged into the site rather than
+      # linked to directly: release assets carry no Access-Control-Allow-Origin,
+      # so the browser cannot range-request one cross-origin from the Pages
+      # site. Served same-origin from here, it can.
+      - name: Cache the demo root filesystem
+        id: rootfs
+        uses: actions/cache@v4
+        with:
+          path: rootfs.sqfs
+          key: demo-rootfs-${{ env.ROOTFS_TAG }}
+
+      - name: Download the demo root filesystem
+        if: steps.rootfs.outputs.cache-hit != 'true'
+        run: curl -fsSL -o rootfs.sqfs "$ROOTFS_URL"
+
       # The demo fetches its kernel and rootfs at run time (see resourcePath in
       # index.html). They used to come from the checked-in tree because Pages
       # served the whole repository; now the site is just this directory, so
@@ -56,8 +76,10 @@ jobs:
           mkdir -p _site/linux/demo
           cp -r wasm/web/. _site/
           cp linux/fw_payload.bin _site/linux/
-          cp linux/demo/demo.dtb linux/demo/initramfs.cpio linux/demo/rootfs.sqfs \
-             _site/linux/demo/
+          cp linux/demo/demo.dtb linux/demo/initramfs.cpio _site/linux/demo/
+          # The tracked linux/demo/rootfs.sqfs is the small image, kept for CLI
+          # use; the demo serves the full one from the release asset.
+          cp rootfs.sqfs _site/linux/demo/rootfs.sqfs
           du -sh _site
 
       - name: Upload Pages artifact
