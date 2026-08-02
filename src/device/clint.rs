@@ -27,10 +27,29 @@ use wasm_timer::Instant;
 
 /// Emulates CLINT known as Timer. Refer to the [specification](https://sifive.cdn.prismic.io/sifive%2Fc89f6e5a-cf9e-44c3-a3db-04420702dcc1_sifive+e31+manual+v19.08.pdf)
 /// for the detail.
+/// How many `now_micros` calls reuse one wall-clock reading.
+///
+/// The emulator samples the clock about once every 48 retired instructions
+/// (once per `run_soc`, for the mtimecmp comparison, plus every guest
+/// `rdtime`). That is cheap natively but not in a browser, where each sample
+/// is a JS call through wasm-bindgen -- three of them, since `wasm_timer` walks
+/// `window()` then `performance()` before `now()`. Reusing a reading across a
+/// short run of calls makes the clock negligible again.
+///
+/// mtime stays monotonic; it just advances in steps. At 64 the step is a few
+/// hundred microseconds of emulated time, far finer than the millisecond tick
+/// a guest schedules on, and a guest polling `rdtime` in a loop still sees it
+/// move.
+const CLOCK_SAMPLE_INTERVAL: u32 = 64;
+
 pub struct Clint {
     pub mtimecmp: u64,
     pub mtime_delta: u64,
     t0: Instant,
+    /// Last wall-clock reading, and how many more calls may reuse it.
+    /// `Cell` because `read_mtime` takes `&self`.
+    cached_micros: std::cell::Cell<u64>,
+    samples_left: std::cell::Cell<u32>,
     /// When true, `read_mtime` ignores wall-clock and returns `mtime_delta`
     /// directly. Used by cosim so the driver can pin mtime to the DUT's value.
     pub frozen: bool,
@@ -48,6 +67,8 @@ impl Clint {
             mtimecmp: 0,
             mtime_delta: 0,
             t0: Instant::now(),
+            cached_micros: std::cell::Cell::new(0),
+            samples_left: std::cell::Cell::new(0),
             frozen: false,
         }
     }
@@ -57,7 +78,17 @@ impl Clint {
     ///
     /// # Arguments
     #[allow(clippy::cast_possible_truncation)]
-    fn now_micros(&self) -> u64 { self.t0.elapsed().as_micros() as u64 }
+    fn now_micros(&self) -> u64 {
+        let left = self.samples_left.get();
+        if left == 0 {
+            let now = self.t0.elapsed().as_micros() as u64;
+            self.cached_micros.set(now);
+            self.samples_left.set(CLOCK_SAMPLE_INTERVAL);
+            return now;
+        }
+        self.samples_left.set(left - 1);
+        self.cached_micros.get()
+    }
 
     /// `Clint` can raise interrupt. If it does it rises a certain bit
     /// depending on interrupt type of CPU `mip` register.

@@ -173,6 +173,16 @@ impl WasmRiscv {
         }
     }
 
+    /// Instructions retired so far.
+    ///
+    /// Exposed so the page can report MIPS: divide the delta by wall-clock
+    /// elapsed on the JS side. Returned as `f64` because JS numbers are
+    /// doubles -- exact up to 2^53, far beyond anything a browser session
+    /// will retire.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn instructions_retired(&self) -> f64 { self.emulator.cpu.cycle as f64 }
+
     /// Runs program set by `load_image()`. The emulator won't stop forever
     /// unless [`riscv-tests`](https://github.com/riscv/riscv-tests) programs.
     /// The emulator stops if program is `riscv-tests` program and it finishes.
