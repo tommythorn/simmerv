@@ -30,7 +30,12 @@
       const KERNEL  = './linux/fw_payload.bin';
       const DTB     = './linux/demo/demo.dtb';
       const INITRD  = './linux/demo/initramfs.cpio';
-      const ROOTFS  = './linux/demo/rootfs.sqfs';
+      // A squashfs despite the extension: GitHub Pages gzips anything it
+      // types application/octet-stream (.sqfs, .img, .iso, .bin all are), and
+      // that compression applies to range responses too -- so the bytes would
+      // arrive as slices of a gzip stream. .cpio is typed application/x-cpio
+      // and served untouched. See the note in .github/workflows/pages.yml.
+      const ROOTFS  = './linux/demo/rootfs.cpio';
       const INITRD_ADDR = 0x9e000000;
 
       // The root filesystem is streamed: rather than downloading it, we hand
@@ -103,6 +108,16 @@
               .then(r => {
                 if (r.status !== 206) {
                   throw new Error(`expected 206 Partial Content, got ${r.status}`);
+                }
+                // If the server ever encodes the response, the range covers
+                // the *encoded* stream and these are not disk bytes at all.
+                // That failed silently once: the guest mounted garbage and
+                // reported a corrupt filesystem, with nothing to point at the
+                // transport. Check it, and say so.
+                const enc = r.headers.get('content-encoding');
+                if (enc) {
+                  throw new Error(`server encoded the range as '${enc}'; `
+                    + 'ranges no longer address the raw image');
                 }
                 return r.arrayBuffer();
               })

@@ -79,7 +79,16 @@ jobs:
           cp linux/demo/demo.dtb linux/demo/initramfs.cpio _site/linux/demo/
           # The tracked linux/demo/rootfs.sqfs is the small image, kept for CLI
           # use; the demo serves the full one from the release asset.
-          cp rootfs.sqfs _site/linux/demo/rootfs.sqfs
+          #
+          # Deliberately named .cpio, which it is not. Pages picks a MIME type
+          # from the extension and gzips anything typed application/octet-stream
+          # -- which .sqfs, .img, .iso, .bin and .raw all are. Compression
+          # applies to range responses too, so the browser would receive slices
+          # of a gzip stream and feed them to squashfs as if they were disk
+          # blocks. Measured: .cpio is served application/x-cpio and left
+          # alone. index.html checks the response headers and fails loudly if
+          # that ever stops being true.
+          cp rootfs.sqfs _site/linux/demo/rootfs.cpio
           du -sh _site
 
       - name: Upload Pages artifact
