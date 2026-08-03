@@ -84,6 +84,14 @@ pub struct Mmu {
     /// Plain RAM regions — fast path for load/store.
     pub memory: Vec<(Range<u64>, Vec<u8>)>,
 
+    /// Mirror of `memory[i].0.start` in a fixed-size array.  The TLB hit path
+    /// needs the region base to turn a `(mem_idx, page_byte_offset)` pair into
+    /// a physical address; going through `memory` for it costs a `Vec` header
+    /// load plus a bounds check against a length the compiler cannot see, on
+    /// every load and store.  Indexing a fixed-size array instead is a single
+    /// load off `self`.  Maintained by `push_memory_region`.
+    mem_start: [u64; Self::MAX_MEM_REGIONS],
+
     /// Cosim DUT-follow: swallow stores to queue devices (uart/virtio/syscon).
     /// A model device acting on a store (e.g. a virtio `QueueNotify` ring-chew)
     /// would fork REF RAM from the DUT; loads adopt DUT values so device
@@ -177,6 +185,11 @@ impl Default for Mmu {
 }
 
 impl Mmu {
+    /// Upper bound on RAM regions.  Two are used (main RAM and the
+    /// `0x7000_0000` scratch region); the array is oversized so `mem_start`
+    /// never needs to grow.
+    pub const MAX_MEM_REGIONS: usize = 8;
+
     pub const CLINT_BASE: u64 = 0x0200_0000;
     pub const CLINT_END: u64 = 0x0201_0000;
     pub const PLIC_BASE: u64 = 0x0c00_0000;
@@ -219,6 +232,7 @@ impl Mmu {
             mip: 0,
             satp: 0,
             memory: Vec::new(),
+            mem_start: [0; Self::MAX_MEM_REGIONS],
             clint: (Self::CLINT_BASE..Self::CLINT_END, Clint::new()),
             plic: (Self::PLIC_BASE..Self::PLIC_END, Plic::new()),
             devices: Vec::new(),
@@ -239,8 +253,22 @@ impl Mmu {
 
     /// Appends a zeroed RAM region covering `base..base+size`.
     pub fn add_memory(&mut self, base: u64, size: usize) {
-        self.memory
-            .push((base..base + size as u64, vec![0u8; size]));
+        self.push_memory_region(base..base + size as u64, vec![0u8; size]);
+    }
+
+    /// Append a RAM region, keeping the `mem_start` mirror in step.  All
+    /// structural changes to `memory` must go through here.
+    ///
+    /// # Panics
+    /// If more than `MAX_MEM_REGIONS` regions are added.
+    fn push_memory_region(&mut self, range: Range<u64>, bytes: Vec<u8>) {
+        assert!(
+            self.memory.len() < Self::MAX_MEM_REGIONS,
+            "too many RAM regions (max {})",
+            Self::MAX_MEM_REGIONS
+        );
+        self.mem_start[self.memory.len()] = range.start;
+        self.memory.push((range, bytes));
     }
 
     /// Writes `data` into the memory region containing `addr`.
@@ -1121,7 +1149,7 @@ impl Mmu {
         if let Some((mem_idx, page_byte_offset, perm)) = self.dtlb.lookup(vpage, asid)
             && check_perm(perm, access_shift, prv_is_user, sum, mxr)
         {
-            let pa = self.memory[mem_idx as usize].0.start + page_byte_offset + (address & 0xfff);
+            let pa = self.mem_start[mem_idx as usize] + page_byte_offset + (address & 0xfff);
             self.paranoid_check(address, pa, access_type, "dTLB");
             self.dtlb.hits += 1;
             return Ok(DataAddr {
@@ -1137,7 +1165,7 @@ impl Mmu {
             // within the superpage so callers still index RAM directly with
             // `page_byte_offset | (va & 0xfff)`.
             let page_byte_offset = base_offset_2m + (address & SUPERPAGE_MASK & !0xfff);
-            let pa = self.memory[mem_idx as usize].0.start + page_byte_offset + (address & 0xfff);
+            let pa = self.mem_start[mem_idx as usize] + page_byte_offset + (address & 0xfff);
             self.paranoid_check(address, pa, access_type, "dTLB2M");
             self.dtlb2m.hits += 1;
             return Ok(DataAddr {
@@ -1411,11 +1439,16 @@ impl Mmu {
         // Restore memory regions
         self.memory.clear();
         let mem_count = r.u64()? as usize;
+        // Reject rather than let `push_memory_region` panic: this count comes
+        // from the snapshot file, so it is untrusted input.
+        if mem_count > Self::MAX_MEM_REGIONS {
+            return Err(());
+        }
         for _ in 0..mem_count {
             let base = r.u64()?;
             let end = r.u64()?;
             let bytes = r.bytes()?;
-            self.memory.push((base..end, bytes));
+            self.push_memory_region(base..end, bytes);
         }
 
         // Restore CLINT (leading record, not counted in device_count)

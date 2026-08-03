@@ -3,6 +3,27 @@ use crate::cpu::Uop;
 /// Maximum number of uops in a single cached basic block.
 pub const MAX_BLOCK_LEN: usize = 16;
 
+/// Default total uop capacity, for every front end.
+///
+/// This matters far more than it looks.  Measured booting the Debian demo
+/// image (2 G instructions of kernel + systemd, deterministic clock):
+///
+/// | entries | MIPS | conflict misses/Mi |
+/// |---------|------|--------------------|
+/// |   8 192 |  107 |             19 782 |
+/// |  32 768 |  145 |              7 599 |
+/// |  65 536 |  165 |              3 512 |
+/// | 131 072 |  173 |              1 820 |
+/// | 262 144 |  171 |              1 126 |
+///
+/// A Linux workload has a far bigger hot code footprint than the old busybox
+/// images this was first tuned on, and starving the cache costs more than any
+/// micro-optimisation in the executor.  Past 131 072 the falling conflict-miss
+/// rate no longer pays for the cold misses that refilling a larger cache
+/// costs after each full flush.  At 16 uops per block slot this is 8 192
+/// slots, about 1.6 MB — cheap even in the browser.
+pub const DEFAULT_UOP_ENTRIES: usize = 131_072;
+
 /// Cache mapping strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {

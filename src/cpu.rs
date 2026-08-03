@@ -2543,11 +2543,16 @@ pub fn decode(a: u64, word: u32, rva23: bool) -> Uop {
     uop
 }
 
-/// Inline fast path for the most common ops (integer ALU, branches, jumps).
-/// Avoids the function-call overhead of `new_execute` for ~70% of instructions.
+/// Inline fast path for the most common ops (integer ALU, branches, jumps,
+/// loads and stores).  Avoids the function-call overhead of `new_execute` for
+/// the great majority of instructions.
 #[allow(clippy::inline_always)]
 #[inline(always)]
-#[allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_lossless,
+    clippy::too_many_lines
+)]
 fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u64) -> ExecOut {
     match uop.op {
         // Lui / Auipc
@@ -2637,7 +2642,37 @@ fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: 
         // RV32M/RV64M integer multiply
         Op::Mul => ExecOut::ok(s1.wrapping_mul(s2)),
         Op::Mulw => ExecOut::ok((s1 as i32).wrapping_mul(s2 as i32) as u64),
-        // Everything else: memory, float, CSR, atomic, etc.
+        // Integer loads and stores — about a third of a Linux workload's
+        // dynamic instructions, and previously the largest group still
+        // reaching `new_execute`.  Worth only ~1%: the fall-through is a tail
+        // call into a single jump table, not a second dispatch, so what this
+        // buys is the call itself, not the decode.
+        Op::Lb => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 1)) as i8 as u64),
+        Op::Lbu => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 1))),
+        Op::Lh => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2)) as i16 as u64),
+        Op::Lhu => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2))),
+        Op::Lw | Op::CLw | Op::CLwsp => {
+            ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 4)) as i32 as u64)
+        }
+        Op::Lwu => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 4))),
+        Op::Ld | Op::CLd | Op::CLdsp => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 8))),
+        Op::Sb => {
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 1));
+            ExecOut::ok(0)
+        }
+        Op::Sh => {
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 2));
+            ExecOut::ok(0)
+        }
+        Op::Sw | Op::CSw | Op::CSwsp => {
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 4));
+            ExecOut::ok(0)
+        }
+        Op::Sd | Op::CSd | Op::CSdsp => {
+            etry!(cpu.memop_write(s1, uop.imm64(), s2, 8));
+            ExecOut::ok(0)
+        }
+        // Everything else: float, CSR, atomic, vector, etc.
         _ => new_execute(cpu, uop, s1, s2, s3, insn_addr),
     }
 }

@@ -63,7 +63,7 @@ impl WasmRiscv {
             emulator: Emulator::new(
                 Box::new(BufferedSerialBackend::new()),
                 WASM_MEMORY_SIZE,
-                8192,
+                simmerv::uop_cache::DEFAULT_UOP_ENTRIES,
                 simmerv::uop_cache::CacheMode::Skew,
             ),
         }
