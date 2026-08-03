@@ -115,9 +115,9 @@ pub type ExecResult = Result<(u64, u8), Exception>;
 
 /// 16-byte execution result returned in `(rax, rdx)` on x86-64.
 ///
-/// No sret pointer needed. `flags == 0`: ok; `0 < flags < 2^63`: ok with
-/// fflags (`flags & 0xFF`); bit 63 set: exception (`val`=tval,
-/// `bits[15:8]`=Trap).
+/// No sret pointer needed. `flags == 0`: ok; `0 < flags < 2^62`: ok with
+/// fflags (`flags & 0xFF`); bit 62 set: the instruction redirected the PC;
+/// bit 63 set: exception (`val`=tval, `bits[15:8]`=Trap).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ExecOut {
@@ -126,6 +126,19 @@ pub struct ExecOut {
 }
 
 const EXCEPTION_BIT: u64 = 0x8000_0000_0000_0000;
+
+/// The instruction wrote [`Cpu::pc`] itself, so the block ends here.
+///
+/// Set by taken branches, jumps, `mret`/`sret`, and CSR writes that let a
+/// pending interrupt in.  The block executor used to detect this by reloading
+/// `self.pc` and comparing it against the address it had just stored there —
+/// about 3% of run time.  Reporting it in a register the caller already holds
+/// is free.
+///
+/// Every write to `Cpu::pc` from instruction execution must set this bit.  A
+/// `debug_assert!` in both block executors cross-checks it against the old
+/// comparison, so the test suite catches any that get added later.
+const REDIRECT_BIT: u64 = 0x4000_0000_0000_0000;
 
 #[allow(clippy::inline_always)]
 impl ExecOut {
@@ -149,9 +162,21 @@ impl ExecOut {
             flags: EXCEPTION_BIT | ((trap as u64) << 8),
         }
     }
+    /// Ok, and the instruction has already written [`Cpu::pc`].
+    #[inline(always)]
+    #[must_use]
+    pub const fn redirected(val: u64) -> Self {
+        Self {
+            val,
+            flags: REDIRECT_BIT,
+        }
+    }
     #[inline(always)]
     #[must_use]
     pub const fn is_err(self) -> bool { self.flags & EXCEPTION_BIT != 0 }
+    #[inline(always)]
+    #[must_use]
+    pub const fn is_redirect(self) -> bool { self.flags & REDIRECT_BIT != 0 }
     #[inline(always)]
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -826,8 +851,20 @@ impl Cpu {
                 }
                 n_executed += 1;
 
-                if self.pc != expected_next {
-                    // PC deviated — taken branch or jump, exit early.
+                // `out` is already in registers, so asking it whether the PC
+                // moved is free; reloading `self.pc` to compare was not.
+                // One-directional on purpose: every instruction that moves the
+                // PC must set the bit, but setting it when the PC happens not
+                // to move is harmless -- a `jalr` whose target is simply the
+                // next instruction just ends the block early.
+                debug_assert!(
+                    out.is_redirect() || self.pc == expected_next,
+                    "{:?} at {cur_insn_addr:#x} wrote pc without REDIRECT_BIT",
+                    uop.op
+                );
+                if out.is_redirect() {
+                    // Taken branch, jump, xret, or an interrupt let in by a CSR
+                    // write: the instruction set the PC itself, so stop here.
                     break;
                 } else if uop.is_branch_flag() {
                     untaken_branches += 1;
@@ -933,7 +970,12 @@ impl Cpu {
             }
             n_executed += 1;
 
-            if self.pc != expected_next {
+            debug_assert!(
+                out.is_redirect() || self.pc == expected_next,
+                "{:?} at {cur_insn_addr:#x} wrote pc without REDIRECT_BIT",
+                uop.op
+            );
+            if out.is_redirect() {
                 break;
             }
         }
@@ -2543,6 +2585,30 @@ pub fn decode(a: u64, word: u32, rva23: bool) -> Uop {
     uop
 }
 
+/// Perform a CSR write and build the result, flagging the case where the write
+/// redirected the PC.
+///
+/// A write to `sstatus`/`sie`/`mstatus`/`mie` can unmask an already-pending
+/// interrupt, which `write_csr` delivers inline — moving the PC to the trap
+/// vector.  That has to reach the block executor as [`REDIRECT_BIT`], or it
+/// would carry on executing the rest of the block from the vector address.
+///
+/// Comparing the PC to spot it is exactly what the executor's hot loop no
+/// longer does, but here it is fine: CSR writes are a fraction of a percent of
+/// instructions.
+#[inline]
+fn csr_write_out(cpu: &mut Cpu, csrno: u16, value: u64, res: u64) -> ExecOut {
+    let pc_before = cpu.pc;
+    if let Err(e) = cpu.write_csr(csrno, value) {
+        return ExecOut::err(e.trap, e.tval);
+    }
+    if cpu.pc == pc_before {
+        ExecOut::ok(res)
+    } else {
+        ExecOut::redirected(res)
+    }
+}
+
 /// Inline fast path for the most common ops (integer ALU, branches, jumps,
 /// loads and stores).  Avoids the function-call overhead of `new_execute` for
 /// the great majority of instructions.
@@ -2562,49 +2628,61 @@ fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: 
         Op::Jal | Op::CJ => {
             let tmp = cpu.pc;
             cpu.pc = insn_addr.wrapping_add(uop.imm64());
-            ExecOut::ok(tmp)
+            ExecOut::redirected(tmp)
         }
         Op::Jalr | Op::CJr | Op::CJalr => {
             let tmp = cpu.pc;
             cpu.pc = s1.wrapping_add(uop.imm64()) & !1;
-            ExecOut::ok(tmp)
+            ExecOut::redirected(tmp)
         }
         // Branches
         Op::Beq | Op::CBeqz => {
             if s1 == s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bne | Op::CBnez => {
-            if s1 != s2 {
+            if s1 == s2 {
+                ExecOut::ok(0)
+            } else {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
             }
-            ExecOut::ok(0)
         }
         Op::Blt => {
             if (s1 as i64) < s2 as i64 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bge => {
             if (s1 as i64) >= s2 as i64 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bltu => {
             if s1 < s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bgeu => {
             if s1 >= s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         // Integer immediate
         Op::Addi | Op::CAddi | Op::CAddi4spn | Op::CLi | Op::CAddi16sp => {
@@ -2708,48 +2786,60 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         Op::Jal | Op::CJ => {
             let tmp = cpu.pc;
             cpu.pc = insn_addr.wrapping_add(uop.imm64());
-            ExecOut::ok(tmp)
+            ExecOut::redirected(tmp)
         }
         Op::Jalr | Op::CJr | Op::CJalr => {
             let tmp = cpu.pc;
             cpu.pc = s1.wrapping_add(uop.imm64()) & !1;
-            ExecOut::ok(tmp)
+            ExecOut::redirected(tmp)
         }
         Op::Beq | Op::CBeqz => {
             if s1 == s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bne | Op::CBnez => {
-            if s1 != s2 {
+            if s1 == s2 {
+                ExecOut::ok(0)
+            } else {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
             }
-            ExecOut::ok(0)
         }
         Op::Blt => {
             if (s1 as i64) < s2 as i64 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bge => {
             if (s1 as i64) >= s2 as i64 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bltu => {
             if s1 < s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Bgeu => {
             if s1 >= s2 {
                 cpu.pc = insn_addr.wrapping_add(uop.imm64());
+                ExecOut::redirected(0)
+            } else {
+                ExecOut::ok(0)
             }
-            ExecOut::ok(0)
         }
         Op::Lb => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 1)) as i8 as u64),
         Op::Lh => ExecOut::ok(etry!(cpu.memop_read(s1, uop.imm64(), 2)) as i16 as u64),
@@ -2855,23 +2945,23 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             } else {
                 etry!(cpu.read_csr(uop.imm as u16))
             };
-            etry!(cpu.write_csr(uop.imm as u16, s1));
-
-            ExecOut::ok(res)
+            csr_write_out(cpu, uop.imm as u16, s1, res)
         }
         Op::Csrrs => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
-            if uop.rs1.get() != 0 {
-                etry!(cpu.write_csr(uop.imm as u16, data | s1));
+            if uop.rs1.get() == 0 {
+                ExecOut::ok(data)
+            } else {
+                csr_write_out(cpu, uop.imm as u16, data | s1, data)
             }
-            ExecOut::ok(data)
         }
         Op::Csrrc => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
-            if uop.rs1.get() != 0 {
-                etry!(cpu.write_csr(uop.imm as u16, data & !s1));
+            if uop.rs1.get() == 0 {
+                ExecOut::ok(data)
+            } else {
+                csr_write_out(cpu, uop.imm as u16, data & !s1, data)
             }
-            ExecOut::ok(data)
         }
         Op::Csrrwi => {
             let res = if uop.rd.is_x0_dest() {
@@ -2879,23 +2969,23 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             } else {
                 etry!(cpu.read_csr(uop.imm as u16))
             };
-            etry!(cpu.write_csr(uop.imm as u16, uop.rs1.get() as u64));
-
-            ExecOut::ok(res)
+            csr_write_out(cpu, uop.imm as u16, uop.rs1.get() as u64, res)
         }
         Op::Csrrsi => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
-            if uop.rs1.get() != 0 {
-                etry!(cpu.write_csr(uop.imm as u16, data | uop.rs1.get() as u64));
+            if uop.rs1.get() == 0 {
+                ExecOut::ok(data)
+            } else {
+                csr_write_out(cpu, uop.imm as u16, data | uop.rs1.get() as u64, data)
             }
-            ExecOut::ok(data)
         }
         Op::Csrrci => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
-            if uop.rs1.get() != 0 {
-                etry!(cpu.write_csr(uop.imm as u16, data & !(uop.rs1.get() as u64)));
+            if uop.rs1.get() == 0 {
+                ExecOut::ok(data)
+            } else {
+                csr_write_out(cpu, uop.imm as u16, data & !(uop.rs1.get() as u64), data)
             }
-            ExecOut::ok(data)
         }
         // RV32M
         Op::Mul => ExecOut::ok(s1.wrapping_mul(s2)),
@@ -3461,7 +3551,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.hpm_sync_if_active();
             cpu.mmu.update_priv_mode(priv_mode_from(mpp));
-            ExecOut::ok(0)
+            ExecOut::redirected(0)
         }
         Op::Sret => {
             if cpu.mmu.prv == PrivMode::U
@@ -3484,7 +3574,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             cpu.write_csr_raw(Csr::Sstatus, new_status);
             cpu.hpm_sync_if_active();
             cpu.mmu.update_priv_mode(priv_mode_from(spp));
-            ExecOut::ok(0)
+            ExecOut::redirected(0)
         }
         Op::SfenceVma | Op::SinvalVma => {
             if cpu.mmu.prv == PrivMode::U
