@@ -145,6 +145,13 @@ pub struct DataAddr {
     /// Physical address.  Always valid (used for MMIO and by callers that
     /// only need `pa`).
     pub pa: u64,
+    /// Host address of the first byte of the containing page.  The access is
+    /// then `host_page.add(va & 0xfff)`, with no further indirection through
+    /// `Mmu::memory` -- which is the point, since that indirection sat in the
+    /// dependent-load chain of every load and store.
+    ///
+    /// Only valid when `mem_idx != NO_RAM`; null otherwise.
+    pub host_page: *mut u8,
     /// Index into `Mmu::memory`, or `NO_RAM` when the page is MMIO or the
     /// access is in physical (M-mode) mode.
     pub mem_idx: u8,
@@ -972,6 +979,33 @@ impl Mmu {
         None
     }
 
+    /// Host address of the page at `page_byte_offset` inside region `mem_idx`.
+    ///
+    /// Derived from the `Vec` on the spot rather than from a cached mirror:
+    /// every caller is a cold path (a TLB fill, or an untranslated M-mode
+    /// access), so there is nothing to gain by caching it and a live borrow is
+    /// easier to reason about.
+    ///
+    /// # Panics
+    /// If the page is not wholly inside the region — a caller bug, and one
+    /// worth catching here rather than handing out a pointer past the end.
+    #[allow(clippy::cast_possible_truncation)] // see below
+    fn page_ptr(&mut self, mem_idx: u8, page_byte_offset: u64) -> *mut u8 {
+        let region = &mut self.memory[mem_idx as usize].1;
+        // Fits in `usize` even on wasm32: callers derive this from `pa -
+        // region.start` for a `pa` the region contains, so it is smaller than
+        // the region, which is a `Vec` that exists on this host.
+        let off = page_byte_offset as usize;
+        assert!(
+            off + 0x1000 <= region.len(),
+            "page at {off:#x} is not inside RAM region {mem_idx} of {:#x} bytes",
+            region.len()
+        );
+        // SAFETY: bounds just asserted; the buffer is never reallocated (see
+        // `DTlb::page_ptr`).
+        unsafe { region.as_mut_ptr().add(off) }
+    }
+
     /// # Errors
     /// If this fails then the error will have the exception that should be
     /// raised
@@ -1099,7 +1133,8 @@ impl Mmu {
     #[allow(
         clippy::inline_always,
         clippy::cast_possible_truncation,
-        clippy::missing_panics_doc
+        clippy::missing_panics_doc,
+        clippy::too_many_lines
     )]
     #[inline(always)]
     pub fn translate_data_address(
@@ -1122,17 +1157,25 @@ impl Mmu {
             // so a physical-mode (M-mode / Bare) RAM load is VERIFIED against the model
             // instead of blindly taking the DUT's armed MMIO value. Only a PA outside RAM
             // stays NO_RAM: a genuine device register (or the cosim DUT-follow override).
+            let mut found = None;
             for (i, (range, _)) in self.memory.iter().enumerate() {
                 if range.contains(&address) {
-                    return Ok(DataAddr {
-                        pa: address,
-                        mem_idx: i as u8,
-                        page_byte_offset: (address & !0xfff) - range.start,
-                    });
+                    let page_byte_offset = (address & !0xfff) - range.start;
+                    found = Some((i as u8, page_byte_offset));
+                    break;
                 }
+            }
+            if let Some((mem_idx, page_byte_offset)) = found {
+                return Ok(DataAddr {
+                    pa: address,
+                    host_page: self.page_ptr(mem_idx, page_byte_offset),
+                    mem_idx,
+                    page_byte_offset,
+                });
             }
             return Ok(DataAddr {
                 pa: address,
+                host_page: core::ptr::null_mut(),
                 mem_idx: DataAddr::NO_RAM,
                 page_byte_offset: 0,
             });
@@ -1146,7 +1189,7 @@ impl Mmu {
         let sum = self.mstatus & MSTATUS_SUM != 0;
         let mxr = self.mstatus & MSTATUS_MXR != 0;
 
-        if let Some((mem_idx, page_byte_offset, perm)) = self.dtlb.lookup(vpage, asid)
+        if let Some((mem_idx, page_byte_offset, perm, host_page)) = self.dtlb.lookup(vpage, asid)
             && check_perm(perm, access_shift, prv_is_user, sum, mxr)
         {
             let pa = self.mem_start[mem_idx as usize] + page_byte_offset + (address & 0xfff);
@@ -1154,22 +1197,28 @@ impl Mmu {
             self.dtlb.hits += 1;
             return Ok(DataAddr {
                 pa,
+                host_page,
                 mem_idx,
                 page_byte_offset,
             });
         }
-        if let Some((mem_idx, base_offset_2m, perm)) = self.dtlb2m.lookup(vpage2m, asid)
+        if let Some((mem_idx, base_offset_2m, perm, base_ptr_2m)) =
+            self.dtlb2m.lookup(vpage2m, asid)
             && check_perm(perm, access_shift, prv_is_user, sum, mxr)
         {
             // The stored offset is 2 MiB-aligned; add this 4 KiB page's offset
             // within the superpage so callers still index RAM directly with
             // `page_byte_offset | (va & 0xfff)`.
-            let page_byte_offset = base_offset_2m + (address & SUPERPAGE_MASK & !0xfff);
+            let page_in_superpage = address & SUPERPAGE_MASK & !0xfff;
+            let page_byte_offset = base_offset_2m + page_in_superpage;
             let pa = self.mem_start[mem_idx as usize] + page_byte_offset + (address & 0xfff);
             self.paranoid_check(address, pa, access_type, "dTLB2M");
             self.dtlb2m.hits += 1;
             return Ok(DataAddr {
                 pa,
+                // SAFETY: the entry covers a whole 2 MiB superpage inside the
+                // region, so any 4 KiB page within it is in bounds.
+                host_page: unsafe { base_ptr_2m.add(page_in_superpage as usize) },
                 mem_idx,
                 page_byte_offset,
             });
@@ -1190,17 +1239,34 @@ impl Mmu {
             let perm = pack_perm(xwr, user, global, asid);
             // Only RAM pages go into a dTLB; MMIO pages use the slow path.
             if let Some((mem_idx, page_byte_offset)) = self.find_ram_for_pa(pa) {
-                if page_shift >= SUPERPAGE_SHIFT {
-                    let base_offset_2m =
-                        (pa & !SUPERPAGE_MASK) - self.memory[mem_idx as usize].0.start;
+                // A 2 MiB entry serves every page of its superpage from one
+                // stored base pointer, so take one only when the whole
+                // superpage is inside this region.  RAM regions are neither
+                // required to be superpage-aligned nor superpage-sized -- the
+                // 0x7000_0000 scratch region is 1 MiB -- and a superpage
+                // hanging off the end would hand out pointers past the buffer.
+                // Falling back to a 4 KiB entry is always correct, just less
+                // dense.
+                let region_start = self.mem_start[mem_idx as usize];
+                let region_len = self.memory[mem_idx as usize].1.len() as u64;
+                let superpage_base = pa & !SUPERPAGE_MASK;
+                let superpage_fits = page_shift >= SUPERPAGE_SHIFT
+                    && superpage_base >= region_start
+                    && (superpage_base - region_start) + (SUPERPAGE_MASK + 1) <= region_len;
+
+                let host_page = self.page_ptr(mem_idx, page_byte_offset);
+                if superpage_fits {
+                    let base_offset_2m = superpage_base - region_start;
+                    let ptr = self.page_ptr(mem_idx, base_offset_2m);
                     self.dtlb2m
-                        .insert(vpage2m, mem_idx, base_offset_2m, perm, asid);
+                        .insert(vpage2m, mem_idx, base_offset_2m, perm, asid, ptr);
                 } else {
                     self.dtlb
-                        .insert(vpage, mem_idx, page_byte_offset, perm, asid);
+                        .insert(vpage, mem_idx, page_byte_offset, perm, asid, host_page);
                 }
                 return Ok(DataAddr {
                     pa,
+                    host_page,
                     mem_idx,
                     page_byte_offset,
                 });
@@ -1208,6 +1274,7 @@ impl Mmu {
         }
         Ok(DataAddr {
             pa,
+            host_page: core::ptr::null_mut(),
             mem_idx: DataAddr::NO_RAM,
             page_byte_offset: 0,
         })
@@ -1510,6 +1577,9 @@ impl Mmu {
             self.service_queue.push(Reverse((sched_cycle, idx)));
         }
 
+        // Load-bearing for memory safety, not just correctness: the loop above
+        // replaced every RAM buffer, so any page pointer cached in a dTLB entry
+        // now dangles.  See `DTlb::page_ptr`.
         self.flush_tlb();
         Ok(())
     }

@@ -2413,27 +2413,23 @@ impl Cpu {
                 vv
             })
             } else {
-                let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
-                let mem = &self.mmu.memory[addr.mem_idx as usize].1;
-                match size {
-                    1 => u64::from(mem[off]),
-                    2 => u64::from(u16::from_le_bytes([mem[off], mem[off + 1]])),
-                    4 => u64::from(u32::from_le_bytes([
-                        mem[off],
-                        mem[off + 1],
-                        mem[off + 2],
-                        mem[off + 3],
-                    ])),
-                    _ => u64::from_le_bytes([
-                        mem[off],
-                        mem[off + 1],
-                        mem[off + 2],
-                        mem[off + 3],
-                        mem[off + 4],
-                        mem[off + 5],
-                        mem[off + 6],
-                        mem[off + 7],
-                    ]),
+                // SAFETY: `host_page` points at the mapped page inside a RAM
+                // region (`mem_idx != NO_RAM`), the offset is masked to within
+                // that page, and the caller has already rejected accesses that
+                // would cross its end. Reading through the pointer rather than
+                // indexing `Mmu::memory` is the entire point: it drops a
+                // dependent load out of the chain of every load.
+                let p = unsafe { addr.host_page.add(va as usize & 0xfff) };
+                unsafe {
+                    // `from_le` keeps the previous byte-wise assembly's
+                    // explicit little-endian semantics; it is a no-op on every
+                    // host this targets.
+                    match size {
+                        1 => u64::from(p.read()),
+                        2 => u64::from(u16::from_le(p.cast::<u16>().read_unaligned())),
+                        4 => u64::from(u32::from_le(p.cast::<u32>().read_unaligned())),
+                        _ => u64::from_le(p.cast::<u64>().read_unaligned()),
+                    }
                 }
             };
 
@@ -2478,13 +2474,15 @@ impl Cpu {
         }
 
         if addr.mem_idx != DataAddr::NO_RAM {
-            let off = addr.page_byte_offset as usize | (va as usize & 0xfff);
-            let mem = &mut self.mmu.memory[addr.mem_idx as usize].1;
-            match size {
-                1 => mem[off] = v as u8,
-                2 => mem[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes()),
-                4 => mem[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()),
-                _ => mem[off..off + 8].copy_from_slice(&v.to_le_bytes()),
+            // SAFETY: as in `memop_read`.
+            let p = unsafe { addr.host_page.add(va as usize & 0xfff) };
+            unsafe {
+                match size {
+                    1 => p.write(v as u8),
+                    2 => p.cast::<u16>().write_unaligned((v as u16).to_le()),
+                    4 => p.cast::<u32>().write_unaligned((v as u32).to_le()),
+                    _ => p.cast::<u64>().write_unaligned(v.to_le()),
+                }
             }
             return Ok(());
         }

@@ -30,6 +30,20 @@ pub struct DTlb<const SETS: usize> {
     mem_idx: [u8; SETS],
     page_byte_offset: [u64; SETS],
     perm: [u16; SETS],
+    /// Host address of the start of the mapped page.
+    ///
+    /// The point of the whole struct: without it a hit yields `mem_idx`, and
+    /// reaching the bytes then costs a *further* dependent load of
+    /// `Mmu::memory[mem_idx]`'s data pointer before the access itself -- three
+    /// loads deep from the address. This one is fetched in parallel with the
+    /// tag, so the data load is second rather than third in the chain.
+    ///
+    /// Valid because RAM buffers are allocated once by
+    /// `Mmu::push_memory_region` and never reallocated; the only code that
+    /// replaces them, `Mmu::read_state`, flushes every TLB afterwards. Null
+    /// in an empty entry, which is unreachable: `vpage` is `INVALID_VPAGE`
+    /// there so `lookup` misses.
+    page_ptr: [*mut u8; SETS],
     pub misses: u64,
     pub hits: u64,
 }
@@ -175,21 +189,27 @@ impl<const SETS: usize> DTlb<SETS> {
             mem_idx: [0; SETS],
             page_byte_offset: [0u64; SETS],
             perm: [INVALID_PERM; SETS],
+            page_ptr: [core::ptr::null_mut(); SETS],
             misses: 0,
             hits: 0,
         }
     }
 
     /// Look up a virtual page number. Returns `(mem_idx, page_byte_offset,
-    /// perm)` on hit.
+    /// perm, page_ptr)` on hit.
     #[must_use]
     #[inline(always)]
-    pub const fn lookup(&self, vpage: u32, asid: u16) -> Option<(u8, u64, u16)> {
+    pub const fn lookup(&self, vpage: u32, asid: u16) -> Option<(u8, u64, u16, *mut u8)> {
         let idx = vpage as usize & (SETS - 1);
         if self.vpage[idx] == vpage {
             let p = self.perm[idx];
             if p & PERM_G != 0 || (p >> PERM_ASID_SHIFT) == asid {
-                return Some((self.mem_idx[idx], self.page_byte_offset[idx], p));
+                return Some((
+                    self.mem_idx[idx],
+                    self.page_byte_offset[idx],
+                    p,
+                    self.page_ptr[idx],
+                ));
             }
         }
         None
@@ -197,6 +217,10 @@ impl<const SETS: usize> DTlb<SETS> {
 
     /// Insert a RAM entry. `perm` should be produced by `pack_perm`.
     /// `page_byte_offset` is `(pa & !0xfff) - region.start`.
+    ///
+    /// `page_ptr` must point at the first byte of the mapped page inside
+    /// `Mmu::memory[mem_idx]`, and that buffer must outlive the entry -- see
+    /// the field docs.
     #[inline(always)]
     pub const fn insert(
         &mut self,
@@ -205,12 +229,14 @@ impl<const SETS: usize> DTlb<SETS> {
         page_byte_offset: u64,
         perm: u16,
         _asid: u16,
+        page_ptr: *mut u8,
     ) {
         let idx = vpage as usize & (SETS - 1);
         self.vpage[idx] = vpage;
         self.mem_idx[idx] = mem_idx;
         self.page_byte_offset[idx] = page_byte_offset;
         self.perm[idx] = perm;
+        self.page_ptr[idx] = page_ptr;
     }
 
     /// Flush all entries.
