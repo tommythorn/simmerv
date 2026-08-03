@@ -190,11 +190,37 @@ impl WasmRiscv {
 
     /// Runs program set by `load_image()` in `cycles` cycles.
     ///
+    /// One "cycle" is 40 retired instructions, which is what this ran per
+    /// iteration when it was a plain `for` loop over `tick(40)`.  The budget is
+    /// unchanged; it is just spent in far fewer, larger ticks.
+    ///
+    /// `tick(n)` services devices, compares `stimecmp` and polls for interrupts
+    /// once per call, so `n` sets how often that happens.  At 40 it happened 15
+    /// times more often than the CLI's 600, which measured 148.5 vs 169.1 MIPS
+    /// natively on a Debian boot — a 14% tax for latency nobody can observe
+    /// (600 instructions is a few microseconds).
+    ///
+    /// In a browser it is worse than 14%.  Each `tick` reads the wall clock
+    /// twice, and in wasm a reading is three JS calls through wasm-bindgen (see
+    /// `CLOCK_SAMPLE_INTERVAL` in `device/clint.rs`, which caches 64 of them).
+    /// At `tick(40)` a real reading landed roughly every 1300 instructions;
+    /// at 600 it is every ~19000.  Engines differ a lot in what a wasm→JS
+    /// crossing costs, so this was also a source of browser-to-browser spread.
+    ///
     /// # Arguments
     /// * `cycles`
     pub fn run_cycles(&mut self, cycles: u32) {
-        for _i in 0..cycles {
-            self.emulator.tick(40);
+        /// Instructions per `tick`, matching the CLI's run loop.
+        const TICK: usize = 600;
+
+        let budget = cycles as usize * 40;
+        // Short budgets (the debugger's `step`) still run in one go, so
+        // stepping keeps its old granularity instead of overshooting to 600.
+        let tick = if budget >= TICK { TICK } else { budget.max(1) };
+        // Round up, matching `tick`'s own "run at least n" semantics, so a
+        // budget that is not a multiple of TICK is never short-changed.
+        for _ in 0..budget.div_ceil(tick) {
+            self.emulator.tick(tick);
         }
     }
 
