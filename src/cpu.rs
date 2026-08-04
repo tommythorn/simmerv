@@ -871,7 +871,7 @@ impl Cpu {
             let mut untaken_branches: u64 = 0;
             let mut exception: Option<(Exception, u64)> = None;
             let cached_block = bb.block_at(slot);
-            for uop in &cached_block.uops {
+            for uop in cached_block {
                 let uop = *uop;
                 if uop.op == Op::End {
                     break;

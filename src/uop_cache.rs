@@ -18,8 +18,8 @@ use crate::cpu::Uop;
 /// ceiling of 48 made the Debian boot *slower* (155 MIPS), because blocks
 /// were padded out to 48 uops of which ~9 ever ran.
 ///
-/// The slot is still fixed-size, so at a mean of 8 uops roughly 80% of it is
-/// now empty.  That is the next thing to fix -- see the note on `BasicBlock`.
+/// Slots are no longer fixed-size -- see `SLOT_UOPS` -- so a long block costs
+/// only the slots it actually uses.
 pub const MAX_BLOCK_LEN: usize = 48;
 
 /// Default total uop capacity, for every front end.
@@ -39,9 +39,41 @@ pub const MAX_BLOCK_LEN: usize = 48;
 /// images this was first tuned on, and starving the cache costs more than any
 /// micro-optimisation in the executor.  Past 131 072 the falling conflict-miss
 /// rate no longer pays for the cold misses that refilling a larger cache
-/// costs after each full flush.  At `MAX_BLOCK_LEN` uops per slot this is
-/// about 2.4 MB — cheap even in the browser.
+/// costs after each full flush -- still true with spanning slots: 393 216
+/// measured *worse* on the Debian boot (215.0 vs 217.5 MIPS).
+///
+/// The figures above were taken when a block occupied a whole `MAX_BLOCK_LEN`
+/// slot.  With `SLOT_UOPS` the same 2.4 MB holds twice as many blocks, which
+/// is where the win came from -- not from spending more memory.
 pub const DEFAULT_UOP_ENTRIES: usize = 131_072;
+
+/// Uops per cache slot.
+///
+/// A block occupies as many *consecutive* slots as it needs, so this is the
+/// quantum of allocation, not a ceiling on block length.  It trades internal
+/// fragmentation (a block wastes up to `SLOT_UOPS - 1` uops of its last slot)
+/// against tag overhead: one 8-byte tag plus one continuation byte per slot,
+/// which at a small value costs more memory than the padding it saves.
+///
+/// Swept on the Debian boot, interleaved against the fixed-slot build (212.5):
+///
+/// | `SLOT_UOPS` | slots | MIPS  |
+/// |-------------|-------|-------|
+/// |           4 | 32768 | 204.6 |
+/// |           8 | 16384 | 210.3 |
+/// |          16 |  8192 | 214.7 |
+/// |          20 |  8192 | 218.5 |
+/// |          24 |  8192 | 217.7 |
+/// |          28 |  8192 | 216.4 |
+/// |          32 |  4096 | 212.1 |
+/// |          48 |  4096 | 211.6 |
+///
+/// What the table really shows is the slot *count*: 20/24/28 all round to 8192
+/// slots and all win; 32/48 round to 4096 and all match the old build.  The
+/// gain is twice as many blocks resident in the same 2.4 MB, not finer
+/// packing for its own sake -- below 16 the per-slot tag overhead takes it
+/// back, and shrinking the slot further only buys more of that.
+pub const SLOT_UOPS: usize = 24;
 
 /// Cache mapping strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,37 +84,20 @@ pub enum CacheMode {
     Skew,
 }
 
-/// A cached sequence of decoded uops covering one basic block.
-/// The block is terminated by the first `Op::End` sentinel uop.
+/// Scratch buffer used while building a block, before it is copied into the
+/// cache's flat uop storage.  Terminated by the first `Op::End` sentinel.
 ///
-/// Fixed size, which is now the main inefficiency in the cache: since blocks
-/// end at the first taken branch they average about 8 uops in a 48-uop slot,
-/// so ~80% of the storage is empty and the cache holds ~5x fewer blocks than
-/// its byte budget allows.  Measured slot utilisation is 19-22%.
-///
-/// Two ways out, neither implemented:
-///   * an arena -- store uops contiguously and keep `(start, len)` per tag. No
-///     waste at all, but the uop address then depends on a *loaded* start
-///     offset, adding a dependent load to a hot path that is already
-///     latency-bound, so it may not pay.
-///   * spanning slots -- shrink the slot to a few uops and let a long block
-///     occupy consecutive slots, invalidating the ones it covers.  The data
-///     address stays `slot * const`, so no extra dependent load; waste is
-///     bounded by half a slot.  This looks like the better bet.
+/// This is a build-time local, not the storage layout: the cache itself packs
+/// uops contiguously into `SLOT_UOPS`-sized slots.
 #[derive(Clone)]
 pub struct BasicBlock {
     pub uops: [Uop; MAX_BLOCK_LEN],
-    /// Padding to avoid cache-set aliasing: 192 bytes (3 × 64-byte lines)
-    /// causes heavy conflict misses in the host L1/L2; 196 bytes breaks the
-    /// periodicity.  Do NOT remove.
-    _cache_align_pad: [u8; 4],
 }
 
 impl Default for BasicBlock {
     fn default() -> Self {
         Self {
             uops: [Uop::default(); MAX_BLOCK_LEN],
-            _cache_align_pad: [0; 4],
         }
     }
 }
@@ -90,7 +105,14 @@ impl Default for BasicBlock {
 /// Fixed-size basic-block uop cache with configurable mapping strategy.
 pub struct BbCache {
     tags: Vec<u64>,
-    data: Vec<BasicBlock>,
+    /// Flat uop storage: slot `i` owns `data[i * SLOT_UOPS ..]`.
+    /// Over-allocated by one maximal block so that a block starting in the
+    /// last slot can be read as a full-length slice without a bounds check.
+    data: Vec<Uop>,
+    /// `0` for a free or head slot, otherwise the distance back to the head of
+    /// the block that occupies this slot.  Only consulted when placing a
+    /// block, never on the execution path.
+    cont: Vec<u8>,
     /// Number of entries per way.
     sets: usize,
     /// Mask for indexing into a way (sets - 1).
@@ -136,7 +158,7 @@ impl BbCache {
     /// In `Skew` mode, block slots are split equally between two ways.
     #[must_use]
     pub fn new(total_uop_entries: usize, mode: CacheMode) -> Self {
-        let block_slots = (total_uop_entries / MAX_BLOCK_LEN).max(1);
+        let block_slots = (total_uop_entries / SLOT_UOPS).max(1);
         let sets = match mode {
             CacheMode::Direct => block_slots.next_power_of_two(),
             CacheMode::Skew => (block_slots / 2).max(1).next_power_of_two(),
@@ -147,7 +169,8 @@ impl BbCache {
         };
         Self {
             tags: vec![INVALID_TAG; n],
-            data: vec![BasicBlock::default(); n],
+            data: vec![Uop::default(); n * SLOT_UOPS + MAX_BLOCK_LEN + 1],
+            cont: vec![0; n],
             sets,
             mask: sets - 1,
             mode,
@@ -218,52 +241,94 @@ impl BbCache {
     /// `probe`).
     #[inline]
     #[must_use]
-    pub fn block_at(&self, slot: usize) -> &BasicBlock { &self.data[slot] }
+    pub fn block_at(&self, slot: usize) -> &[Uop] {
+        let base = slot * SLOT_UOPS;
+        &self.data[base..=base + MAX_BLOCK_LEN]
+    }
+
+    /// Invalidate the block whose head is `h`, clearing the continuation marks
+    /// of every slot it spans.
+    fn invalidate_head(&mut self, h: usize) {
+        if self.tags[h] != INVALID_TAG {
+            self.tags[h] = INVALID_TAG;
+            self.occupied -= 1;
+        }
+        let mut k = h + 1;
+        while k < self.capacity && self.cont[k] as usize == k - h {
+            self.cont[k] = 0;
+            k += 1;
+        }
+    }
+
+    /// Invalidate whatever occupies `slot`, following a continuation back to
+    /// its head so a block is never left half-overwritten.
+    fn evict_at(&mut self, slot: usize) { self.invalidate_head(slot - self.cont[slot] as usize); }
+
+    /// Claim `n` consecutive slots starting at `i`, evicting anything there.
+    fn claim(&mut self, i: usize, n: usize, key: u64) {
+        for j in i..(i + n).min(self.capacity) {
+            if self.cont[j] != 0 || self.tags[j] != INVALID_TAG {
+                self.evict_at(j);
+            }
+        }
+        self.tags[i] = key;
+        self.occupied += 1;
+        for j in 1..n {
+            if i + j < self.capacity {
+                self.cont[i + j] = u8::try_from(j).unwrap_or(0);
+            }
+        }
+    }
+
+    /// How many free slots start at `i`, up to `n`.
+    fn free_run(&self, i: usize, n: usize) -> usize {
+        (0..n)
+            .take_while(|&j| {
+                i + j < self.capacity && self.tags[i + j] == INVALID_TAG && self.cont[i + j] == 0
+            })
+            .count()
+    }
 
     #[inline]
     pub fn insert(&mut self, key: u64, block: &BasicBlock) {
-        {
-            let n = block
-                .uops
-                .iter()
-                .take_while(|u| u.op != crate::generated_riscv_decoder::Op::End)
-                .count();
-            self.inserted_len[n] += 1;
-        }
-        match self.mode {
-            CacheMode::Direct => {
-                let i = self.index0(key);
-                if self.tags[i] == INVALID_TAG {
-                    self.occupied += 1;
-                }
-                self.tags[i] = key;
-                self.data[i] = block.clone();
+        let len = block
+            .uops
+            .iter()
+            .take_while(|u| u.op != crate::generated_riscv_decoder::Op::End)
+            .count();
+        self.inserted_len[len] += 1;
+        // +1 so there is always room for the `End` sentinel: the executor
+        // relies on it to stop before running into the next block's uops.
+        let n_slots = (len + 1).div_ceil(SLOT_UOPS);
+
+        let i0 = self.index0(key);
+        let i = if self.mode == CacheMode::Skew {
+            let i1 = self.index1(key);
+            // Prefer whichever way can take the block without evicting; fall
+            // back to round-robin, as before.
+            if self.free_run(i0, n_slots) == n_slots {
+                i0
+            } else if self.free_run(i1, n_slots) == n_slots {
+                i1
+            } else {
+                let w = self.replace_ctr & 1;
+                self.replace_ctr = self.replace_ctr.wrapping_add(1);
+                if w == 0 { i0 } else { i1 }
             }
-            CacheMode::Skew => {
-                let i0 = self.index0(key);
-                let i1 = self.index1(key);
-                // Prefer an empty slot
-                let i = if self.tags[i0] == INVALID_TAG {
-                    i0
-                } else if self.tags[i1] == INVALID_TAG {
-                    i1
-                } else {
-                    let w = self.replace_ctr & 1;
-                    self.replace_ctr = self.replace_ctr.wrapping_add(1);
-                    if w == 0 { i0 } else { i1 }
-                };
-                if self.tags[i] == INVALID_TAG {
-                    self.occupied += 1;
-                }
-                self.tags[i] = key;
-                self.data[i] = block.clone();
-            }
-        }
+        } else {
+            i0
+        };
+
+        self.claim(i, n_slots, key);
+        let base = i * SLOT_UOPS;
+        self.data[base..base + len].copy_from_slice(&block.uops[..len]);
+        self.data[base + len] = Uop::default();
     }
 
     pub fn clear(&mut self) {
         self.flush_full += 1;
         self.tags.fill(INVALID_TAG);
+        self.cont.fill(0);
         self.occupied = 0;
     }
 
@@ -276,10 +341,10 @@ impl BbCache {
         self.flush_asid += 1;
         let asid_bits = u64::from(asid) << 48;
         let asid_mask = 0xFFFF_u64 << 48;
-        for tag in &mut self.tags {
-            if *tag & 1 == 0 && *tag & asid_mask == asid_bits {
-                *tag = INVALID_TAG;
-                self.occupied -= 1;
+        for i in 0..self.capacity {
+            let t = self.tags[i];
+            if t != INVALID_TAG && t & 1 == 0 && t & asid_mask == asid_bits {
+                self.invalidate_head(i);
             }
         }
     }
@@ -291,10 +356,10 @@ impl BbCache {
         // Mask out ASID bits [63:48] and page-offset bits [11:0] for comparison.
         let va_mask = !(0xFFFF_u64 << 48) & !0xFFF_u64;
         let page_base = page_addr & va_mask;
-        for tag in &mut self.tags {
-            if *tag & 1 == 0 && *tag & va_mask == page_base {
-                *tag = INVALID_TAG;
-                self.occupied -= 1;
+        for i in 0..self.capacity {
+            let t = self.tags[i];
+            if t != INVALID_TAG && t & 1 == 0 && t & va_mask == page_base {
+                self.invalidate_head(i);
             }
         }
     }
@@ -306,10 +371,14 @@ impl BbCache {
         let page_base = page_addr & va_mask;
         let asid_bits = u64::from(asid) << 48;
         let asid_mask = 0xFFFF_u64 << 48;
-        for tag in &mut self.tags {
-            if *tag & 1 == 0 && *tag & asid_mask == asid_bits && *tag & va_mask == page_base {
-                *tag = INVALID_TAG;
-                self.occupied -= 1;
+        for i in 0..self.capacity {
+            let t = self.tags[i];
+            if t != INVALID_TAG
+                && t & 1 == 0
+                && t & asid_mask == asid_bits
+                && t & va_mask == page_base
+            {
+                self.invalidate_head(i);
             }
         }
     }
@@ -356,8 +425,6 @@ pub struct UopCacheStats {
     pub occupied: usize,
     pub capacity: usize,
 }
-// [Uop; MAX_BLOCK_LEN] + _cache_align_pad(4).  The pad is what keeps the
-const _: () = assert!(std::mem::size_of::<BasicBlock>() == 12 * MAX_BLOCK_LEN + 4);
 
 #[cfg(test)]
 mod tests {
