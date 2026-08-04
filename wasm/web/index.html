@@ -20,14 +20,46 @@
         -webkit-text-size-adjust: 100%;
       }
       #footer { margin: 0.75rem 0.5rem 1rem; font-size: 0.9rem; }
+
+      /* Keys a phone's software keyboard does not have. Hidden where there is
+         a real keyboard. */
+      #keys { display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.5rem; }
+      #keys button {
+        font: inherit;
+        min-width: 2.8rem;
+        padding: 0.55rem 0.5rem;
+        border: 1px solid #aaa;
+        border-radius: 6px;
+        background: #f2f2f2;
+        color: #000;
+        -webkit-appearance: none;
+        /* Suppress the 300ms tap delay and double-tap-to-zoom. */
+        touch-action: manipulation;
+      }
+      /* A modifier waiting for the next key to be pressed. */
+      #keys button.armed { background: #222; color: #fff; border-color: #222; }
+
       @media (min-width: 900px) {
         body { margin: 1rem; }
         #footer { margin: 0.75rem 0 0; }
+        #keys { display: none; }
       }
     </style>
   </head>
   <body>
     <div id="terminal"></div>
+    <div id="keys">
+      <button data-seq="27">esc</button>
+      <button data-seq="9">tab</button>
+      <button data-mod="ctrl">ctrl</button>
+      <button data-mod="alt">alt</button>
+      <button data-seq="27,91,65">&uarr;</button>
+      <button data-seq="27,91,66">&darr;</button>
+      <button data-seq="27,91,68">&larr;</button>
+      <button data-seq="27,91,67">&rarr;</button>
+      <button data-seq="3">^C</button>
+      <button data-focus>keyboard</button>
+    </div>
     <div id="footer">
       <a href="https://github.com/tommythorn/simmerv" target="_blank">Simmerv</a>,
       RISC-V RVA22S64 &mdash; files are fetched on demand so cold starts are slow
@@ -149,6 +181,68 @@
       window.addEventListener('orientationchange', fit);
       fit();
 
+      // ── Keys a software keyboard does not have ───────────────────────────
+      //
+      // Bytes go onto App's own input queue rather than to the emulator
+      // directly, so a tapped key interleaves with typed input in order.
+      let app = null;
+      let rawPush = null;
+      const armed = { ctrl: false, alt: false };
+
+      // What a terminal sends for ctrl-<key>.
+      const ctrlByte = b => {
+        if (b >= 97 && b <= 122) return b & 0x1f;   // a-z
+        if (b >= 65 && b <= 90) return b & 0x1f;    // A-Z
+        if (b === 32 || b === 64) return 0;         // space, @  -> NUL
+        if (b >= 91 && b <= 95) return b - 64;      // [ \ ] ^ _
+        if (b === 63) return 127;                   // ?         -> DEL
+        return b;
+      };
+
+      const showArmed = () => {
+        for (const b of document.querySelectorAll('#keys button[data-mod]')) {
+          b.classList.toggle('armed', armed[b.dataset.mod]);
+        }
+      };
+
+      // ctrl and alt are sticky: they arm, then apply to the next key from
+      // *any* source. Done by wrapping the queue rather than by listening for
+      // key events, because how a software keyboard delivers a keystroke
+      // varies between browsers -- the queue is the one place all input passes
+      // through, whatever route it took to get there.
+      const installModifiers = () => {
+        rawPush = app.inputs.push.bind(app.inputs);
+        app.inputs.push = (...bytes) => {
+          if (!bytes.length || (!armed.ctrl && !armed.alt)) return rawPush(...bytes);
+          const out = [];
+          if (armed.alt) out.push(27);              // alt-<key> is ESC <key>
+          out.push(armed.ctrl ? ctrlByte(bytes[0]) : bytes[0], ...bytes.slice(1));
+          armed.ctrl = false;
+          armed.alt = false;
+          showArmed();
+          return rawPush(...out);
+        };
+      };
+
+      document.getElementById('keys').addEventListener('pointerdown', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        // Do not let the button take focus: that dismisses the software
+        // keyboard. Focus is handed straight back to the terminal instead,
+        // which is also what the 'keyboard' button is for.
+        event.preventDefault();
+        if (button.dataset.mod) {
+          armed[button.dataset.mod] = !armed[button.dataset.mod];
+          showArmed();
+        } else if (button.dataset.seq && rawPush) {
+          rawPush(...button.dataset.seq.split(',').map(Number));
+          armed.ctrl = false;
+          armed.alt = false;
+          showArmed();
+        }
+        terminal.focus();
+      });
+
       // The rootfs is tens of megabytes; silence while it arrives looks like a
       // hung page, so report progress on a single line that is then erased.
       const fetchWithProgress = async (url, label) => {
@@ -264,7 +358,9 @@
         riscv.setup_streamed_filesystem(total, BLOCK);
         startBlockPump(riscv, ROOTFS, total);
         startRateMeter(riscv);
-        new App(riscv, terminal, { debugModeEnabled: false }).run();
+        app = new App(riscv, terminal, { debugModeEnabled: false });
+        installModifiers();
+        app.run();
       };
 
       init()
