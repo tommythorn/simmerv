@@ -92,6 +92,17 @@ struct Args {
     #[argh(switch)]
     rva23: bool,
 
+    /// vector register width in bits: 128 (default) or 256. Only meaningful
+    /// with --rva23
+    #[argh(option)]
+    vlen: Option<usize>,
+
+    /// widest satp paging mode to accept: "sv39" (default), "sv48" or "sv57".
+    /// The page-table walker handles all three; Sv39 is the default because
+    /// Linux keeps the widest mode satp accepts
+    #[argh(option)]
+    satp_mode: Option<String>,
+
     /// uop cache mode: "direct" or "skew" (default: skew)
     #[argh(option)]
     uop_cache_mode: Option<String>,
@@ -190,6 +201,19 @@ fn main() -> anyhow::Result<()> {
     emulator.verbose = Arc::clone(&verbose_flag);
     if args.rva23 {
         emulator.set_rva23_enabled(true);
+    }
+    match args.vlen {
+        None => {}
+        Some(v @ (128 | 256)) => emulator.set_vlen(v),
+        Some(other) => anyhow::bail!("unsupported --vlen {other} (expected 128 or 256)"),
+    }
+    match args.satp_mode.as_deref() {
+        None | Some("sv39") => {}
+        Some("sv48") => emulator.set_max_satp_mode(9),
+        Some("sv57") => emulator.set_max_satp_mode(10),
+        Some(other) => {
+            anyhow::bail!("unknown satp mode: {other:?} (expected sv39, sv48 or sv57)")
+        }
     }
     emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
     emulator.tracing_flag = Arc::clone(&tracing_flag);

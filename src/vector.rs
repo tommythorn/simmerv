@@ -53,15 +53,24 @@ use crate::fp::fflag;
 use crate::generated_riscv_decoder::Op;
 use crate::riscv::Trap;
 
-/// Vector register length in bits (`Zvl128b`).
+/// Default vector register length in bits (`Zvl128b`), and the value the
+/// QEMU differential test in `tests/vector/` is calibrated against.
 pub const VLEN: usize = 128;
-/// Vector register length in bytes; the value read from the `vlenb` CSR.
+/// Default vector register length in bytes; the value read from `vlenb`.
 pub const VLENB: usize = VLEN / 8;
+/// Widest `VLEN` the register file is sized for.
+///
+/// `VLEN` is runtime state (`VectorUnit::vlenb`) so one binary can be either
+/// width -- Tenstorrent's arch tests only ship a VLEN=256 build -- but the
+/// register file stays a fixed array sized for the maximum, so nothing
+/// allocates and no hot path gains an indirection.
+pub const MAX_VLEN: usize = 256;
+pub const MAX_VLENB: usize = MAX_VLEN / 8;
 /// Widest supported element, in bits (`Zve64d` and up).
 pub const ELEN: usize = 64;
 
 const VREGS: usize = 32;
-const VRF_BYTES: usize = VREGS * VLENB;
+pub const MAX_VRF_BYTES: usize = VREGS * MAX_VLENB;
 
 // vtype fields
 const VTYPE_VILL: u64 = 1 << 63;
@@ -76,7 +85,10 @@ const VTYPE_VLMUL: u64 = 7;
 pub struct VectorUnit {
     /// The 32 vector registers, flat and little-endian, so that an `LMUL > 1`
     /// register group is simply a longer run of bytes.
-    pub vrf: [u8; VRF_BYTES],
+    pub vrf: [u8; MAX_VRF_BYTES],
+    /// Bytes per vector register: `VLEN / 8`.  A power of two in
+    /// `[VLENB, MAX_VLENB]`, so the register-file masking stays a single AND.
+    pub vlenb: usize,
     pub vtype: u64,
     pub vl: u64,
     pub vstart: u64,
@@ -94,7 +106,8 @@ impl VectorUnit {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            vrf: [0; VRF_BYTES],
+            vrf: [0; MAX_VRF_BYTES],
+            vlenb: VLENB,
             // Reset leaves vtype invalid: software must execute a vset before
             // any other vector instruction.
             vtype: VTYPE_VILL,
@@ -125,6 +138,13 @@ impl VectorUnit {
         self.vxrm = ((v >> 1) & 3) as u8;
     }
 
+    /// Size of the live part of the register file, in bytes.  Offsets are
+    /// masked against this, so a reserved encoding naming a group that runs
+    /// off the end wraps instead of reading another width's bytes.
+    #[inline]
+    #[must_use]
+    pub const fn vrf_bytes(&self) -> usize { VREGS * self.vlenb }
+
     /// Read element `idx` of the register group based at `vreg`, as `ebytes`
     /// little-endian bytes zero-extended to 64 bits.
     ///
@@ -133,7 +153,7 @@ impl VectorUnit {
     #[inline]
     #[must_use]
     pub fn eget(&self, vreg: usize, idx: usize, ebytes: usize) -> u64 {
-        let o = (vreg * VLENB + idx * ebytes) & (VRF_BYTES - 1);
+        let o = (vreg * self.vlenb + idx * ebytes) & (self.vrf_bytes() - 1);
         let v = &self.vrf;
         match ebytes {
             1 => u64::from(v[o]),
@@ -155,7 +175,7 @@ impl VectorUnit {
     /// Write element `idx` of the register group based at `vreg`.
     #[inline]
     pub fn eset(&mut self, vreg: usize, idx: usize, ebytes: usize, val: u64) {
-        let o = (vreg * VLENB + idx * ebytes) & (VRF_BYTES - 1);
+        let o = (vreg * self.vlenb + idx * ebytes) & (self.vrf_bytes() - 1);
         let v = &mut self.vrf;
         match ebytes {
             1 => v[o] = val as u8,
@@ -170,12 +190,12 @@ impl VectorUnit {
     #[inline]
     #[must_use]
     pub const fn mget(&self, vreg: usize, idx: usize) -> bool {
-        self.vrf[(vreg * VLENB + (idx >> 3)) & (VRF_BYTES - 1)] >> (idx & 7) & 1 != 0
+        self.vrf[(vreg * self.vlenb + (idx >> 3)) & (self.vrf_bytes() - 1)] >> (idx & 7) & 1 != 0
     }
 
     #[inline]
     pub const fn mset(&mut self, vreg: usize, idx: usize, bit: bool) {
-        let o = (vreg * VLENB + (idx >> 3)) & (VRF_BYTES - 1);
+        let o = (vreg * self.vlenb + (idx >> 3)) & (self.vrf_bytes() - 1);
         let m = 1u8 << (idx & 7);
         if bit {
             self.vrf[o] |= m;
@@ -188,11 +208,11 @@ impl VectorUnit {
     #[inline]
     #[must_use]
     pub const fn byte(&self, vreg: usize, off: usize) -> u8 {
-        self.vrf[(vreg * VLENB + off) & (VRF_BYTES - 1)]
+        self.vrf[(vreg * self.vlenb + off) & (self.vrf_bytes() - 1)]
     }
     #[inline]
     pub const fn set_byte(&mut self, vreg: usize, off: usize, b: u8) {
-        self.vrf[(vreg * VLENB + off) & (VRF_BYTES - 1)] = b;
+        self.vrf[(vreg * self.vlenb + off) & (self.vrf_bytes() - 1)] = b;
     }
 }
 
@@ -223,8 +243,8 @@ const fn illegal() -> Exception {
 }
 
 /// Number of elements a register group of `emul_num/emul_den` registers holds.
-const fn vlmax_for(ebytes: usize, lmul_field: u64) -> usize {
-    let per_reg = VLENB / ebytes;
+const fn vlmax_for(vlenb: usize, ebytes: usize, lmul_field: u64) -> usize {
+    let per_reg = vlenb / ebytes;
     match lmul_field {
         0 => per_reg,
         1 => per_reg * 2,
@@ -327,7 +347,7 @@ pub fn execute(cpu: &mut Cpu, op: Op, insn: u32, s1: u64, s2: u64) -> ExecOut {
 
 /// Compute the `vtype` written by a `vset*`, replacing it with just `vill` if
 /// the requested configuration is unsupported.
-const fn legalize_vtype(vtype: u64) -> u64 {
+const fn legalize_vtype(vlenb: usize, vtype: u64) -> u64 {
     let lmul = vtype & VTYPE_VLMUL;
     let sew_field = (vtype & VTYPE_VSEW) >> 3;
     let reserved = vtype & !(VTYPE_VMA | VTYPE_VTA | VTYPE_VSEW | VTYPE_VLMUL);
@@ -337,7 +357,7 @@ const fn legalize_vtype(vtype: u64) -> u64 {
     if reserved != 0
         || lmul == 4
         || (8usize << sew_field) > ELEN
-        || vlmax_for(1 << sew_field, lmul) == 0
+        || vlmax_for(vlenb, 1 << sew_field, lmul) == 0
     {
         VTYPE_VILL
     } else {
@@ -365,14 +385,18 @@ fn vset(cpu: &mut Cpu, op: Op, insn: u32, s1: u64, s2: u64) -> u64 {
         _ => u64::from((insn >> 20) & 0x7ff),
     };
 
-    let vtype = legalize_vtype(vtype);
+    let vtype = legalize_vtype(cpu.v.vlenb, vtype);
     if vtype & VTYPE_VILL != 0 {
         cpu.v.vtype = VTYPE_VILL;
         cpu.v.vl = 0;
         return 0;
     }
 
-    let vlmax = vlmax_for(1 << ((vtype & VTYPE_VSEW) >> 3), vtype & VTYPE_VLMUL) as u64;
+    let vlmax = vlmax_for(
+        cpu.v.vlenb,
+        1 << ((vtype & VTYPE_VSEW) >> 3),
+        vtype & VTYPE_VLMUL,
+    ) as u64;
     let vl = if keep_vl {
         // rd == x0 && rs1 == x0 updates vtype but keeps vl.  (Changing VLMAX
         // with this form is a reserved use, so no clamping is called for.)
@@ -560,12 +584,13 @@ fn whole_reg(
     base: u64,
     is_store: bool,
 ) -> Result<u64, Exception> {
-    let total = nf * VLENB;
+    let vlenb = cpu.v.vlenb;
+    let total = nf * vlenb;
     let start = cpu.v.vstart as usize;
     for byte in start..total {
         let addr = base.wrapping_add(byte as u64);
-        let reg = vd + byte / VLENB;
-        let off = byte % VLENB;
+        let reg = vd + byte / vlenb;
+        let off = byte % vlenb;
         if is_store {
             let b = cpu.v.byte(reg, off);
             if let Err(e) = cpu.memop_write(addr, 0, u64::from(b), 1) {
@@ -746,7 +771,7 @@ fn varith(cpu: &mut Cpu, op: Op, insn: u32, s1: u64) -> Result<u64, Exception> {
         lmul,
         vl: cpu.v.vl as usize,
         vstart: cpu.v.vstart as usize,
-        vlmax: vlmax_for(sew, lmul),
+        vlmax: vlmax_for(cpu.v.vlenb, sew, lmul),
         scalar: trunc(raw_scalar, sew),
         scalar_u: trunc(if op == Op::VopIvi { imm5 } else { s1 }, sew),
         raw_scalar: if op == Op::VopIvi { imm5 } else { s1 },
@@ -1048,7 +1073,7 @@ fn op_integer(cpu: &mut Cpu, c: &Ctx, op: Op) -> Result<u64, Exception> {
                 return Err(illegal());
             }
             for r in 0..nr {
-                for o in 0..VLENB {
+                for o in 0..cpu.v.vlenb {
                     let b = cpu.v.byte(c.vs2 + r, o);
                     cpu.v.set_byte(c.vd + r, o, b);
                 }

@@ -71,6 +71,11 @@ pub enum Csr {
     Mimpid = 0xf13,
     Marchid = 0xf12,
     Mvendorid = 0xf11,
+    /// Pointer to a machine configuration data structure.  Mandatory since
+    /// privileged spec 1.12 -- reading zero (no structure) is allowed, not
+    /// existing is not.  Tenstorrent's arch tests read it during OS setup, and
+    /// trapping there failed 33 of 100 `rv_i` tests.
+    Mconfigptr = 0xf15,
     Mtopi = 0xfb0, // Unsupported Highest Priority Pending And Enabled Interrupt
     // Debug/Trace triggers: the DUT implements these as read-0 / write-ignored
     // (no triggers present). Match it so OpenSBI's CSR probe doesn't diverge.
@@ -201,6 +206,7 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Mideleg
             | Csr::Mie
             | Csr::Mimpid
+            | Csr::Mconfigptr
             | Csr::Mip
             | Csr::Misa
             | Csr::Mscratch

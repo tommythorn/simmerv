@@ -175,7 +175,7 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
 /// Anything that writes, validates, or sniffs a snapshot must use this rather
 /// than spelling the bytes out -- three hand-written copies is exactly how the
 /// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
-pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC9";
+pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC10";
 
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
@@ -328,6 +328,18 @@ impl Emulator {
         self.cpu.get_mut_mmu().write_memory_at(dtb_base, &dtb);
         self.cpu.set_dtb_base(dtb_base);
     }
+
+    /// Set `VLEN` in bits (128, the default, or 256).  RVA23 must also be
+    /// enabled for the vector unit to be reachable at all.
+    ///
+    /// # Panics
+    /// If `vlen` is not a supported width.
+    pub fn set_vlen(&mut self, vlen: usize) { self.cpu.set_vlen(vlen); }
+
+    /// Widest `satp` MODE the hart accepts: 8 = Sv39 (default), 9 = Sv48,
+    /// 10 = Sv57.  See [`crate::cpu::Cpu::max_satp_mode`] for why this is
+    /// opt-in rather than simply always allowing the widest.
+    pub const fn set_max_satp_mode(&mut self, mode: u64) { self.cpu.set_max_satp_mode(mode); }
 
     /// Runs program set by `load_image()`. Calls `run_test()` if the program
     /// is [`riscv-tests`](https://github.com/riscv/riscv-tests).

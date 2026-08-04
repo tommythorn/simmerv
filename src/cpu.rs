@@ -396,6 +396,18 @@ pub struct Cpu {
     pub vs: u8,
     pub rva23_enabled: bool,
 
+    /// Widest `satp` MODE this hart accepts, as the raw encoding (8 = Sv39,
+    /// 9 = Sv48, 10 = Sv57).
+    ///
+    /// The page-table walker has always handled all three -- it derives the
+    /// level count from the mode -- but `satp` only ever accepted Sv39, so the
+    /// wider modes were unreachable.  Raising this is deliberately opt-in:
+    /// Linux probes `satp` by writing the widest mode first and keeping
+    /// whatever sticks, so defaulting to Sv48 would silently move every
+    /// existing guest onto a deeper page table (and change the cosim DUT
+    /// comparison, since smolrv64 is Sv39-only).
+    pub max_satp_mode: u64,
+
     // Supervisor and CSR
     pub cycle: u64,
     csr: csr::CsrFile,
@@ -518,6 +530,7 @@ impl Cpu {
             v: VectorUnit::new(),
             vs: 1,
             rva23_enabled: false,
+            max_satp_mode: SatpMode::Sv39 as u64,
 
             seqno: 0,
             cycle: 0,
@@ -648,6 +661,39 @@ impl Cpu {
     /// Turn the RVA23 extension set on or off.  This is a machine-construction
     /// switch rather than architectural state: it gates instruction decoding,
     /// the `misa` V bit and the vector CSRs.
+    /// Set `VLEN`, in bits.  Must be 128 or 256 -- see
+    /// [`crate::vector::MAX_VLEN`].  Only meaningful with RVA23 enabled.
+    ///
+    /// # Panics
+    /// If `vlen` is not a supported width.
+    pub fn set_vlen(&mut self, vlen: usize) {
+        assert!(
+            vlen == vector::VLEN || vlen == vector::MAX_VLEN,
+            "unsupported VLEN {vlen} (expected {} or {})",
+            vector::VLEN,
+            vector::MAX_VLEN
+        );
+        self.v.vlenb = vlen / 8;
+        // Widening changes VLMAX, so any vtype the guest already set is no
+        // longer the one it asked for.  Reset the unit rather than leave it
+        // describing the old width.
+        self.v.vtype = 0;
+        self.v.vl = 0;
+        self.v.vstart = 0;
+        self.v.vrf = [0; vector::MAX_VRF_BYTES];
+    }
+
+    /// Set the widest accepted `satp` MODE.  See [`Cpu::max_satp_mode`].
+    pub const fn set_max_satp_mode(&mut self, mode: u64) { self.max_satp_mode = mode; }
+
+    /// Virtual-address width implied by [`Cpu::max_satp_mode`]: 39, 48 or 57.
+    const fn va_bits(&self) -> u32 {
+        // max_satp_mode is one of Sv39/Sv48/Sv57, so the difference is 0..=2.
+        #[allow(clippy::cast_possible_truncation)]
+        let steps = (self.max_satp_mode - SatpMode::Sv39 as u64) as u32;
+        39 + 9 * steps
+    }
+
     pub const fn set_rva23_enabled(&mut self, on: bool) {
         self.rva23_enabled = on;
         let v_bit = 1u64 << (b'V' - b'A');
@@ -1739,11 +1785,13 @@ impl Cpu {
                     return illegal;
                 }
 
-                if !matches!(
-                    FromPrimitive::from_u64((value >> SATP_MODE_SHIFT) & SATP_MODE_MASK),
-                    Some(SatpMode::Bare | SatpMode::Sv39)
-                ) {
-                    // WARL: silently ignore writes with unsupported modes
+                // WARL: silently ignore writes selecting a mode this hart
+                // does not implement.  Sv48/Sv57 are accepted only when
+                // `max_satp_mode` has been raised -- see the field docs.
+                let mode = (value >> SATP_MODE_SHIFT) & SATP_MODE_MASK;
+                if mode != SatpMode::Bare as u64
+                    && !(SatpMode::Sv39 as u64..=self.max_satp_mode).contains(&mode)
+                {
                     return Ok(());
                 }
 
@@ -1878,7 +1926,7 @@ impl Cpu {
             Csr::Vcsr => self.v.vcsr(),
             Csr::Vl => self.v.vl,
             Csr::Vtype => self.v.vtype,
-            Csr::Vlenb => vector::VLENB as u64,
+            Csr::Vlenb => self.v.vlenb as u64,
             _ => 0,
         }
     }
@@ -1890,14 +1938,20 @@ impl Cpu {
     // (still non-canonical, faults identically, but not bit-for-bit verbatim).
     // Applying it here covers BOTH the trap handler and architectural CSRW,
     // since both route through write_csr_raw.
-    const fn legalize_va(v: u64) -> u64 {
-        let bit38 = (v >> 38) & 1;
-        let sext_top = if bit38 == 1 { !0u64 << 39 } else { 0u64 };
-        if (v & (!0u64 << 39)) == sext_top {
+    ///
+    /// The width follows [`Cpu::max_satp_mode`]: compressing an Sv48 or Sv57
+    /// address into 39 bits would corrupt a perfectly legal `sepc`, so a hart
+    /// configured for the wider modes legalizes at the wider width.
+    const fn legalize_va(&self, v: u64) -> u64 {
+        let n = self.va_bits();
+        let sign = (v >> (n - 1)) & 1;
+        let top = !0u64 << n;
+        let sext_top = if sign == 1 { top } else { 0u64 };
+        if (v & top) == sext_top {
             v // canonical: stored exactly
         } else {
-            let lo = v & ((1u64 << 39) - 1);
-            let new_top = if bit38 == 1 { 0u64 } else { !0u64 << 39 };
+            let lo = v & !top;
+            let new_top = if sign == 1 { 0u64 } else { top };
             new_top | lo
         }
     }
@@ -1912,7 +1966,7 @@ impl Cpu {
             ),
             Csr::Mcause => self.csr.mcause = value,
             Csr::Medeleg => self.csr.medeleg = value,
-            Csr::Mepc => self.csr.mepc = Self::legalize_va(value),
+            Csr::Mepc => self.csr.mepc = self.legalize_va(value),
             Csr::Mhartid => self.csr.mhartid = value,
             // Sscofpmf: bit 13 (LCOFIP) is delegatable in addition to the
             // standard SSIP/STIP/SEIP (0x222). The DUT stores mideleg unmasked
@@ -1930,11 +1984,11 @@ impl Cpu {
                     self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
                 }
             }
-            Csr::Mtval => self.csr.mtval = Self::legalize_va(value),
+            Csr::Mtval => self.csr.mtval = self.legalize_va(value),
             Csr::Mtvec => self.csr.mtvec = value,
             Csr::Scause => self.csr.scause = value,
             Csr::Sedeleg => self.csr.sedeleg = value,
-            Csr::Sepc => self.csr.sepc = Self::legalize_va(value),
+            Csr::Sepc => self.csr.sepc = self.legalize_va(value),
             Csr::Sideleg => self.csr.sideleg = value,
             // SIE mask includes LCOFIE (bit 13) to match the DUT (csr_mie & 0x2222).
             Csr::Sie => self.csr.mie = self.csr.mie & !0x2222 | value & 0x2222,
@@ -1953,7 +2007,7 @@ impl Cpu {
                     self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
                 }
             }
-            Csr::Stval => self.csr.stval = Self::legalize_va(value),
+            Csr::Stval => self.csr.stval = self.legalize_va(value),
             Csr::Stvec => self.csr.stvec = value,
             Csr::Stimecmp => {
                 self.csr.stimecmp = value;
@@ -1978,7 +2032,7 @@ impl Cpu {
             Csr::Ustatus => self.csr.ustatus = value,
             // Writing any vector CSR makes the vector state dirty.
             Csr::Vstart => {
-                self.v.vstart = value & (vector::VLEN as u64 - 1);
+                self.v.vstart = value & (self.v.vlenb as u64 * 8 - 1);
                 self.vs = 3;
             }
             Csr::Vxsat => {
@@ -2045,7 +2099,7 @@ impl Cpu {
     ///   [20×8 B] CSR fields (fixed order, see `read_state`)
     ///   [1 B] vs (mstatus.VS) + [1 B] `rva23_enabled`
     ///   [4×8 B] vtype, vl, vstart, vcsr
-    ///   [32·VLENB B] the vector register file
+    ///   [32·`MAX_VLENB` B] the vector register file, then [8 B] `vlenb`
     ///   [? B] MMU state (via `Mmu::write_state`)
     pub fn write_state(&self, out: &mut Vec<u8>) {
         {
@@ -2112,6 +2166,7 @@ impl Cpu {
             w.u64(self.v.vstart);
             w.u64(self.v.vcsr());
             w.raw(&self.v.vrf);
+            w.u64(self.v.vlenb as u64);
         }
         self.mmu.write_state(out);
     }
@@ -2203,7 +2258,12 @@ impl Cpu {
         self.v.vstart = r.u64()?;
         let vcsr = r.u64()?;
         self.v.set_vcsr(vcsr);
-        self.v.vrf.copy_from_slice(r.raw(vector::VLENB * 32)?);
+        self.v.vrf.copy_from_slice(r.raw(vector::MAX_VRF_BYTES)?);
+        // A width, always 16 or 32; fits usize on every target.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.v.vlenb = r.u64()? as usize;
+        }
         self.icache_flush = IcacheFlushKind::Full;
         self.mmu.read_state(r.remaining(), make_device)
     }

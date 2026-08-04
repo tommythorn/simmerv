@@ -13,6 +13,10 @@ mkdir -p "$out"
 
 CC=${CC:-riscv64-linux-gnu-gcc}
 QEMU=${QEMU:-qemu-system-riscv64}
+# Vector width to test both sides at.  simmerv defaults to 128; 256 exercises
+# the same instructions against a different VLMAX, which is where VLEN-
+# dependent bugs live.
+VLEN=${VLEN:-128}
 
 echo "== generating =="
 python3 "$here/gen_vtest.py" > "$out/vtest.S"
@@ -39,14 +43,14 @@ grep -v 'build-id' "$out/as.err" >&2 || true
 
 echo "== qemu =="
 # Never -nographic here: it takes over the controlling terminal.
-timeout 900 "$QEMU" -M virt -cpu rv64,v=true,vlen=128,elen=64,zvfh=true,zcb=true,zfa=true,zacas=true,zabha=true,zvbb=true,zvkb=true,zimop=true,zcmop=true,zawrs=true \
+timeout 900 "$QEMU" -M virt -cpu rv64,v=true,vlen=$VLEN,elen=64,zvfh=true,zcb=true,zfa=true,zacas=true,zabha=true,zvbb=true,zvkb=true,zimop=true,zcmop=true,zawrs=true \
     -bios none -kernel "$out/vtest.elf" -display none -monitor none \
     -serial "file:$out/qemu.txt" < /dev/null 2>"$out/qemu.err" || true
 grep -c '' "$out/qemu.txt" | sed 's/^/qemu lines: /'
 
 echo "== simmerv =="
 (cd "$root" && cargo build --release -q)
-timeout 900 "$root/target/release/simmerv_cli" --rva23 -n "$out/vtest.elf" \
+timeout 900 "$root/target/release/simmerv_cli" --rva23 --vlen "$VLEN" -n "$out/vtest.elf" \
     > "$out/simmerv.txt" 2>"$out/simmerv.err" < /dev/null || true
 grep -c '' "$out/simmerv.txt" | sed 's/^/simmerv lines: /'
 
