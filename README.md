@@ -24,8 +24,9 @@ here](https://tommythorn.github.io/simmerv/)
 - Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Svpbmt_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
   (CLINT, PLIC, NS16550A UART, virtio block device, and VirtIO ethernet)
 - Optional RVA23 mode, enabled with `--rva23`: the `V` vector extension
-  (RVV 1.0, `VLEN`=128, `ELEN`=64) plus Zcb, Zimop, Zcmop, Zfa, Zawrs, Zacas,
-  Zabha, Zvbb and Zvkt.  Boots the RVA23 port of Ubuntu 26.04.
+  (RVV 1.0, `ELEN`=64, `VLEN`=128 or 256 via `--vlen`) plus Zcb, Zimop,
+  Zcmop, Zfa, Zawrs, Zacas, Zabha, Zvbb, Zvkt and Zihintntl.  Boots the RVA23
+  port of Ubuntu 26.04.
 - Targets native and WASM
 - Snapshots
 - Speedometer
@@ -46,7 +47,7 @@ here](https://tommythorn.github.io/simmerv/)
 - [x] Svinval (fine-grained TLB invalidation)
 - [x] Svade (hardware A/D fault-on-access)
 - [x] Sstc (stimecmp/menvcfg timer compare)
-- [x] Sv39, Sv48, Sv57
+- [x] Sv39, Sv48, Sv57 (the wider two are opt-in: see `--satp-mode`)
 - [x] Svpbmt (page-based memory types; PTEs accepted, no caches to model)
 - [x] Privileged Spec 1.12 (mcounteren/scounteren, senvcfg, PMP stub with 0 entries)
 - [x] Svnapot
@@ -65,7 +66,8 @@ The emulator supports all instructions listed above.
       segment / whole-register / fault-only-first loads and stores, the
       integer, fixed-point, mask, permutation and floating-point operations,
       and the `vstart` / `vl` / `vtype` / `vxrm` / `vxsat` / `vcsr` / `vlenb`
-      CSRs with `mstatus.VS`.  `VLEN` is 128 (`Zvl128b`, the profile minimum).
+      CSRs with `mstatus.VS`.  `VLEN` defaults to 128 (`Zvl128b`, the profile
+      minimum); `--vlen 256` selects `Zvl256b` instead.
 - [x] Zvfh, Zvfhmin — vector half-precision (the full arithmetic set, which is
       a superset of the `Zvfhmin` the profile requires)
 - [x] Zvkt, Zkt — constant-time execution; trivially satisfied by a functional
@@ -89,14 +91,27 @@ The emulator supports all instructions listed above.
 - [x] Zacas — `amocas.b/h/w/d/q`, including the quadword form over even/odd
       register pairs
 - [x] Zabha — byte and halfword forms of every AMO
-- [ ] Zihintntl — non-temporal locality hints
+- [x] Zihintntl — non-temporal locality hints.  The four hints are
+      `ADD x0, x0, x2..x5` (and the `C.ADD x0, x2..x5` compressed forms), so
+      any conforming hart already retires them as no-ops; a functional model
+      has no cache hierarchy to hint at, which is the same reason `Zkt` and
+      `Zvkt` are satisfied for free.  Verified to leave `x0` and the source
+      registers untouched.
+- [x] Sv48, Sv57 in `satp`.  Opt-in with `--satp-mode sv48` / `sv57`, because
+      Linux keeps the widest mode `satp` accepts: defaulting to Sv57 would move
+      every existing guest onto a deeper page table.  Exercised by the
+      Tenstorrent suite's `paging_sv48` and `paging_sv57` groups.
 - [ ] Supm / Ssnpm / Smnpm — pointer masking
 - [ ] Sscofpmf — count-overflow interrupts (the CSR reads exist, no overflows
       are raised)
 - [ ] Ssstateen / Smstateen — the state-enable CSRs
 - [ ] H — the hypervisor extension, required by RVA23S64
-- [ ] Sv48, Sv57 in `satp` (the page-table walker handles them, but `satp`
-      writes currently accept only Bare and Sv39)
+
+So **RVA23U64 is complete except pointer masking** (`Supm`); everything still
+outstanding beyond that belongs to RVA23S64.  Coverage is not self-reported:
+the user-mode set is exercised by Tenstorrent's architectural tests (see
+`tests/tenstorrent/run.sh`) and the vector implementation is diffed against
+QEMU instruction by instruction at both `VLEN` widths (`tests/vector/run.sh`).
 
 `V`, Zcb, Zimop, Zcmop, Zfa, Zvbb, Zawrs, Zacas and Zabha are off by default and
 enabled together by `--rva23`, so that a run without the flag still models a hart

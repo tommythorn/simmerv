@@ -30,11 +30,11 @@ For an up-to-date view, look at the current issues on github*.
 
 ## Features
 
-- RVA23 (RVA22 is complete).  V (RVV 1.0, VLEN=128) is implemented and gated
-  behind `-V`; still missing are Zcb, Zcmop, Zimop, Zfa, Zvbb, Zawrs,
-  Zihintntl, the pointer-masking extensions, Sscofpmf overflow interrupts,
-  Ss/Smstateen, and (for RVA23S64) the hypervisor extension.  `satp` also
-  still refuses Sv48/Sv57 even though the walker implements them.
+- RVA23.  See the checklist in README.md, which is kept current -- this entry
+  went stale enough to be misleading (it still named `-V`, and listed Zcb,
+  Zfa, Zvbb, Zawrs, Zihintntl and Sv48/Sv57 as missing long after they
+  landed).  RVA23U64 is complete except pointer masking (`Supm`); what is
+  left is RVA23S64: Sscofpmf, Ss/Smstateen and H.
 - Maybe: implement the Bytedance 64K page proposal?
 
 ## Misc
