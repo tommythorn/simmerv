@@ -1834,9 +1834,25 @@ impl Cpu {
                 let value = value & !((SATP_ASID_MASK << SATP_ASID_SHIFT) & !asid_keep);
                 let old_satp = self.mmu.satp;
                 self.mmu.satp = value;
-                // Only flush TLBs if MODE or PPN changed (not on ASID-only changes)
-                let mode_ppn_mask = !((SATP_ASID_MASK) << SATP_ASID_SHIFT);
-                if (old_satp & mode_ppn_mask) != (value & mode_ppn_mask) {
+                // Both the TLBs and the uop cache are ASID-tagged -- entries
+                // carry the ASID and a lookup only matches its own -- so
+                // switching to a *different* ASID cannot alias and needs no
+                // flush at all, however much the PPN moves.  That is the
+                // common case: a context switch.
+                //
+                // What does need one:
+                //   * a MODE change, which reinterprets every entry;
+                //   * a PPN change that keeps the same ASID, i.e. software reusing an ASID for
+                //     a different address space.  The spec obliges it to announce that with
+                //     SFENCE.VMA, so this is belt-and-braces, but it is rare enough to be free.
+                let field = |v: u64, sh: u64, m: u64| (v >> sh) & m;
+                let mode_changed = field(old_satp, SATP_MODE_SHIFT, SATP_MODE_MASK)
+                    != field(value, SATP_MODE_SHIFT, SATP_MODE_MASK);
+                let same_asid = field(old_satp, SATP_ASID_SHIFT, SATP_ASID_MASK)
+                    == field(value, SATP_ASID_SHIFT, SATP_ASID_MASK);
+                let ppn_changed = field(old_satp, SATP_PPN_SHIFT, SATP_PPN_MASK)
+                    != field(value, SATP_PPN_SHIFT, SATP_PPN_MASK);
+                if mode_changed || (ppn_changed && same_asid) {
                     self.mmu.flush_tlb();
                     self.icache_flush = IcacheFlushKind::Full;
                 }
