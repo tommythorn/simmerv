@@ -675,6 +675,17 @@ impl Emulator {
         false
     }
 
+    /// Uop cache counters.
+    #[must_use]
+    pub const fn bb_stats(&self) -> crate::uop_cache::UopCacheStats { self.bb_cache.stats() }
+
+    /// Distribution of stored uop-cache block lengths; see
+    /// [`crate::uop_cache::BbCache::inserted_len`].
+    #[must_use]
+    pub const fn bb_len_histogram(&self) -> &[u64; crate::uop_cache::MAX_BLOCK_LEN + 1] {
+        self.bb_cache.inserted_len()
+    }
+
     /// Runs CPU one cycle
     pub fn tick(&mut self, n: usize) -> bool {
         // XXX We should be able to set this arbitrarily high, but we seem

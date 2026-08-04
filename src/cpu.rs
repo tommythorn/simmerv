@@ -931,11 +931,21 @@ impl Cpu {
             return Ok(n_executed);
         }
 
-        // ── Cache miss: build basic block ─────────────────────────────────
+        // ── Cache miss: build and execute the block ───────────────────────
+        //
+        // Build and execute are fused so the block can stop at the first
+        // *taken* branch.  Decoding ahead blindly to MAX_BLOCK_LEN stores a
+        // tail that control flow never reaches: on a Linux boot the average
+        // block stored ~30 uops and executed ~9 of them, so most of the decode
+        // work, and most of the slot, was spent on instructions that would be
+        // skipped every time the block ran.  Not-taken branches still extend
+        // the block, which is the case the old policy was betting on.
         let page_end = (block_start & !0xFFF) + 0x1000;
         let mut block = BasicBlock::default();
         let mut fetch_pc = block_start;
         let mut i = 0usize;
+        let mut n_executed: u32 = 0;
+        let mut exception: Option<(Exception, u64)> = None;
 
         loop {
             if i >= MAX_BLOCK_LEN {
@@ -948,8 +958,7 @@ impl Cpu {
             }
 
             // Fetch instruction (4 bytes; actual size determined after decode).
-            let insn_result = self.memop_code(fetch_pc);
-            let insn = match insn_result {
+            let insn = match self.memop_code(fetch_pc) {
                 Ok(v) => v as u32,
                 Err(e) => {
                     if i == 0 {
@@ -981,22 +990,6 @@ impl Cpu {
                 break;
             }
 
-            block.uops[i] = uop;
-            i += 1;
-            fetch_pc += insn_size;
-
-            if Self::is_block_terminal(uop.op, uop.imm) {
-                break;
-            }
-        }
-
-        // ── Execute the freshly-decoded block ─────────────────────────────
-        let mut n_executed: u32 = 0;
-        let mut exception: Option<(Exception, u64)> = None;
-        for uop in block.uops {
-            if uop.op == Op::End {
-                break;
-            }
             let cur_insn_addr = self.pc;
             let expected_next = cur_insn_addr + uop.get_insn_size();
             self.pc = expected_next;
@@ -1006,6 +999,9 @@ impl Cpu {
             let s3 = self.read_x(uop.rs3);
             let out = new_execute(self, &uop, s1, s2, s3, cur_insn_addr);
             if out.is_err() {
+                // Leave the faulting uop out of the block and do not cache it
+                // (below): the prefix already retired, and the fault will be
+                // taken again the next time control reaches it.
                 exception = Some((out.to_exception(), cur_insn_addr));
                 break;
             }
@@ -1016,12 +1012,18 @@ impl Cpu {
             }
             n_executed += 1;
 
+            block.uops[i] = uop;
+            i += 1;
+            fetch_pc += insn_size;
+
             debug_assert!(
                 out.is_redirect() || self.pc == expected_next,
                 "{:?} at {cur_insn_addr:#x} wrote pc without REDIRECT_BIT",
                 uop.op
             );
-            if out.is_redirect() {
+            // A taken branch, jump or xret ends the block: nothing after it in
+            // program order is reachable from here.
+            if out.is_redirect() || Self::is_block_terminal(uop.op, uop.imm) {
                 break;
             }
         }

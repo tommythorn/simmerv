@@ -1,7 +1,26 @@
 use crate::cpu::Uop;
 
 /// Maximum number of uops in a single cached basic block.
-pub const MAX_BLOCK_LEN: usize = 16;
+///
+/// Only a ceiling, not a target: blocks stop at the first *taken* branch, so
+/// what actually gets stored is the trace that ran, and the mean stored length
+/// is around 8.  Raising the ceiling therefore costs little and lets
+/// straight-line code -- where a block really can run 30+ uops before control
+/// leaves -- keep going.  Measured against the previous build, interleaved:
+///
+/// | workload            | len 16, decode-ahead | len 48, trace |
+/// |---------------------|----------------------|---------------|
+/// | Geekbench 5         |                310.2 |         332.0 |
+/// | Debian boot         |                186.9 |         206.8 |
+///
+/// The two changes are complementary: trace termination is what stops a
+/// bigger ceiling from wasting decode work and slots, and before it a
+/// ceiling of 48 made the Debian boot *slower* (155 MIPS), because blocks
+/// were padded out to 48 uops of which ~9 ever ran.
+///
+/// The slot is still fixed-size, so at a mean of 8 uops roughly 80% of it is
+/// now empty.  That is the next thing to fix -- see the note on `BasicBlock`.
+pub const MAX_BLOCK_LEN: usize = 48;
 
 /// Default total uop capacity, for every front end.
 ///
@@ -20,8 +39,8 @@ pub const MAX_BLOCK_LEN: usize = 16;
 /// images this was first tuned on, and starving the cache costs more than any
 /// micro-optimisation in the executor.  Past 131 072 the falling conflict-miss
 /// rate no longer pays for the cold misses that refilling a larger cache
-/// costs after each full flush.  At 16 uops per block slot this is 8 192
-/// slots, about 1.6 MB — cheap even in the browser.
+/// costs after each full flush.  At `MAX_BLOCK_LEN` uops per slot this is
+/// about 2.4 MB — cheap even in the browser.
 pub const DEFAULT_UOP_ENTRIES: usize = 131_072;
 
 /// Cache mapping strategy.
@@ -35,6 +54,21 @@ pub enum CacheMode {
 
 /// A cached sequence of decoded uops covering one basic block.
 /// The block is terminated by the first `Op::End` sentinel uop.
+///
+/// Fixed size, which is now the main inefficiency in the cache: since blocks
+/// end at the first taken branch they average about 8 uops in a 48-uop slot,
+/// so ~80% of the storage is empty and the cache holds ~5x fewer blocks than
+/// its byte budget allows.  Measured slot utilisation is 19-22%.
+///
+/// Two ways out, neither implemented:
+///   * an arena -- store uops contiguously and keep `(start, len)` per tag. No
+///     waste at all, but the uop address then depends on a *loaded* start
+///     offset, adding a dependent load to a hot path that is already
+///     latency-bound, so it may not pay.
+///   * spanning slots -- shrink the slot to a few uops and let a long block
+///     occupy consecutive slots, invalidating the ones it covers.  The data
+///     address stays `slot * const`, so no extra dependent load; waste is
+///     bounded by half a slot.  This looks like the better bet.
 #[derive(Clone)]
 pub struct BasicBlock {
     pub uops: [Uop; MAX_BLOCK_LEN],
@@ -87,6 +121,10 @@ pub struct BbCache {
     pub flush_vpage: u64,
     /// Targeted flushes by virtual page + ASID (SFENCE.VMA rs1/rs2).
     pub flush_vpage_asid: u64,
+    /// EXPERIMENT: how long the blocks actually stored are, indexed by uop
+    /// count.  A slot costs a full `MAX_BLOCK_LEN` whatever this says, so the
+    /// gap between this distribution and 16 is the storage being wasted.
+    pub inserted_len: [u64; MAX_BLOCK_LEN + 1],
 }
 
 impl BbCache {
@@ -125,6 +163,7 @@ impl BbCache {
             flush_asid: 0,
             flush_vpage: 0,
             flush_vpage_asid: 0,
+            inserted_len: [0; MAX_BLOCK_LEN + 1],
         }
     }
 
@@ -183,6 +222,14 @@ impl BbCache {
 
     #[inline]
     pub fn insert(&mut self, key: u64, block: &BasicBlock) {
+        {
+            let n = block
+                .uops
+                .iter()
+                .take_while(|u| u.op != crate::generated_riscv_decoder::Op::End)
+                .count();
+            self.inserted_len[n] += 1;
+        }
         match self.mode {
             CacheMode::Direct => {
                 let i = self.index0(key);
@@ -283,6 +330,13 @@ impl BbCache {
             capacity: self.capacity,
         }
     }
+
+    /// Distribution of stored block lengths, indexed by uop count.
+    ///
+    /// Deliberately not part of [`UopCacheStats`], which is copied per block
+    /// while the HPM counters are live.
+    #[must_use]
+    pub const fn inserted_len(&self) -> &[u64; MAX_BLOCK_LEN + 1] { &self.inserted_len }
 }
 
 const INVALID_TAG: u64 = u64::MAX;
@@ -302,8 +356,8 @@ pub struct UopCacheStats {
     pub occupied: usize,
     pub capacity: usize,
 }
-// [Uop; 16]=192 + _cache_align_pad(4) = 196
-const _: () = assert!(std::mem::size_of::<BasicBlock>() == 196);
+// [Uop; MAX_BLOCK_LEN] + _cache_align_pad(4).  The pad is what keeps the
+const _: () = assert!(std::mem::size_of::<BasicBlock>() == 12 * MAX_BLOCK_LEN + 4);
 
 #[cfg(test)]
 mod tests {
