@@ -767,8 +767,7 @@ impl Emulator {
             let xmas_elf::program::SegmentData::Undefined(data) =
                 sect.get_data(&elf_file).map_err(|e| anyhow!(e))?
             else {
-                // XXX error handling
-                panic!("didn't find my data");
+                bail!("{name}: PT_LOAD segment at {addr:#x} has no raw data");
             };
             log::info!(
                 "ELF program data section [{addr:x}, {:x}) (size {size} vs {})",
@@ -777,13 +776,22 @@ impl Emulator {
             );
 
             // XXX such an insane stupid way to do this
+            //
+            // Reported rather than asserted: the address comes from the image,
+            // so an ELF linked for a different memory map is bad input, not a
+            // broken invariant.  Panicking here aborted the process on a
+            // mis-linked test binary -- and in wasm that is a trap and a dead
+            // page, with nothing said about which address was at fault.
             let mmu = self.cpu.get_mut_mmu();
             for (j, b) in data.iter().enumerate() {
-                assert!(
-                    mmu.store_phys_u8(addr + j as u64, *b).is_ok(),
-                    "Program doesn't fit in memory: 0x{:016x}",
-                    addr + j as u64
-                );
+                if mmu.store_phys_u8(addr + j as u64, *b).is_err() {
+                    bail!(
+                        "{name}: segment [{addr:#x}, {:#x}) does not fit in memory \
+                         (no RAM at {:#x})",
+                        addr + size,
+                        addr + j as u64
+                    );
+                }
             }
         }
 
@@ -793,7 +801,16 @@ impl Emulator {
             {
                 for datum in data {
                     let name = datum.get_name(&elf_file).map_err(|e| anyhow!(e))?;
-                    if !name.is_empty() && datum.info() & 15 == 0 {
+                    // NOTYPE, OBJECT and FUNC; skip SECTION/FILE, whose names
+                    // are not addresses anyone wants to look up.
+                    //
+                    // OBJECT used to be excluded, which silently broke the
+                    // riscv-tests `tohost` handshake for any image that
+                    // declares it as sized data -- and QEMU's spike machine
+                    // *requires* tohost to be an 8-byte symbol, so an ELF
+                    // built to satisfy QEMU ran here forever with `tohost`
+                    // never found and nothing said about it.
+                    if !name.is_empty() && matches!(datum.info() & 15, 0..=2) {
                         symbols.insert(name.to_string(), datum.value());
                     }
                 }
