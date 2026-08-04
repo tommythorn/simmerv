@@ -128,10 +128,15 @@
                          * trivially.
                          */
                         riscv,isa = "rv64imafdcv_zicsr_zifencei_zicntr_zihpm_zicond_zicbom_zicbop_zicboz_zba_zbb_zbc_zbs_zca_zcb_zcd_zfa_zfhmin_zimop_zcmop_zawrs_zacas_zabha_zvbb_zvkb_zvkt";
-                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "zicond", "zicbom", "zicbop", "zicboz", "zba", "zbb", "zbc", "zbs", "zca", "zcb", "zcd", "zfa", "zfhmin", "zimop", "zcmop", "zawrs", "zacas", "zabha", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b", "zvbb", "zvkb", "zvkt";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "zicond", "zicbom", "zicbop", "zicboz", "zba", "zbb", "zbc", "zbs", "zca", "zcb", "zcd", "zfa", "zfhmin", "zimop", "zcmop", "zawrs", "zacas", "zabha", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b", "zvbb", "zvkb", "zvkt", "svinval", "svnapot", "svpbmt", "svade", "sstc", "zihintntl", "smstateen", "ssstateen";
 #else
-                        riscv,isa = "rv64imafdc";
-                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf";
+                        /*
+                         * The default machine.  Everything here is always on:
+                         * only the RVA23 members above are gated by --rva23,
+                         * and this tree used to name barely any of the rest.
+                         */
+                        riscv,isa = "rv64imafdc_zicsr_zifencei_zicntr_zihpm_zicond_zicbom_zicbop_zicboz_zba_zbb_zbc_zbs_zfhmin";
+                        riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "zicond", "zicbom", "zicbop", "zicboz", "zba", "zbb", "zbc", "zbs", "zfhmin", "svinval", "svnapot", "svpbmt", "svade", "sstc", "zihintntl", "smstateen", "ssstateen";
 #endif
                         mmu-type = "riscv,sv39";
 

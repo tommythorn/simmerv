@@ -139,12 +139,10 @@ architectural tests (see `tests/tenstorrent/run.sh`) and the vector
 implementation is diffed against QEMU instruction by instruction at both
 `VLEN` widths (`tests/vector/run.sh`).
 
-One gap that is about description rather than implementation: the device trees
-in `src/device/` under-advertise.  `riscv,isa-extensions` omits several
-extensions that *are* implemented -- `svinval`, `svnapot`, `sstc`, `svade`,
-`zihintntl`, `smstateen`, `ssstateen` -- so a guest cannot discover them by
-reading the DTB.  They regenerate byte-for-byte from `dts.dts` (with `-DVECTOR`
-for the RVA23 build), so this is a small, separate job.
+The device trees advertise what is implemented, so a guest can discover it.
+That includes the default (non-`--rva23`) machine, which used to name only
+`imafdc` plus a handful of CSR extensions despite always having had the
+bitmanip set, `Zicond`, `Zfhmin` and the cache-block operations.
 
 `V`, Zcb, Zimop, Zcmop, Zfa, Zvbb, Zawrs, Zacas and Zabha are off by default and
 enabled together by `--rva23`, so that a run without the flag still models a hart
