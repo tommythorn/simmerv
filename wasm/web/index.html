@@ -21,6 +21,19 @@
       }
       #footer { margin: 0.75rem 0.5rem 1rem; font-size: 0.9rem; }
 
+      #session { display: flex; gap: 0.5rem; padding: 0 0.5rem; }
+      #session button {
+        font: inherit;
+        font-size: 0.85rem;
+        padding: 0.4rem 0.8rem;
+        border: 1px solid #aaa;
+        border-radius: 6px;
+        background: #f2f2f2;
+        color: #000;
+        -webkit-appearance: none;
+        touch-action: manipulation;
+      }
+
       /* Keys a phone's software keyboard does not have. Hidden where there is
          a real keyboard. */
       #keys { display: flex; gap: 0.3rem; padding: 0.5rem; }
@@ -62,6 +75,10 @@
       <button data-csi="C">&rarr;</button>
       <button data-mod="alt">alt</button>
     </div>
+    <div id="session">
+      <button data-action="save">save session</button>
+      <button data-action="forget">forget</button>
+    </div>
     <div id="footer">
       <a href="https://github.com/tommythorn/simmerv" target="_blank">Simmerv</a>,
       RISC-V RVA22S64 &mdash; files are fetched on demand so cold starts are slow
@@ -98,6 +115,16 @@
       // Must match the block size the squashfs was built with -- see
       // linux/demo/mkdemo-image.sh.
       const BLOCK = 65536;
+
+      // Where a suspended session lives, in the origin private file system.
+      // OPFS rather than IndexedDB because the state is one large opaque blob,
+      // which is what it is good at, and `createWritable` keeps this on the
+      // main thread -- `createSyncAccessHandle` would need a worker and the
+      // cross-origin isolation headers that come with it.
+      const STATE_FILE = 'session.simmerv';
+      // Bump to invalidate every saved session, e.g. after changing the
+      // initramfs or the device tree, which the key below cannot see.
+      const STATE_EPOCH = 1;
 
       const COLUMNS = 80;
       // Exact, not a minimum: the terminal is always resized to this. Once the
@@ -273,6 +300,87 @@
       keys.addEventListener('touchstart', onKeyTap, { passive: false });
       keys.addEventListener('mousedown', onKeyTap);
 
+      // ── Suspend and resume ───────────────────────────────────────────────
+      let riscv = null;
+      let stateKey = null;
+
+      const opfsRoot = () => navigator.storage.getDirectory();
+
+      const opfsWrite = async bytes => {
+        const handle = await (await opfsRoot()).getFileHandle(STATE_FILE, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(bytes);
+        await writable.close();
+      };
+
+      const opfsRead = async () => {
+        let handle;
+        try {
+          handle = await (await opfsRoot()).getFileHandle(STATE_FILE, { create: false });
+        } catch {
+          return null;                     // nothing saved yet
+        }
+        return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+      };
+
+      const opfsRemove = async () => {
+        try {
+          await (await opfsRoot()).removeEntry(STATE_FILE);
+        } catch { /* nothing to remove */ }
+      };
+
+      // A snapshot holds RAM, CPU and device state, but deliberately not the
+      // streamed base image -- that stays at its URL and is re-fetched on
+      // demand. So a session is only meaningful against the image it was taken
+      // from, and the file carries a key identifying that image. A mismatch
+      // means the demo was rebuilt underneath us, and the session is dropped
+      // rather than resumed onto a filesystem that has moved.
+      const packState = (key, snapshot) => {
+        const k = new TextEncoder().encode(key);
+        const out = new Uint8Array(4 + k.length + snapshot.length);
+        new DataView(out.buffer).setUint32(0, k.length, true);
+        out.set(k, 4);
+        out.set(snapshot, 4 + k.length);
+        return out;
+      };
+
+      const unpackState = (buf, key) => {
+        if (!buf || buf.length < 4) return null;
+        const n = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, true);
+        if (buf.length < 4 + n) return null;
+        if (new TextDecoder().decode(buf.subarray(4, 4 + n)) !== key) return null;
+        return buf.subarray(4 + n);
+      };
+
+      const note = text => terminal.writeln(`\r\n[session] ${text}`);
+
+      const saveSession = async () => {
+        if (!riscv) return;
+        try {
+          const snapshot = riscv.snapshot();
+          if (!snapshot.length) {
+            note('could not take a snapshot');
+            return;
+          }
+          await opfsWrite(packState(stateKey, snapshot));
+          note(`saved, ${(snapshot.length / 1048576).toFixed(1)} MB — reload to resume`);
+        } catch (error) {
+          note(`save failed: ${error.message}`);
+        }
+      };
+
+      const forgetSession = async () => {
+        await opfsRemove();
+        note('discarded — the next reload boots from scratch');
+      };
+
+      document.getElementById('session').addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        if (button.dataset.action === 'save') saveSession();
+        else if (button.dataset.action === 'forget') forgetSession();
+      });
+
       // The rootfs is tens of megabytes; silence while it arrives looks like a
       // hung page, so report progress on a single line that is then erased.
       const fetchWithProgress = async (url, label) => {
@@ -363,13 +471,14 @@
       };
 
       const boot = async () => {
-        const kernel = await fetchWithProgress(KERNEL, 'kernel');
-        const [dtb, initrd, head] = await Promise.all([
-          fetch(DTB).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
-          fetch(INITRD).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+        // Two HEAD requests rather than the images themselves, so that a
+        // resume never downloads a kernel it is about to overwrite with the
+        // snapshot's RAM. They also supply the key: a saved session is only
+        // valid against the image it was taken from.
+        const [head, kernelHead] = await Promise.all([
           fetch(ROOTFS, { method: 'HEAD' }),
+          fetch(KERNEL, { method: 'HEAD' }),
         ]);
-        terminal.write('\r\x1b[2K');
 
         // The guest needs a disk capacity at probe time, long before any block
         // has been fetched, so the size has to come from the server up front.
@@ -380,13 +489,37 @@
         if (head.headers.get('accept-ranges') !== 'bytes') {
           terminal.writeln('[disk] server does not advertise range requests');
         }
+        stateKey = `${STATE_EPOCH}|${kernelHead.headers.get('content-length')}|${total}`;
 
-        const riscv = WasmRiscv.new();
-        riscv.load_image(kernel);
-        riscv.setup_dtb(dtb);
-        riscv.load_blob_at(initrd, INITRD_ADDR);
+        riscv = WasmRiscv.new();
+        // Before restore, not after: a snapshot stores a sentinel in place of
+        // a streamed image, and the restore keeps whatever storage the disk
+        // already has. This is what re-attaches the base image.
         riscv.setup_streamed_filesystem(total, BLOCK);
         startBlockPump(riscv, ROOTFS, total);
+
+        let resumed = false;
+        try {
+          const saved = unpackState(await opfsRead(), stateKey);
+          resumed = Boolean(saved) && riscv.restore(saved);
+        } catch (error) {
+          terminal.writeln(`[session] could not be read: ${error.message}`);
+        }
+
+        if (resumed) {
+          terminal.writeln('[session] resumed — press Enter');
+        } else {
+          const kernel = await fetchWithProgress(KERNEL, 'kernel');
+          const [dtb, initrd] = await Promise.all([
+            fetch(DTB).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+            fetch(INITRD).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
+          ]);
+          terminal.write('\r\x1b[2K');
+          riscv.load_image(kernel);
+          riscv.setup_dtb(dtb);
+          riscv.load_blob_at(initrd, INITRD_ADDR);
+        }
+
         startRateMeter(riscv);
         app = new App(riscv, terminal, { debugModeEnabled: false });
         installModifiers();

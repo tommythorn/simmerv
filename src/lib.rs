@@ -213,6 +213,13 @@ pub struct Emulator {
     /// Set by the syscon device when the guest writes the reboot magic value.
     pub reset_flag: Arc<AtomicBool>,
 
+    /// Handle for a streamed base image, kept so that restoring a snapshot can
+    /// re-attach it. A snapshot stores a zero-length sentinel for streamed
+    /// storage -- the image lives at the URL, not in the snapshot -- and
+    /// `restore_state` keeps whatever storage the device already has, so the
+    /// device must be *constructed* with this backing for it to survive.
+    streamed: Option<crate::device::streamed_disk::StreamedHandle>,
+
     /// When `true`, print an execution trace line for every instruction.
     pub tracing_flag: Arc<AtomicBool>,
 
@@ -297,6 +304,7 @@ impl Emulator {
             exit_flag: Arc::new(AtomicBool::new(false)),
             poweroff_flag,
             reset_flag,
+            streamed: None,
             tracing_flag: Arc::new(AtomicBool::new(false)),
             verbose: Arc::new(AtomicBool::new(false)),
             snapshot_flag: Arc::new(AtomicBool::new(false)),
@@ -476,19 +484,27 @@ impl Emulator {
     /// # Errors
     /// Returns an error if the file cannot be written.
     pub fn write_snapshot(&self, path: &str) -> anyhow::Result<()> {
+        let data = self.snapshot_bytes()?;
+        std::fs::write(path, &data).map_err(|e| anyhow!(e))
+    }
+
+    /// The same bytes `write_snapshot` would write, returned rather than
+    /// written -- there is no filesystem in the browser.
+    ///
+    /// # Errors
+    /// Returns an error if compression fails.
+    pub fn snapshot_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let mut state = Vec::new();
         self.cpu.write_state(&mut state);
 
         let mut data = SNAPSHOT_MAGIC.to_vec();
-        {
-            let params = brotli::enc::BrotliEncoderParams {
-                quality: 5,
-                ..Default::default()
-            };
-            brotli::BrotliCompress(&mut state.as_slice(), &mut data, &params)
-                .map_err(|e| anyhow!("brotli compress: {e}"))?;
-        }
-        std::fs::write(path, &data).map_err(|e| anyhow!(e))
+        let params = brotli::enc::BrotliEncoderParams {
+            quality: 5,
+            ..Default::default()
+        };
+        brotli::BrotliCompress(&mut state.as_slice(), &mut data, &params)
+            .map_err(|e| anyhow!("brotli compress: {e}"))?;
+        Ok(data)
     }
 
     /// Load a snapshot produced by `write_snapshot`.
@@ -510,6 +526,7 @@ impl Emulator {
         // to the freshly-constructed devices during restore.
         let mut uart_backend = self.cpu.mmu.take_uart_backend();
         let mut net_backend = self.cpu.mmu.take_net_backend();
+        let streamed = self.streamed.clone();
 
         self.bb_cache.clear();
         self.cpu
@@ -524,13 +541,24 @@ impl Emulator {
                         // Two block disks share this name; pick the IRQ from the
                         // saved MMIO window. `restore_state` overwrites it, but
                         // this keeps the fresh device self-consistent.
-                        let irq = if range.start == Mmu::VIRTIO2_BASE {
+                        let second = range.start == Mmu::VIRTIO2_BASE;
+                        let irq = if second {
                             Mmu::VIRTIO2_IRQ
                         } else {
                             Mmu::VIRTIO_IRQ
                         };
-                        Some(Box::new(VirtioBlockDisk::new(irq))
-                            as Box<dyn crate::device::MemoryMapped>)
+                        // A streamed image is not inside the snapshot, so the
+                        // device has to be built with its backing re-attached:
+                        // `restore_state` sees the zero-length sentinel and
+                        // keeps whatever storage the device already has.
+                        Some(match (second, streamed.clone()) {
+                            (false, Some(handle)) => {
+                                Box::new(VirtioBlockDisk::new_streamed(handle, irq))
+                                    as Box<dyn crate::device::MemoryMapped>
+                            }
+                            _ => Box::new(VirtioBlockDisk::new(irq))
+                                as Box<dyn crate::device::MemoryMapped>,
+                        })
                     }
                     "VirtIO Net" => {
                         let backend = net_backend
@@ -926,6 +954,7 @@ impl Emulator {
         block_size: u64,
     ) -> crate::device::streamed_disk::StreamedHandle {
         let handle = crate::device::streamed_disk::StreamedStorage::new(total_bytes, block_size);
+        self.streamed = Some(handle.clone());
         if let Some((base, end, irq)) = Self::block_disk_slot(0) {
             self.cpu.get_mut_mmu().replace_device(
                 base..end,

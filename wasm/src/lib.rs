@@ -183,6 +183,23 @@ impl WasmRiscv {
     #[allow(clippy::cast_precision_loss)]
     pub fn instructions_retired(&self) -> f64 { self.emulator.cpu.cycle as f64 }
 
+    /// The whole machine as a byte string: RAM, CPU and device state, brotli
+    /// compressed. Empty if the snapshot could not be produced.
+    ///
+    /// A streamed base image is deliberately *not* included -- it lives at the
+    /// URL it is fetched from -- so a snapshot is only valid against the same
+    /// image, and restoring re-fetches blocks on demand.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<u8> { self.emulator.snapshot_bytes().unwrap_or_default() }
+
+    /// Restores a snapshot taken by `snapshot()`. Returns `false` if the data
+    /// is not a valid snapshot, leaving the machine untouched.
+    ///
+    /// Set the streamed filesystem up *before* calling this: the restore keeps
+    /// whatever storage the disk already has, and that is how the base image
+    /// gets re-attached.
+    pub fn restore(&mut self, data: Vec<u8>) -> bool { self.emulator.load_snapshot(&data).is_ok() }
+
     /// Runs program set by `load_image()`. The emulator won't stop forever
     /// unless [`riscv-tests`](https://github.com/riscv/riscv-tests) programs.
     /// The emulator stops if program is `riscv-tests` program and it finishes.
