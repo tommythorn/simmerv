@@ -54,12 +54,12 @@
     <div id="terminal"></div>
     <div id="keys">
       <button data-mod="ctrl">ctrl</button>
-      <button data-seq="27">esc</button>
-      <button data-seq="9">tab</button>
-      <button data-seq="27,91,65">&uarr;</button>
-      <button data-seq="27,91,66">&darr;</button>
-      <button data-seq="27,91,68">&larr;</button>
-      <button data-seq="27,91,67">&rarr;</button>
+      <button data-key="esc">esc</button>
+      <button data-key="tab">tab</button>
+      <button data-csi="A">&uarr;</button>
+      <button data-csi="B">&darr;</button>
+      <button data-csi="D">&larr;</button>
+      <button data-csi="C">&rarr;</button>
       <button data-mod="alt">alt</button>
     </div>
     <div id="footer">
@@ -235,14 +235,35 @@
       // Suppressing the default also suppresses the emulated mouse events, so
       // this does not fire twice; mousedown is there for desktop, where
       // touchstart never arrives.
+      // What a bar key sends, with any armed modifiers folded in.
+      //
+      // Arrows take xterm's CSI form: bare they are ESC [ A, and modified
+      // ESC [ 1 ; m A, where m is 1 plus 2 for alt and 4 for ctrl -- so
+      // ctrl-left is ESC [ 1 ; 5 D. That is what readline, vim and tmux read
+      // for word-wise motion and pane switching. For everything else alt is
+      // the usual ESC prefix. ctrl has no encoding on esc or tab, so it is
+      // left off rather than invented.
+      const barBytes = button => {
+        const mod = 1 + (armed.alt ? 2 : 0) + (armed.ctrl ? 4 : 0);
+        if (button.dataset.csi) {
+          const final = button.dataset.csi.charCodeAt(0);
+          return mod === 1 ? [27, 91, final] : [27, 91, 49, 59, 48 + mod, final];
+        }
+        if (button.dataset.key === 'esc') return armed.alt ? [27, 27] : [27];
+        if (button.dataset.key === 'tab') return armed.alt ? [27, 9] : [9];
+        return [];
+      };
+
       const onKeyTap = event => {
         const button = event.target.closest('button');
         if (!button) return;
         event.preventDefault();
         if (button.dataset.mod) {
           armed[button.dataset.mod] = !armed[button.dataset.mod];
-        } else if (button.dataset.seq && rawPush) {
-          rawPush(...button.dataset.seq.split(',').map(Number));
+        } else if (rawPush) {
+          // Read the modifiers before clearing them.
+          const bytes = barBytes(button);
+          if (bytes.length) rawPush(...bytes);
           armed.ctrl = false;
           armed.alt = false;
         }
