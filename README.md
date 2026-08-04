@@ -101,17 +101,50 @@ The emulator supports all instructions listed above.
       Linux keeps the widest mode `satp` accepts: defaulting to Sv57 would move
       every existing guest onto a deeper page table.  Exercised by the
       Tenstorrent suite's `paging_sv48` and `paging_sv57` groups.
-- [ ] Supm / Ssnpm / Smnpm — pointer masking
-- [ ] Sscofpmf — count-overflow interrupts (the CSR reads exist, no overflows
-      are raised)
-- [ ] Ssstateen / Smstateen — the state-enable CSRs
-- [ ] H — the hypervisor extension, required by RVA23S64
+- [ ] Supm / Ssnpm / Smnpm — pointer masking.  **Deferred.**  Nothing depends
+      on it: masking is opt-in per process (`prctl(PR_SET_TAGGED_ADDR_CTRL)`),
+      so software that does not find it simply does not tag pointers, and the
+      one real beneficiary -- HWASAN, which is why Android leans on Arm's
+      equivalent TBI -- does not exist for RISC-V yet.  Nor would an emulator
+      gain what the feature is *for*: the point is that hardware ignores the
+      tag bits for free, and here that is just "do not fault on these
+      addresses".  Revisit if LLVM gains RISC-V HWASAN, or a distro ships
+      HWASAN-instrumented RISC-V packages.
+- [x] Sscofpmf — count-overflow interrupts.  A counter wrapping past all-ones
+      sets `OF` on the 0->1 edge and raises `LCOFIP`; the interrupt is
+      delivered as `CounterOverflowInterrupt` and `scountovf` reflects it.
+      Advertised in both device trees.
+- [x] Ssstateen / Smstateen — the state-enable CSRs.  `mstateen0`'s `SE0` and
+      `ENVCFG` bits gate `sstateen0` and `senvcfg` below M-mode; every other
+      bit, and `mstateen1..3` / `sstateen0..3` entire, reads zero, because the
+      state those bits guard (AIA, IMSIC, `Zcmt`'s `jvt`, `Zfinx`'s `fcsr`,
+      custom) does not exist here.  `mstateen0` resets permissive rather than
+      to the architectural zero: the only state it gates is `senvcfg`, so
+      denying by default protects nothing while breaking any firmware that
+      predates Smstateen and never opens the gate.
+- [ ] H — the hypervisor extension, required by RVA23S64.  **Deferred.**  Not
+      needed to *run* Linux, only to host it: a guest that finds no H simply
+      offers no KVM.  It is also the largest item by a distance -- two-stage
+      translation, the VS-mode CSR bank, the hypervisor load/stores -- and it
+      lands on the MMU fast path.  Tenstorrent's suite ships an `h_ext` test
+      tree that is skipped for now, so the tests are waiting whenever it is
+      picked up.
 
-So **RVA23U64 is complete except pointer masking** (`Supm`); everything still
-outstanding beyond that belongs to RVA23S64.  Coverage is not self-reported:
-the user-mode set is exercised by Tenstorrent's architectural tests (see
-`tests/tenstorrent/run.sh`) and the vector implementation is diffed against
-QEMU instruction by instruction at both `VLEN` widths (`tests/vector/run.sh`).
+So RVA23 is **complete but for `Supm` and `H`**, both deferred above for the
+same reason: nothing depends on either, and neither blocks anything simmerv is
+for.
+
+Coverage is not self-reported: the user-mode set is exercised by Tenstorrent's
+architectural tests (see `tests/tenstorrent/run.sh`) and the vector
+implementation is diffed against QEMU instruction by instruction at both
+`VLEN` widths (`tests/vector/run.sh`).
+
+One gap that is about description rather than implementation: the device trees
+in `src/device/` under-advertise.  `riscv,isa-extensions` omits several
+extensions that *are* implemented -- `svinval`, `svnapot`, `sstc`, `svade`,
+`zihintntl`, `smstateen`, `ssstateen` -- so a guest cannot discover them by
+reading the DTB.  They regenerate byte-for-byte from `dts.dts` (with `-DVECTOR`
+for the RVA23 build), so this is a small, separate job.
 
 `V`, Zcb, Zimop, Zcmop, Zfa, Zvbb, Zawrs, Zacas and Zabha are off by default and
 enabled together by `--rva23`, so that a run without the flag still models a hart

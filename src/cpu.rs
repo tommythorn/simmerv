@@ -1576,6 +1576,26 @@ impl Cpu {
             .any(|i| self.csr.mhpmevent[i] & csr::MHPMEVENT_SEL_MASK != csr::HPM_EV_NONE);
     }
 
+    /// Smstateen: below M-mode, access to the state a `mstateen` bit guards
+    /// traps unless that bit is set.
+    ///
+    /// Only two gates are live here.  `mstateen0.ENVCFG` guards `senvcfg`, and
+    /// `mstateen0.SE0` guards `sstateen0`; `mstateen1..3` are hardwired zero,
+    /// so their `SE0` denies `sstateen1..3` -- which gate nothing simmerv
+    /// implements, so there is nothing there to reach anyway.
+    const fn stateen_denies(&self, csr: Csr) -> bool {
+        if matches!(self.mmu.prv, PrivMode::M) {
+            return false;
+        }
+        match csr {
+            Csr::Senvcfg => self.csr.mstateen0 & csr::MSTATEEN0_ENVCFG == 0,
+            Csr::Sstateen0 => self.csr.mstateen0 & csr::MSTATEEN0_SE0 == 0,
+            // Gated by mstateen1..3.SE0, all hardwired zero.
+            Csr::Sstateen1 | Csr::Sstateen2 | Csr::Sstateen3 => true,
+            _ => false,
+        }
+    }
+
     fn has_csr_access_privilege(&self, csrno: u16) -> Option<Csr> {
         let csr = FromPrimitive::from_u16(csrno)?;
 
@@ -1670,6 +1690,10 @@ impl Cpu {
             return illegal;
         }
 
+        if self.stateen_denies(csr) {
+            return illegal;
+        }
+
         match csr {
             Csr::Fflags | Csr::Frm | Csr::Fcsr => self.check_float_access_ro(0)?,
             Csr::Cycle | Csr::Time | Csr::Instret if self.mmu.prv != PrivMode::M => {
@@ -1761,6 +1785,10 @@ impl Cpu {
         }
 
         if Self::is_vector_csr(csr) && (!self.rva23_enabled || self.vs == 0) {
+            return illegal;
+        }
+
+        if self.stateen_denies(csr) {
             return illegal;
         }
 
@@ -1915,6 +1943,9 @@ impl Cpu {
             }
             Csr::Scounteren => u64::from(self.csr.scounteren),
             Csr::Senvcfg => self.csr.senvcfg,
+            Csr::Mstateen0 => self.csr.mstateen0,
+            // mstateen1..3 and sstateen0..3 gate only state simmerv does not
+            // implement, so they read zero via the catch-all below.
             Csr::Menvcfg => self.csr.menvcfg,
             Csr::Pmpcfg0 => self.csr.pmpcfg0,
             Csr::Pmpaddr0 => self.csr.pmpaddr0,
@@ -2025,6 +2056,10 @@ impl Cpu {
             Csr::Scounteren => self.csr.scounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Menvcfg => self.csr.menvcfg = value,
             Csr::Senvcfg => self.csr.senvcfg = value,
+            // WARL: keep only the bits that gate state we actually have.  The
+            // other stateen registers are read-only zero and fall through to
+            // the write catch-all.
+            Csr::Mstateen0 => self.csr.mstateen0 = value & csr::MSTATEEN0_MASK,
             Csr::Misa => {} // read-only WARL; extension set is fixed
             Csr::Pmpcfg0 => self.csr.pmpcfg0 = value, // verbatim, matching the DUT
             Csr::Pmpaddr0 => self.csr.pmpaddr0 = value,
@@ -4505,6 +4540,38 @@ mod test_cpu {
         let mut cpu = vector_cpu();
         run_one(&mut cpu, read_vlenb).expect("vlenb readable with V");
         assert_eq!(cpu.read_register(x(5)), crate::vector::VLENB as u64);
+    }
+
+    #[test]
+    fn smstateen_gates_senvcfg_below_machine_mode() {
+        // csrr t0, senvcfg  ==  csrrs t0, 0x10a, x0
+        let read_senvcfg: u32 = 0x10a0_22f3;
+
+        // M-mode is never gated, whatever mstateen0 says.
+        let mut cpu = create_cpu();
+        cpu.csr.mstateen0 = 0;
+        run_one(&mut cpu, read_senvcfg).expect("M-mode access is not gated");
+
+        // Below M-mode the ENVCFG bit decides.  Default is permissive.
+        let mut cpu = create_cpu();
+        cpu.mmu.update_priv_mode(PrivMode::S);
+        run_one(&mut cpu, read_senvcfg).expect("senvcfg readable while ENVCFG is set");
+
+        cpu.csr.mstateen0 &= !crate::csr::MSTATEEN0_ENVCFG;
+        assert_eq!(
+            run_one(&mut cpu, read_senvcfg).unwrap_err().trap,
+            Trap::IllegalInstruction,
+            "clearing mstateen0.ENVCFG must deny S-mode access to senvcfg"
+        );
+
+        // Writes go through the same gate.
+        // csrw senvcfg, t0  ==  csrrw x0, 0x10a, t0
+        let write_senvcfg: u32 = 0x10a2_9073;
+        assert_eq!(
+            run_one(&mut cpu, write_senvcfg).unwrap_err().trap,
+            Trap::IllegalInstruction,
+            "the gate must apply to writes too"
+        );
     }
 
     #[test]

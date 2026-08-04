@@ -39,6 +39,20 @@ pub enum Csr {
     Stimecmp = 0x14d,
     Satp = 0x180,
     Senvcfg = 0x10a,
+    // Smstateen/Ssstateen.  Every bit gates access to some other extension's
+    // state; simmerv implements almost none of the gated features, so only
+    // mstateen0's SE0 (bit 63, guards sstateen0) and ENVCFG (bit 62, guards
+    // senvcfg) are writable and the rest are read-only zero.  sstateen0 gates
+    // only U-mode-visible state (Zcmt's jvt, Zfinx's fcsr, custom), none of
+    // which exists here, so it is read-only zero in full.
+    Sstateen0 = 0x10c,
+    Sstateen1 = 0x10d,
+    Sstateen2 = 0x10e,
+    Sstateen3 = 0x10f,
+    Mstateen0 = 0x30c,
+    Mstateen1 = 0x30d,
+    Mstateen2 = 0x30e,
+    Mstateen3 = 0x30f,
 
     Mstatus = 0x300,
     Misa = 0x301,
@@ -107,6 +121,14 @@ pub const MENVCFG_STCE: u64 = 1 << 63; // Sstc: enables stimecmp in S-mode
 
 /// Sscofpmf local counter-overflow interrupt pending/enable (interrupt 13).
 pub const MIP_LCOFIP: u64 = 1 << 13;
+
+/// `mstateen0.SE0` — gates lower-privilege access to `sstateen0`.
+pub const MSTATEEN0_SE0: u64 = 1 << 63;
+/// `mstateen0.ENVCFG` — gates lower-privilege access to `senvcfg`.
+pub const MSTATEEN0_ENVCFG: u64 = 1 << 62;
+/// The only bits simmerv implements; everything else reads zero because the
+/// state it would gate does not exist here.
+pub const MSTATEEN0_MASK: u64 = MSTATEEN0_SE0 | MSTATEEN0_ENVCFG;
 
 pub const MIP_MEIP: u64 = 0x800;
 pub const MIP_MTIP: u64 = 0x080;
@@ -221,6 +243,14 @@ pub const fn legal(csr: Csr) -> bool {
             | Csr::Satp
             | Csr::Scause
             | Csr::Senvcfg
+            | Csr::Sstateen0
+            | Csr::Sstateen1
+            | Csr::Sstateen2
+            | Csr::Sstateen3
+            | Csr::Mstateen0
+            | Csr::Mstateen1
+            | Csr::Mstateen2
+            | Csr::Mstateen3
             | Csr::Stimecmp
             | Csr::Sedeleg
             | Csr::Sepc
@@ -334,6 +364,8 @@ pub struct CsrFile {
     /// mhpmevent3..15; entries 0..=2 are unused.
     pub mhpmevent: [u64; HPM_LAST + 1],
     pub senvcfg: u64,
+    /// `mstateen0`.  Only `SE0` and `ENVCFG` are writable; see the enum.
+    pub mstateen0: u64,
     // PMP: the DUTs (smolrv64 + probe) store cfg/addr0 verbatim (no enforcement),
     // so simmerv stores them too -- OpenSBI writes then reads them back at boot.
     pub pmpcfg0: u64,
@@ -381,6 +413,13 @@ impl CsrFile {
             mhpmcounter: [0; HPM_LAST + 1],
             mhpmevent: [0; HPM_LAST + 1],
             senvcfg: 0,
+            // Reset permissive.  The architectural reset value denies access,
+            // on the reasoning that firmware should opt new state in -- but
+            // firmware that predates Smstateen never will, and would leave
+            // S-mode unable to reach senvcfg on a machine that previously had
+            // no gate at all.  Since the only state simmerv gates is senvcfg
+            // itself, denying by default protects nothing and breaks guests.
+            mstateen0: MSTATEEN0_SE0 | MSTATEEN0_ENVCFG,
             pmpcfg0: 0,
             pmpaddr0: 0,
         }

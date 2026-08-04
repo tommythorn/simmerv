@@ -34,7 +34,7 @@ For an up-to-date view, look at the current issues on github*.
   went stale enough to be misleading (it still named `-V`, and listed Zcb,
   Zfa, Zvbb, Zawrs, Zihintntl and Sv48/Sv57 as missing long after they
   landed).  RVA23U64 is complete except pointer masking (`Supm`); what is
-  left is RVA23S64: Sscofpmf, Ss/Smstateen and H.
+  left is Supm and H, both deliberately deferred (see the README for why).
 - Maybe: implement the Bytedance 64K page proposal?
 
 ## Misc
