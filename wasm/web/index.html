@@ -23,11 +23,15 @@
 
       /* Keys a phone's software keyboard does not have. Hidden where there is
          a real keyboard. */
-      #keys { display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.5rem; }
+      #keys { display: flex; gap: 0.3rem; padding: 0.5rem; }
       #keys button {
         font: inherit;
-        min-width: 2.8rem;
-        padding: 0.55rem 0.5rem;
+        font-size: 0.85rem;
+        /* Share the width evenly and never wrap: a second row costs more
+           screen than the keys are worth. */
+        flex: 1 1 0;
+        min-width: 0;
+        padding: 0.6rem 0.2rem;
         border: 1px solid #aaa;
         border-radius: 6px;
         background: #f2f2f2;
@@ -49,16 +53,14 @@
   <body>
     <div id="terminal"></div>
     <div id="keys">
+      <button data-mod="ctrl">ctrl</button>
       <button data-seq="27">esc</button>
       <button data-seq="9">tab</button>
-      <button data-mod="ctrl">ctrl</button>
-      <button data-mod="alt">alt</button>
       <button data-seq="27,91,65">&uarr;</button>
       <button data-seq="27,91,66">&darr;</button>
       <button data-seq="27,91,68">&larr;</button>
       <button data-seq="27,91,67">&rarr;</button>
-      <button data-seq="3">^C</button>
-      <button data-focus>keyboard</button>
+      <button data-mod="alt">alt</button>
     </div>
     <div id="footer">
       <a href="https://github.com/tommythorn/simmerv" target="_blank">Simmerv</a>,
@@ -224,24 +226,31 @@
         };
       };
 
-      document.getElementById('keys').addEventListener('pointerdown', event => {
+      // Handled on touchstart rather than pointerdown or click: on iOS only a
+      // suppressed touchstart stops the tap from moving focus, and moving
+      // focus away from the terminal dismisses the software keyboard --
+      // focusing it again afterwards does not bring the keyboard back, since
+      // iOS only opens it for a direct interaction with the field.
+      //
+      // Suppressing the default also suppresses the emulated mouse events, so
+      // this does not fire twice; mousedown is there for desktop, where
+      // touchstart never arrives.
+      const onKeyTap = event => {
         const button = event.target.closest('button');
         if (!button) return;
-        // Do not let the button take focus: that dismisses the software
-        // keyboard. Focus is handed straight back to the terminal instead,
-        // which is also what the 'keyboard' button is for.
         event.preventDefault();
         if (button.dataset.mod) {
           armed[button.dataset.mod] = !armed[button.dataset.mod];
-          showArmed();
         } else if (button.dataset.seq && rawPush) {
           rawPush(...button.dataset.seq.split(',').map(Number));
           armed.ctrl = false;
           armed.alt = false;
-          showArmed();
         }
-        terminal.focus();
-      });
+        showArmed();
+      };
+      const keys = document.getElementById('keys');
+      keys.addEventListener('touchstart', onKeyTap, { passive: false });
+      keys.addEventListener('mousedown', onKeyTap);
 
       // The rootfs is tens of megabytes; silence while it arrives looks like a
       // hung page, so report progress on a single line that is then erased.
