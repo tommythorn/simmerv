@@ -65,7 +65,10 @@
       const BLOCK = 65536;
 
       const COLUMNS = 80;
-      const MINIMUM_ROWS = 24;
+      // Exact, not a minimum: the terminal is always resized to this. Once the
+      // font shrinks to fit 80 columns on a phone the rows get short too, so
+      // there is room for well more than the traditional 24.
+      const ROWS = 37;
 
       const container = document.getElementById('terminal');
       const terminal = new Terminal();
@@ -137,7 +140,7 @@
           Math.floor((avail / COLUMNS / unit) * 10) / 10,
         );
         setFontSize(Math.max(size, 4));
-        terminal.resize(COLUMNS, MINIMUM_ROWS);
+        terminal.resize(COLUMNS, ROWS);
         settle(4);
       };
 
