@@ -313,6 +313,13 @@ for lmul in ("mf2", "m2", "m4"):
         t(f"vse{sew}.v v4, (a0)", sew=sew, lmul=lmul, avl=20)
         t(f"vrgather.vv v4, v8, v12", sew=sew, lmul=lmul, avl=20)
         t(f"vslidedown.vi v4, v8, 3", sew=sew, lmul=lmul, avl=20)
+        # The slides were only ever generated at LMUL=m1, which is how an
+        # off-by-one in vslide1down at m4 survived: Tenstorrent's arch tests
+        # caught it, this generator did not.
+        t(f"vslideup.vx v4, v8, a2", sew=sew, lmul=lmul, avl=20)
+        t(f"vslide1up.vx v4, v8, a2", sew=sew, lmul=lmul, avl=20)
+        t(f"vslide1down.vx v4, v8, a2", sew=sew, lmul=lmul, avl=20)
+        t(f"vslidedown.vx v4, v8, a2", sew=sew, lmul=lmul, avl=20)
 # vl = 0 and vl = vlmax
 t("vadd.vv v1, v2, v3", avl=0)
 t("vadd.vv v1, v2, v3", avl=64)
