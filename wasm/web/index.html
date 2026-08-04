@@ -1,13 +1,29 @@
 <html>
   <head>
     <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+    <!-- Without this, mobile Safari lays the page out at 980px and scales the
+         result down to the screen, so an 80-column terminal arrives at about a
+         third of the size it should be. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Linux on Simmerv</title>
     <link rel="stylesheet" href="xtermjs/xterm.css" />
     <script src="xtermjs/xterm.js"></script>
     <style>
-      body { margin: 1rem; font-family: system-ui, sans-serif; }
-      #footer { margin-top: 0.75rem; font-size: 0.9rem; }
-    </style>
+      /* Phones give the terminal the whole width: at 80 columns every pixel
+         spent on a margin is taken out of the font size. Wider screens keep
+         the inset, where there is width to spare. */
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        /* Stop iOS from inflating text on its own -- the font size here is
+           chosen to make exactly 80 columns fit. */
+        -webkit-text-size-adjust: 100%;
+      }
+      #footer { margin: 0.75rem 0.5rem 1rem; font-size: 0.9rem; }
+      @media (min-width: 900px) {
+        body { margin: 1rem; }
+        #footer { margin: 0.75rem 0 0; }
+      }
   </head>
   <body>
     <div id="terminal"></div>
@@ -50,15 +66,83 @@
       const COLUMNS = 80;
       const MINIMUM_ROWS = 24;
 
+      const container = document.getElementById('terminal');
       const terminal = new Terminal();
       terminal.setOption('cursorBlink', true);
       terminal.setOption('convertEol', true);
-      terminal.open(document.getElementById('terminal'));
+      terminal.open(container);
 
-      // From https://github.com/xtermjs/xterm.js/tree/master/addons/xterm-addon-fit
-      const onResize = () => terminal.resize(COLUMNS, MINIMUM_ROWS);
-      window.addEventListener('resize', onResize);
-      onResize();
+      // The vendored build is xterm 4, whose API is setOption/getOption;
+      // xterm 5 replaced those with a plain options object. Prefer the
+      // accessors, because in 4 an `options` object also exists but assigning
+      // to it does not re-measure the character cell.
+      const getOpt = name =>
+        typeof terminal.getOption === 'function'
+          ? terminal.getOption(name)
+          : terminal.options[name];
+      const setFontSize = size => {
+        if (typeof terminal.setOption === 'function') terminal.setOption('fontSize', size);
+        else terminal.options.fontSize = size;
+      };
+      const DEFAULT_FONT_SIZE = getOpt('fontSize') || 15;
+
+      // Width of one cell at a 1px font, measured the way xterm measures it:
+      // 32 'W's laid out in the DOM, divided by 32. Computing it instead would
+      // mean guessing which monospace font the device actually resolved.
+      const cellWidthPerPx = () => {
+        const probe = document.createElement('span');
+        probe.style.cssText =
+          'position:absolute;top:-9999px;visibility:hidden;white-space:pre;'
+          + `font-family:${getOpt('fontFamily') || 'monospace'};font-size:100px;`;
+        probe.textContent = 'W'.repeat(32);
+        document.body.appendChild(probe);
+        const width = probe.getBoundingClientRect().width / 32 / 100;
+        probe.remove();
+        return width;
+      };
+
+      // xterm relays out asynchronously, so confirm against the real element
+      // and nudge down if it still overflows. xterm floors the cell width to
+      // whole device pixels, which can only make cells narrower than the
+      // estimate, so this is a backstop rather than the mechanism.
+      const settle = tries => requestAnimationFrame(() => {
+        const avail = container.clientWidth;
+        const width = terminal.element.getBoundingClientRect().width;
+        if (width <= avail || tries <= 0) return;
+        const scaled = Math.floor(getOpt('fontSize') * (avail / width) * 10) / 10;
+        const next = scaled < getOpt('fontSize') ? scaled : getOpt('fontSize') - 0.1;
+        if (next < 4) return;
+        setFontSize(next);
+        settle(tries - 1);
+      });
+
+      // Scale the font so that exactly COLUMNS columns span the available
+      // width. On a phone the alternative is a line the guest wrote as 80
+      // characters arriving clipped or horizontally scrolling, which is what
+      // makes it unreadable. Never grows past the default, so anything wide
+      // enough already -- every desktop -- is left exactly as it was.
+      // iOS fires `resize` every time the URL bar hides or shows, which does
+      // not change the width; refitting on those would re-measure and repaint
+      // the terminal on every scroll.
+      let fittedFor = -1;
+      const fit = () => {
+        const avail = container.clientWidth;
+        if (!avail || avail === fittedFor) return;
+        fittedFor = avail;
+        const unit = cellWidthPerPx();
+        if (!unit) return;
+        const size = Math.min(
+          DEFAULT_FONT_SIZE,
+          Math.floor((avail / COLUMNS / unit) * 10) / 10,
+        );
+        setFontSize(Math.max(size, 4));
+        terminal.resize(COLUMNS, MINIMUM_ROWS);
+        settle(4);
+      };
+
+      window.addEventListener('resize', fit);
+      window.addEventListener('orientationchange', fit);
+      fit();
 
       // The rootfs is tens of megabytes; silence while it arrives looks like a
       // hung page, so report progress on a single line that is then erased.
