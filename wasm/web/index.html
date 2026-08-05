@@ -534,12 +534,15 @@
         }
         stateKey = `${STATE_EPOCH}|${kernelHead.headers.get('content-length')}|${total}`;
 
-        riscv = WasmRiscv.new();
         // Before restore, not after: a snapshot stores a sentinel in place of
         // a streamed image, and the restore keeps whatever storage the disk
         // already has. This is what re-attaches the base image.
-        riscv.setup_streamed_filesystem(total, BLOCK);
-        startBlockPump(riscv, ROOTFS, total);
+        const fresh = () => {
+            const machine = WasmRiscv.new();
+            machine.setup_streamed_filesystem(total, BLOCK);
+            return machine;
+        };
+        riscv = fresh();
 
         let resumed = false;
         try {
@@ -565,6 +568,9 @@
         if (resumed) {
           terminal.writeln('\r\n[session] resumed — press Enter');
         } else {
+          // Rebuild rather than reuse: a failed restore has already cleared
+          // caches and taken backends off the machine it gave up on.
+          riscv = fresh();
           const kernel = await fetchWithProgress(KERNEL, 'kernel');
           const [dtb, initrd] = await Promise.all([
             fetch(DTB).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
@@ -576,6 +582,9 @@
           riscv.load_blob_at(initrd, INITRD_ADDR);
         }
 
+        // Started here rather than earlier: a failed restore replaces the
+        // machine, and the pump has to feed the one that survives.
+        startBlockPump(riscv, ROOTFS, total);
         startRateMeter(riscv);
         app = new App(riscv, terminal, { debugModeEnabled: false });
         installModifiers();

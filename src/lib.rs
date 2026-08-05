@@ -512,6 +512,14 @@ impl Emulator {
     /// The device list is reconstructed from the snapshot — there is no
     /// requirement that the emulator was started with matching devices.
     ///
+    /// Note that restoring is memory-hungry: the decompressed state carries a
+    /// full copy of RAM, and `read_state` copies each region out of it into a
+    /// fresh allocation while it is still live, so a 512 MB machine peaks at
+    /// about 1.09 GB. That is over what mobile Safari allows a tab, and wasm
+    /// linear memory never shrinks back. Releasing the old RAM up front does
+    /// *not* fix it -- the regions are still referenced during the restore,
+    /// and doing so silently corrupts the restored machine.
+    ///
     /// # Errors
     /// Returns an error if the data is not a valid snapshot or is corrupt.
     pub fn load_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
