@@ -121,6 +121,15 @@
       // which is what it is good at, and `createWritable` keeps this on the
       // main thread -- `createSyncAccessHandle` would need a worker and the
       // cross-origin isolation headers that come with it.
+      // Guest RAM. A save and a restore each transiently need about twice this,
+      // and mobile Safari kills the tab well before a desktop would, so phones
+      // get less by default. ?ram=512 overrides either way.
+      const RAM_MB = (() => {
+        const asked = Number(new URLSearchParams(location.search).get('ram'));
+        if (Number.isFinite(asked) && asked >= 64) return Math.min(asked, 4096);
+        return window.innerWidth < 900 ? 256 : 512;
+      })();
+
       const STATE_FILE = 'session.simmerv';
       // Bump to invalidate every saved session: after changing the initramfs
       // or the device tree, which the key below cannot see, or after changing
@@ -407,7 +416,10 @@
             return;
           }
           await opfsWrite(packState(stateKey, termLog.join(''), snapshot));
-          note(`saved, ${(snapshot.length / 1048576).toFixed(1)} MB — reload to resume`);
+          note(
+            `saved, ${(snapshot.length / 1048576).toFixed(1)} MB, `
+            + `heap now ${(riscv.heap_bytes() / 1048576).toFixed(0)} MB — reload to resume`,
+          );
         } catch (error) {
           note(`save failed: ${error.message}`);
         }
@@ -508,7 +520,10 @@
           const instrs = riscv.instructions_retired();
           const at = performance.now();
           const mips = (instrs - lastInstrs) / (at - lastAt) / 1000;
-          rate.textContent = ` — ${mips.toFixed(1)} MIPS`;
+          // Heap alongside throughput: it only grows, so it is the running
+          // high-water mark, and it is what a phone kills the tab over.
+          const heap = riscv.heap_bytes() / 1048576;
+          rate.textContent = ` — ${mips.toFixed(1)} MIPS, ${heap.toFixed(0)} MB heap`;
           lastInstrs = instrs;
           lastAt = at;
         }, 1000);
@@ -533,13 +548,14 @@
         if (head.headers.get('accept-ranges') !== 'bytes') {
           terminal.writeln('[disk] server does not advertise range requests');
         }
-        stateKey = `${STATE_EPOCH}|${kernelHead.headers.get('content-length')}|${total}`;
+        stateKey =
+          `${STATE_EPOCH}|${RAM_MB}|${kernelHead.headers.get('content-length')}|${total}`;
 
         // Before restore, not after: a snapshot stores a sentinel in place of
         // a streamed image, and the restore keeps whatever storage the disk
         // already has. This is what re-attaches the base image.
         const fresh = () => {
-            const machine = WasmRiscv.new();
+            const machine = WasmRiscv.with_memory(RAM_MB);
             machine.setup_streamed_filesystem(total, BLOCK);
             return machine;
         };
@@ -567,7 +583,10 @@
         }
 
         if (resumed) {
-          terminal.writeln('\r\n[session] resumed — press Enter');
+          terminal.writeln(
+            `\r\n[session] resumed, heap ${(riscv.heap_bytes() / 1048576).toFixed(0)} MB`
+            + ' — press Enter',
+          );
         } else {
           // Rebuild rather than reuse: a failed restore has already cleared
           // caches and taken backends off the machine it gave up on.

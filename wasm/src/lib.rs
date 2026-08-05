@@ -57,12 +57,26 @@ pub struct WasmRiscv {
 impl WasmRiscv {
     /// Creates a new `WasmRiscv`.
     #[allow(clippy::new_without_default)] // #[wasm_bindgen] trait impls are not supported
-    pub fn new() -> Self {
+    pub fn new() -> Self { Self::with_memory(0) }
+
+    /// A machine with `mb` megabytes of guest RAM, or the default if `mb` is 0.
+    ///
+    /// Worth choosing deliberately in a browser: a snapshot save and a restore
+    /// each transiently need about twice the guest RAM, and mobile Safari kills
+    /// a tab that asks for too much -- while wasm linear memory, once grown,
+    /// never shrinks back.
+    #[must_use]
+    pub fn with_memory(mb: u32) -> Self {
+        let bytes = if mb == 0 {
+            WASM_MEMORY_SIZE
+        } else {
+            (mb as usize).clamp(64, 4096) * 1024 * 1024
+        };
         WasmRiscv {
             streamed: None,
             emulator: Emulator::new(
                 Box::new(BufferedSerialBackend::new()),
-                WASM_MEMORY_SIZE,
+                bytes,
                 simmerv::uop_cache::DEFAULT_UOP_ENTRIES,
                 simmerv::uop_cache::CacheMode::Skew,
             ),
@@ -182,6 +196,25 @@ impl WasmRiscv {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn instructions_retired(&self) -> f64 { self.emulator.cpu.cycle as f64 }
+
+    /// Bytes of wasm linear memory currently reserved by this module.
+    ///
+    /// The number a browser actually kills a tab over, and not otherwise
+    /// visible: it only ever grows, so it records the high-water mark of every
+    /// allocation the emulator has made, including the transient ones during a
+    /// snapshot save or restore.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn heap_bytes(&self) -> f64 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            (core::arch::wasm32::memory_size(0) as f64) * 65536.0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0.0
+        }
+    }
 
     /// The whole machine as a byte string: RAM, CPU and device state, brotli
     /// compressed. Empty if the snapshot could not be produced.
