@@ -124,7 +124,7 @@
       const STATE_FILE = 'session.simmerv';
       // Bump to invalidate every saved session, e.g. after changing the
       // initramfs or the device tree, which the key below cannot see.
-      const STATE_EPOCH = 1;
+      const STATE_EPOCH = 2;
 
       const COLUMNS = 80;
       // Exact, not a minimum: the terminal is always resized to this. Once the
@@ -132,11 +132,42 @@
       // there is room for well more than the traditional 24.
       const ROWS = 37;
 
+      // Everything ever printed, capped, so a resumed session can put the
+      // screen back. The machine snapshot cannot: xterm's buffer lives in the
+      // browser, and nothing in guest RAM describes it. Replaying the output
+      // reproduces the screen exactly, escape sequences and all.
+      const TERM_LOG_MAX = 96 * 1024;
+      const termLog = [];
+      let termLogLen = 0;
+      const record = text => {
+        if (typeof text !== 'string') return;
+        termLog.push(text);
+        termLogLen += text.length;
+        // Drop whole writes from the front: a write is at least a plausible
+        // boundary, where cutting mid-escape-sequence would not be.
+        while (termLogLen > TERM_LOG_MAX && termLog.length > 1) {
+          termLogLen -= termLog.shift().length;
+        }
+      };
+
       const container = document.getElementById('terminal');
       const terminal = new Terminal();
       terminal.setOption('cursorBlink', true);
       terminal.setOption('convertEol', true);
       terminal.open(container);
+
+      // Wrap both: xterm's writeln does not necessarily route through the
+      // public write, so hooking one is not enough.
+      const rawWrite = terminal.write.bind(terminal);
+      terminal.write = data => {
+        record(data);
+        return rawWrite(data);
+      };
+      const rawWriteln = terminal.writeln.bind(terminal);
+      terminal.writeln = data => {
+        record(`${data}\r\n`);
+        return rawWriteln(data);
+      };
 
       // The vendored build is xterm 4, whose API is setOption/getOption;
       // xterm 5 replaced those with a plain options object. Prefer the
@@ -335,21 +366,33 @@
       // from, and the file carries a key identifying that image. A mismatch
       // means the demo was rebuilt underneath us, and the session is dropped
       // rather than resumed onto a filesystem that has moved.
-      const packState = (key, snapshot) => {
+      const packState = (key, screen, snapshot) => {
         const k = new TextEncoder().encode(key);
-        const out = new Uint8Array(4 + k.length + snapshot.length);
-        new DataView(out.buffer).setUint32(0, k.length, true);
+        const t = new TextEncoder().encode(screen);
+        const out = new Uint8Array(4 + k.length + 4 + t.length + snapshot.length);
+        const view = new DataView(out.buffer);
+        view.setUint32(0, k.length, true);
         out.set(k, 4);
-        out.set(snapshot, 4 + k.length);
+        view.setUint32(4 + k.length, t.length, true);
+        out.set(t, 8 + k.length);
+        out.set(snapshot, 8 + k.length + t.length);
         return out;
       };
 
+      // Returns {screen, snapshot}, or null if the file is not ours -- a
+      // different image, or truncated by a reload during the write.
       const unpackState = (buf, key) => {
-        if (!buf || buf.length < 4) return null;
-        const n = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, true);
-        if (buf.length < 4 + n) return null;
-        if (new TextDecoder().decode(buf.subarray(4, 4 + n)) !== key) return null;
-        return buf.subarray(4 + n);
+        if (!buf || buf.length < 8) return null;
+        const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const k = view.getUint32(0, true);
+        if (buf.length < 8 + k) return null;
+        if (new TextDecoder().decode(buf.subarray(4, 4 + k)) !== key) return null;
+        const t = view.getUint32(4 + k, true);
+        if (buf.length < 8 + k + t) return null;
+        return {
+          screen: new TextDecoder().decode(buf.subarray(8 + k, 8 + k + t)),
+          snapshot: buf.subarray(8 + k + t),
+        };
       };
 
       const note = text => terminal.writeln(`\r\n[session] ${text}`);
@@ -362,7 +405,7 @@
             note('could not take a snapshot');
             return;
           }
-          await opfsWrite(packState(stateKey, snapshot));
+          await opfsWrite(packState(stateKey, termLog.join(''), snapshot));
           note(`saved, ${(snapshot.length / 1048576).toFixed(1)} MB — reload to resume`);
         } catch (error) {
           note(`save failed: ${error.message}`);
@@ -500,14 +543,27 @@
 
         let resumed = false;
         try {
-          const saved = unpackState(await opfsRead(), stateKey);
-          resumed = Boolean(saved) && riscv.restore(saved);
+          const stored = await opfsRead();
+          const saved = unpackState(stored, stateKey);
+          if (stored && !saved) {
+            terminal.writeln('[session] saved session does not match this image, starting fresh');
+          } else if (saved) {
+            resumed = riscv.restore(saved.snapshot);
+            if (resumed) {
+              // Reset first: the recording may begin part-way through an
+              // escape sequence, and a known-clean terminal absorbs that.
+              rawWrite('\x1bc');
+              rawWrite(saved.screen);
+            } else {
+              terminal.writeln('[session] saved session could not be restored, starting fresh');
+            }
+          }
         } catch (error) {
           terminal.writeln(`[session] could not be read: ${error.message}`);
         }
 
         if (resumed) {
-          terminal.writeln('[session] resumed — press Enter');
+          terminal.writeln('\r\n[session] resumed — press Enter');
         } else {
           const kernel = await fetchWithProgress(KERNEL, 'kernel');
           const [dtb, initrd] = await Promise.all([
