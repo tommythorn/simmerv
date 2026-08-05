@@ -125,9 +125,16 @@
       // and mobile Safari kills the tab well before a desktop would, so phones
       // get less by default. ?ram=512 overrides either way.
       const RAM_MB = (() => {
+        // The initramfs is written to INITRD_ADDR, 480 MB above the start of
+        // RAM, and demo.dtb points the kernel at that address. Any less memory
+        // than that and it lands outside RAM entirely: the kernel comes up with
+        // no /init and cannot mount root. Moving it down means rebuilding
+        // demo.dtb, so until then this is a hard floor and asking for less is
+        // refused rather than silently producing a machine that will not boot.
+        const floor = Math.ceil((INITRD_ADDR - 0x80000000) / 1048576) + 32;
         const asked = Number(new URLSearchParams(location.search).get('ram'));
-        if (Number.isFinite(asked) && asked >= 64) return Math.min(asked, 4096);
-        return window.innerWidth < 900 ? 256 : 512;
+        if (Number.isFinite(asked) && asked >= 64) return Math.min(Math.max(asked, floor), 4096);
+        return floor;
       })();
 
       const STATE_FILE = 'session.simmerv';
