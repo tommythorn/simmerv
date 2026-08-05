@@ -175,7 +175,7 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
 /// Anything that writes, validates, or sniffs a snapshot must use this rather
 /// than spelling the bytes out -- three hand-written copies is exactly how the
 /// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
-pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC10";
+pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC11";
 
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
@@ -495,15 +495,27 @@ impl Emulator {
     /// Returns an error if compression fails.
     pub fn snapshot_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let mut state = Vec::new();
-        self.cpu.write_state(&mut state);
+        let mut ram = Vec::new();
+        self.cpu.write_state(&mut state, &mut ram);
 
-        let mut data = SNAPSHOT_MAGIC.to_vec();
+        // Two compressed sections rather than one. RAM is nearly all of the
+        // bulk, and keeping it out of the state blob is what lets a restore
+        // inflate it straight into the region that will own it.
         let params = brotli::enc::BrotliEncoderParams {
             quality: 5,
             ..Default::default()
         };
-        brotli::BrotliCompress(&mut state.as_slice(), &mut data, &params)
+        let mut meta = Vec::new();
+        brotli::BrotliCompress(&mut state.as_slice(), &mut meta, &params)
             .map_err(|e| anyhow!("brotli compress: {e}"))?;
+        drop(state);
+
+        let mut data = SNAPSHOT_MAGIC.to_vec();
+        data.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+        data.extend_from_slice(&meta);
+        drop(meta);
+        brotli::BrotliCompress(&mut ram.as_slice(), &mut data, &params)
+            .map_err(|e| anyhow!("brotli compress ram: {e}"))?;
         Ok(data)
     }
 
@@ -526,8 +538,20 @@ impl Emulator {
         let Some(body) = data.strip_prefix(SNAPSHOT_MAGIC) else {
             bail!("not a valid snapshot");
         };
+        let Some((len_bytes, rest)) = body.split_at_checked(8) else {
+            bail!("snapshot truncated");
+        };
+        let Ok(len_arr) = <[u8; 8]>::try_from(len_bytes) else {
+            bail!("snapshot truncated");
+        };
+        let Ok(meta_len) = usize::try_from(u64::from_le_bytes(len_arr)) else {
+            bail!("snapshot metadata too large for this target");
+        };
+        let Some((meta, ram_section)) = rest.split_at_checked(meta_len) else {
+            bail!("snapshot truncated");
+        };
         let mut state = Vec::new();
-        brotli::BrotliDecompress(&mut &body[..], &mut state)
+        brotli::BrotliDecompress(&mut &meta[..], &mut state)
             .map_err(|e| anyhow!("brotli decompress: {e}"))?;
 
         // Reclaim backends before clearing the device list so we can hand them
@@ -583,7 +607,21 @@ impl Emulator {
                     _ => None,
                 }
             })
-            .map_err(|()| anyhow!("snapshot corrupt"))
+            .map_err(|()| anyhow!("snapshot corrupt"))?;
+
+        // The regions exist but are empty until here. Inflating after `state`
+        // is done with means only one copy of RAM is ever live: with a single
+        // region the buffer is moved into place rather than copied.
+        drop(state);
+        // Exact capacity up front: letting it double would hold 256 MB and
+        // 512 MB simultaneously at the last realloc.
+        let mut ram = Vec::with_capacity(self.cpu.mmu.ram_len());
+        brotli::BrotliDecompress(&mut &ram_section[..], &mut ram)
+            .map_err(|e| anyhow!("brotli decompress ram: {e}"))?;
+        self.cpu
+            .get_mut_mmu()
+            .install_ram(ram)
+            .map_err(|()| anyhow!("snapshot ram does not match its memory map"))
     }
 
     /// Method for running [`riscv-tests`](https://github.com/riscv/riscv-tests) program.

@@ -278,6 +278,51 @@ impl Mmu {
         self.memory.push((range, bytes));
     }
 
+    /// Total bytes the restored regions expect, so a caller can size the
+    /// decompression buffer exactly. Growing it by doubling instead would hold
+    /// the old and new buffers at once at the final realloc, which for a
+    /// 512 MB machine is 768 MB of transient peak.
+    #[must_use]
+    pub fn ram_len(&self) -> usize {
+        self.memory
+            .iter()
+            .map(|(range, _)| usize::try_from(range.end - range.start).unwrap_or(usize::MAX))
+            .sum()
+    }
+
+    /// Hands the regions their contents, after `read_state` has restored their
+    /// extents. `ram` is the concatenation of every region, in order.
+    ///
+    /// With a single region -- the usual case -- the buffer is *moved* into
+    /// place rather than copied, which is the whole point: a 512 MB machine
+    /// then needs one copy of RAM live at a time instead of two.
+    ///
+    /// # Errors
+    /// Returns `Err(())` if `ram` does not match the restored extents.
+    #[allow(clippy::result_unit_err)]
+    pub fn install_ram(&mut self, mut ram: Vec<u8>) -> Result<(), ()> {
+        let sizes: Vec<usize> = self
+            .memory
+            .iter()
+            .map(|(range, _)| usize::try_from(range.end - range.start).unwrap_or(usize::MAX))
+            .collect();
+        if sizes.iter().sum::<usize>() != ram.len() {
+            return Err(());
+        }
+        // Peel regions off the end, so the first and largest one is left owning
+        // the buffer and is *moved* into place. `split_off` copies what it
+        // takes, so peeling from the end copies only the small trailing
+        // regions; doing it the other way round would copy all of RAM.
+        let mut at = ram.len();
+        for i in (1..sizes.len()).rev() {
+            at -= sizes[i];
+            let tail = ram.split_off(at);
+            self.memory[i].1 = tail;
+        }
+        self.memory[0].1 = ram;
+        Ok(())
+    }
+
     /// Writes `data` into the memory region containing `addr`.
     /// Silently truncates if `data` extends past the region end.
     #[allow(clippy::cast_possible_truncation)]
@@ -1443,7 +1488,7 @@ impl Mmu {
 
     /// Serialises MMU state; the container's version is `SNAPSHOT_MAGIC`.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn write_state(&self, out: &mut Vec<u8>) {
+    pub fn write_state(&self, out: &mut Vec<u8>, ram: &mut Vec<u8>) {
         {
             let mut w = Pack::new(out);
             w.u8(u64::from(self.prv) as u8);
@@ -1453,11 +1498,16 @@ impl Mmu {
             // Memory regions
             w.u64(self.memory.len() as u64);
         }
+        // Only the extents go here; the bytes themselves are appended to `ram`
+        // and compressed as their own section, so that restoring can inflate
+        // them straight into the region that will own them. Keeping them in
+        // this blob means the decompressed copy and the region's copy are both
+        // live at once, which doubles peak memory -- see `Emulator::load_snapshot`.
         for (range, mem) in &self.memory {
             let mut w = Pack::new(out);
             w.u64(range.start);
             w.u64(range.end);
-            w.bytes(mem);
+            ram.extend_from_slice(mem);
         }
         // Save CLINT and PLIC separately (not counted in device_count)
         self.clint.1.save(self.clint.0.start, self.clint.0.end, out);
@@ -1503,7 +1553,9 @@ impl Mmu {
         self.mip = r.u64()?;
         self.satp = r.u64()?;
 
-        // Restore memory regions
+        // Restore memory regions. Extents only: the contents arrive separately
+        // through `install_ram`, and until then these regions are empty. Nothing
+        // may run in between.
         self.memory.clear();
         let mem_count = r.u64()? as usize;
         // Reject rather than let `push_memory_region` panic: this count comes
@@ -1514,8 +1566,10 @@ impl Mmu {
         for _ in 0..mem_count {
             let base = r.u64()?;
             let end = r.u64()?;
-            let bytes = r.bytes()?;
-            self.push_memory_region(base..end, bytes);
+            if end < base {
+                return Err(());
+            }
+            self.push_memory_region(base..end, Vec::new());
         }
 
         // Restore CLINT (leading record, not counted in device_count)

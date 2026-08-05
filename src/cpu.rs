@@ -2154,7 +2154,7 @@ impl Cpu {
     ///   [4×8 B] vtype, vl, vstart, vcsr
     ///   [32·`MAX_VLENB` B] the vector register file, then [8 B] `vlenb`
     ///   [? B] MMU state (via `Mmu::write_state`)
-    pub fn write_state(&self, out: &mut Vec<u8>) {
+    pub fn write_state(&self, out: &mut Vec<u8>, ram: &mut Vec<u8>) {
         {
             let mut w = Pack::new(out);
             for &r in &self.rf {
@@ -2221,7 +2221,7 @@ impl Cpu {
             w.raw(&self.v.vrf);
             w.u64(self.v.vlenb as u64);
         }
-        self.mmu.write_state(out);
+        self.mmu.write_state(out, ram);
     }
 
     /// Restores CPU state from a blob produced by `write_state`.

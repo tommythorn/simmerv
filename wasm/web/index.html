@@ -122,9 +122,10 @@
       // main thread -- `createSyncAccessHandle` would need a worker and the
       // cross-origin isolation headers that come with it.
       const STATE_FILE = 'session.simmerv';
-      // Bump to invalidate every saved session, e.g. after changing the
-      // initramfs or the device tree, which the key below cannot see.
-      const STATE_EPOCH = 2;
+      // Bump to invalidate every saved session: after changing the initramfs
+      // or the device tree, which the key below cannot see, or after changing
+      // the snapshot format itself.
+      const STATE_EPOCH = 3;
 
       const COLUMNS = 80;
       // Exact, not a minimum: the terminal is always resized to this. Once the
