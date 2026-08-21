@@ -2583,9 +2583,18 @@ impl Cpu {
 
         let is_mmio = addr.mem_idx == DataAddr::NO_RAM;
         // cosim: record the PA this load resolved to (see Mmu::cosim_mem_pa).
-        self.mmu.cosim_mem_pa = addr.pa;
-        self.mmu.cosim_mem_kind = 1;
-        self.mmu.cosim_mem_ram = !is_mmio;
+        // FIRST access wins.  One retired instruction can decompose into several
+        // accesses here while the DUT's LSU performs exactly one and reports
+        // the address it translated -- the first.  `cbo.zero` is the case that
+        // found this: the ISS zeroes a 64-byte block as eight 8-byte stores, so
+        // last-wins reported base+0x38 against the DUT's block base.
+        // First-wins makes the two models comparable with no special case,
+        // and it is also the right answer for a page-spanning access.
+        if self.mmu.cosim_mem_kind == 0 {
+            self.mmu.cosim_mem_pa = addr.pa;
+            self.mmu.cosim_mem_kind = 1;
+            self.mmu.cosim_mem_ram = !is_mmio;
+        }
         let result =
             if is_mmio {
                 // Perform the MMIO read for its side effects, then let the DUT's
@@ -2669,9 +2678,13 @@ impl Cpu {
 
         let addr = self.mmu.translate_data_address(va, Write, false)?;
         // cosim: record the PA this store resolved to (see Mmu::cosim_mem_pa).
-        self.mmu.cosim_mem_pa = addr.pa;
-        self.mmu.cosim_mem_kind = 2;
-        self.mmu.cosim_mem_ram = addr.mem_idx != DataAddr::NO_RAM;
+        // FIRST access wins -- see the load site for why (`cbo.zero` is eight stores
+        // here and one block operation in the DUT).
+        if self.mmu.cosim_mem_kind == 0 {
+            self.mmu.cosim_mem_pa = addr.pa;
+            self.mmu.cosim_mem_kind = 2;
+            self.mmu.cosim_mem_ram = addr.mem_idx != DataAddr::NO_RAM;
+        }
 
         // cosim store-stream log (VIRTUAL address -> frame-allocation-independent)
         if crate::mmu::storelog_active() {
