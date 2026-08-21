@@ -26,6 +26,16 @@ typedef struct {
     uint64_t mtime;       // mtime observed at retirement
     uint64_t seqno;       // retirement sequence number
     uint64_t mepc;        // DEBUG: mepc after retire
+    // ---- memory effect of this retirement (cosim store/load checking) ----
+    // The cosim compares retired REGISTER results, so a store -- which has none --
+    // is invisible: a store to the wrong PA, or with the wrong bytes, corrupts REF/DUT
+    // memory silently and surfaces later as an unrelated fault.  Compare mem_pa on both
+    // loads and stores; compare mem_rdback on RAM stores.
+    uint8_t  mem_kind;    // 0 = none, 1 = load, 2 = store
+    uint8_t  mem_ram;     // 1 = RAM (mem_rdback valid), 0 = MMIO
+    uint8_t  _pad2[6];
+    uint64_t mem_pa;      // physical address of the access
+    uint64_t mem_rdback;  // RAM store only: aligned 64-bit word AFTER the store
 } SimmervRetire;
 
 typedef struct SimmervCtx SimmervCtx;

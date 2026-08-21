@@ -109,7 +109,25 @@ pub struct RetireCapture {
     pub seqno: u64,
     /// DEBUG: mepc after retire (for chasing an mepc divergence).
     pub mepc: u64,
+    /// COSIM MEMORY EFFECT.  0 = none, 1 = load, 2 = store.  A store has no
+    /// architectural result, so without this the cosim cannot see it diverge.
+    pub mem_kind: u8,
+    /// 1 if the access was RAM (`mem_rdback` meaningful), 0 if MMIO.
+    pub mem_ram: u8,
+    _pad2: [u8; 6],
+    /// Physical address of the data access (compare for BOTH loads and stores).
+    pub mem_pa: u64,
+    /// For a RAM STORE: the full aligned 64-bit word read back AFTER the store.
+    /// Catches wrong bytes / wrong byte-enables, not just a wrong address.
+    /// Zero for loads and for MMIO (reading a device register has side
+    /// effects).
+    pub mem_rdback: u64,
 }
+
+/// The cosim C header (`cosim/simmerv_cosim.h`) declares this layout by hand.
+/// A silent size change there misaligns every field the harness reads and
+/// produces divergences that look like core bugs.  Break the build instead.
+const _: () = assert!(core::mem::size_of::<RetireCapture>() == 104);
 
 pub type ExecResult = Result<(u64, u8), Exception>;
 
@@ -1106,6 +1124,11 @@ impl Cpu {
             ..RetireCapture::default()
         };
 
+        // cosim: a fresh memory-effect record per retirement
+        self.mmu.cosim_mem_kind = 0;
+        self.mmu.cosim_mem_ram = false;
+        self.mmu.cosim_mem_pa = 0;
+
         self.mmu.service(self.cycle);
         if self.csr.menvcfg & MENVCFG_STCE != 0 {
             if self.mmu.read_mtime_csr() >= self.csr.stimecmp {
@@ -1129,6 +1152,17 @@ impl Cpu {
             };
             cap.next_pc = self.pc;
             cap.mepc = self.csr.mepc;
+            cap.mem_kind = self.mmu.cosim_mem_kind;
+            cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_pa = self.mmu.cosim_mem_pa;
+            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
+            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
+            // reading a device register has side effects and would fork REF from DUT.
+            cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
+                self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
+            } else {
+                0
+            };
             return cap;
         }
 
@@ -1141,6 +1175,17 @@ impl Cpu {
             }
             cap.next_pc = self.pc;
             cap.mepc = self.csr.mepc;
+            cap.mem_kind = self.mmu.cosim_mem_kind;
+            cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_pa = self.mmu.cosim_mem_pa;
+            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
+            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
+            // reading a device register has side effects and would fork REF from DUT.
+            cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
+                self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
+            } else {
+                0
+            };
             return cap;
         }
 
@@ -1154,6 +1199,17 @@ impl Cpu {
                 self.handle_exception(&exc, insn_addr);
                 cap.next_pc = self.pc;
                 cap.mepc = self.csr.mepc;
+                cap.mem_kind = self.mmu.cosim_mem_kind;
+                cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+                cap.mem_pa = self.mmu.cosim_mem_pa;
+                // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
+                // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
+                // reading a device register has side effects and would fork REF from DUT.
+                cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
+                    self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
+                } else {
+                    0
+                };
                 return cap;
             }
         };
@@ -1171,6 +1227,17 @@ impl Cpu {
             self.handle_exception(&exc, insn_addr);
             cap.next_pc = self.pc;
             cap.mepc = self.csr.mepc;
+            cap.mem_kind = self.mmu.cosim_mem_kind;
+            cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_pa = self.mmu.cosim_mem_pa;
+            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
+            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
+            // reading a device register has side effects and would fork REF from DUT.
+            cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
+                self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
+            } else {
+                0
+            };
             return cap;
         }
         self.seqno = self.seqno.wrapping_add(1);
@@ -1194,6 +1261,17 @@ impl Cpu {
             self.handle_exception(&exc, insn_addr);
             cap.next_pc = self.pc;
             cap.mepc = self.csr.mepc;
+            cap.mem_kind = self.mmu.cosim_mem_kind;
+            cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_pa = self.mmu.cosim_mem_pa;
+            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
+            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
+            // reading a device register has side effects and would fork REF from DUT.
+            cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
+                self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
+            } else {
+                0
+            };
             return cap;
         }
         self.write_x(uop.rd, result.val);
@@ -1217,6 +1295,17 @@ impl Cpu {
         cap.fflags = u32::from(self.fflags);
         cap.next_pc = self.pc;
         cap.mepc = self.csr.mepc;
+        cap.mem_kind = self.mmu.cosim_mem_kind;
+        cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+        cap.mem_pa = self.mmu.cosim_mem_pa;
+        // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
+        // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
+        // reading a device register has side effects and would fork REF from DUT.
+        cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
+            self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
+        } else {
+            0
+        };
         cap
     }
 
@@ -2493,6 +2582,10 @@ impl Cpu {
         let addr = self.mmu.translate_data_address(va, Read, false)?;
 
         let is_mmio = addr.mem_idx == DataAddr::NO_RAM;
+        // cosim: record the PA this load resolved to (see Mmu::cosim_mem_pa).
+        self.mmu.cosim_mem_pa = addr.pa;
+        self.mmu.cosim_mem_kind = 1;
+        self.mmu.cosim_mem_ram = !is_mmio;
         let result =
             if is_mmio {
                 // Perform the MMIO read for its side effects, then let the DUT's
@@ -2575,6 +2668,10 @@ impl Cpu {
         }
 
         let addr = self.mmu.translate_data_address(va, Write, false)?;
+        // cosim: record the PA this store resolved to (see Mmu::cosim_mem_pa).
+        self.mmu.cosim_mem_pa = addr.pa;
+        self.mmu.cosim_mem_kind = 2;
+        self.mmu.cosim_mem_ram = addr.mem_idx != DataAddr::NO_RAM;
 
         // cosim store-stream log (VIRTUAL address -> frame-allocation-independent)
         if crate::mmu::storelog_active() {

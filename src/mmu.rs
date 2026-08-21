@@ -99,6 +99,20 @@ pub struct Mmu {
     /// is force-synced anyway).
     pub cosim_inert_devstore: bool,
 
+    /// COSIM MEMORY-EFFECT CAPTURE.  The cosim compares retired register
+    /// results, so a store -- which has no architectural result -- is
+    /// invisible to it.  A store that lands at the wrong physical address,
+    /// or with the wrong bytes, therefore corrupts REF/DUT memory silently
+    /// and only surfaces much later as an unrelated load fault.
+    /// (Found 2026-08-20: a GB5 divergence at retire #6979942 where the DUT's
+    /// page-table walk was CORRECT against its own memory -- the two
+    /// models' page tables had already diverged from an earlier unseen
+    /// store.)  These record the PA and kind of the data access performed
+    /// by the retiring instruction so the harness can compare them.
+    pub cosim_mem_pa: u64,
+    pub cosim_mem_kind: u8,  // 0 = none, 1 = load, 2 = store
+    pub cosim_mem_ram: bool, // access was RAM (readback is safe; MMIO readback has side effects)
+
     /// CLINT — always present, serviced every cycle outside the device queue.
     clint: (Range<u64>, Clint),
 
@@ -245,6 +259,9 @@ impl Mmu {
             devices: Vec::new(),
             service_queue: BinaryHeap::new(),
             cosim_inert_devstore: false,
+            cosim_mem_pa: 0,
+            cosim_mem_kind: 0,
+            cosim_mem_ram: false,
             cycle: 0,
             itlb: Tlb::new(),
             dtlb: DTlb::new(),
