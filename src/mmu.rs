@@ -602,6 +602,35 @@ impl Mmu {
         }
     }
 
+    /// Translation and permission check for an ATOMIC memory operation.
+    ///
+    /// RISC-V privileged spec: "Attempting to execute a store,
+    /// store-conditional (regardless of success), or AMO instruction whose
+    /// effective address lies within a page without write permission raises
+    /// a store page-fault exception."  An AMO is a
+    /// STORE for fault-reporting purposes, so EVERY failure -- missing write
+    /// permission, a clear A or D bit under Svade, or an out-of-range
+    /// physical address -- must carry the store/AMO cause, whichever leg of
+    /// the read-modify-write detects it.
+    ///
+    /// This model implements each AMO as load-then-store, so without this
+    /// pre-check the READ leg faults first and escapes as `LoadPageFault`
+    /// (13) where hardware reports `StorePageFault` (15).  Found by
+    /// smolrv64 cosim 13.5e9 retirements into Geekbench 5: `amoadd.d` on a
+    /// page whose dirty bit was clear.  Enabling Svade (82f4460) is what
+    /// makes such a fault reachable at all, which is why this stayed hidden for
+    /// so long.
+    ///
+    /// `LR` is deliberately NOT a caller: a load-reserved really is a load and
+    /// must raise the load cause.
+    ///
+    /// # Errors
+    /// Returns an `Exception` if the address cannot be translated for writing.
+    pub fn amo_check(&mut self, va: u64) -> Result<(), Exception> {
+        self.translate_data_address(va, MemoryAccessType::Write, false)?;
+        Ok(())
+    }
+
     /// Loads eight bytes as u64. This method takes virtual address and
     /// translates into physical address inside.
     ///

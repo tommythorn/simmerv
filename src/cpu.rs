@@ -3285,31 +3285,37 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(res)
         }
         Op::AmoswapW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, s2 as u32));
             ExecOut::ok(sext32(tmp))
         }
         Op::AmoaddW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, tmp.wrapping_add(s2 as u32)));
             ExecOut::ok(sext32(tmp))
         }
         Op::AmoxorW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, s2 as u32 ^ tmp));
             ExecOut::ok(sext32(tmp))
         }
         Op::AmoandW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, s2 as u32 & tmp));
             ExecOut::ok(sext32(tmp))
         }
         Op::AmoorW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, s2 as u32 | tmp));
             ExecOut::ok(sext32(tmp))
         }
         Op::AmominW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(
                 cpu.mmu
@@ -3318,6 +3324,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(sext32(tmp))
         }
         Op::AmomaxW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(
                 cpu.mmu
@@ -3326,11 +3333,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(sext32(tmp))
         }
         Op::AmominuW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, (s2 as u32).min(tmp)));
             ExecOut::ok(sext32(tmp))
         }
         Op::AmomaxuW => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u32(s1));
             etry!(cpu.mmu.store_virt_u32(s1, (s2 as u32).max(tmp)));
             ExecOut::ok(sext32(tmp))
@@ -3357,36 +3366,42 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(res)
         }
         Op::AmoswapD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, s2));
             cpu.reservation = None;
             ExecOut::ok(tmp)
         }
         Op::AmoaddD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, tmp.wrapping_add(s2)));
             cpu.reservation = None;
             ExecOut::ok(tmp)
         }
         Op::AmoxorD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, tmp ^ s2));
             cpu.reservation = None;
             ExecOut::ok(tmp)
         }
         Op::AmoandD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, tmp & s2));
             cpu.reservation = None;
             ExecOut::ok(tmp)
         }
         Op::AmoorD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, tmp | s2));
             cpu.reservation = None;
             ExecOut::ok(tmp)
         }
         Op::AmominD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(
                 cpu.mmu
@@ -3396,6 +3411,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(tmp)
         }
         Op::AmomaxD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(
                 cpu.mmu
@@ -3405,12 +3421,14 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(tmp)
         }
         Op::AmominuD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, s2.min(tmp)));
             cpu.reservation = None;
             ExecOut::ok(tmp)
         }
         Op::AmomaxuD => {
+            etry!(cpu.mmu.amo_check(s1));
             let tmp = etry!(cpu.mmu.load_virt_u64(s1));
             etry!(cpu.mmu.store_virt_u64(s1, s2.max(tmp)));
             cpu.reservation = None;
@@ -3983,6 +4001,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         Op::AmocasW => amo_cas(cpu, s1, s2, s3, 4),
         Op::AmocasD => amo_cas(cpu, s1, s2, s3, 8),
         Op::AmocasQ => {
+            etry!(cpu.mmu.amo_check(s1));
             // rd and rs2 name even/odd register pairs; the uop's three source
             // slots cannot reach the odd halves, so the decoder passed the raw
             // register numbers through the immediate.
@@ -4150,6 +4169,7 @@ fn amo_narrow(
     size: u64,
     f: impl FnOnce(u64, u64) -> u64,
 ) -> ExecOut {
+    etry!(cpu.mmu.amo_check(addr));
     let old = etry!(cpu.memop_read(addr, 0, size));
     let new = f(old, src);
     etry!(cpu.memop_write(addr, 0, new, size));
@@ -4160,6 +4180,7 @@ fn amo_narrow(
 /// A Zacas compare-and-swap of `size` bytes.  The store happens only on a
 /// match, but rd is written with the original contents either way.
 fn amo_cas(cpu: &mut Cpu, addr: u64, swap: u64, cmp: u64, size: u64) -> ExecOut {
+    etry!(cpu.mmu.amo_check(addr));
     let old = etry!(cpu.memop_read(addr, 0, size));
     if old == zext_n(cmp, size) {
         etry!(cpu.memop_write(addr, 0, swap, size));
