@@ -2,13 +2,8 @@
 
 # Simmerv
 
-Simmerv is a [RISC-V](https://riscv.org/) SoC emulator written in Rust
-and compilable to WebAssembly.  It began as a fork of [Takahiro's
-riscv-rust emulator](https://github.com/takahirox/riscv-rust), but has
-by now been extensively rewritten, making it far more complete and
-much faster.  Ultimately, we expect it to become substantially faster,
-but this work is delayed until we are able to run standard benchmarks
-and off-the-shelf Linux distributions.
+Simmerv is a high-performance full RVA23 and RVA22 [RISC-V](https://riscv.org/) SoC emulator written in Rust
+and compilable to WebAssembly.
 
 ## Online Demo
 
