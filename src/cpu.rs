@@ -889,6 +889,20 @@ impl Cpu {
             let mut untaken_branches: u64 = 0;
             let mut exception: Option<(Exception, u64)> = None;
             let cached_block = bb.block_at(slot);
+            // The PC is carried in a register and published to `self.pc` only
+            // where something outside the loop can observe it: a redirect
+            // (where the instruction wrote `self.pc` itself), an exception, and
+            // the end of the block.  Writing it once per uop cost a store plus
+            // a store-to-load forward on the next iteration -- a chain as long
+            // as the block, which every other instruction in the loop had to
+            // wait behind.
+            //
+            // Instructions that move the PC do it in `execute_fast` and say so
+            // with `REDIRECT_BIT`, so the local is exact without consulting
+            // `self.pc`; the `debug_assert!` below still cross-checks the two,
+            // which makes a missed redirect detectable rather than silently
+            // wrong.
+            let mut cur_insn_addr = self.pc;
             for uop in cached_block {
                 let uop = *uop;
                 if uop.op == Op::End {
@@ -896,16 +910,18 @@ impl Cpu {
                 }
                 // uop is a local copy; cached_block borrows bb immutably but
                 // bb is not mutated inside this loop, so NLL is satisfied.
-                let cur_insn_addr = self.pc;
                 let expected_next = cur_insn_addr + uop.get_insn_size();
-                self.pc = expected_next;
 
                 let s1 = self.read_x(uop.rs1);
                 let s2 = self.read_x(uop.rs2);
-                let s3 = self.read_x(uop.rs3);
-                let out = execute_fast(self, &uop, s1, s2, s3, cur_insn_addr);
+                let out = execute_fast(self, &uop, s1, s2, cur_insn_addr);
                 if out.is_err() {
+                    // The tuple carries the *faulting* instruction's address
+                    // (what every other path in this file reports), while
+                    // `self.pc` ends up at the sequential next, which is where
+                    // the block executor always left it.
                     exception = Some((out.to_exception(), cur_insn_addr));
+                    cur_insn_addr = expected_next;
                     break;
                 }
                 self.write_x(uop.rd, out.val);
@@ -921,6 +937,12 @@ impl Cpu {
                 // PC must set the bit, but setting it when the PC happens not
                 // to move is harmless -- a `jalr` whose target is simply the
                 // next instruction just ends the block early.
+                //
+                // The one instruction that legitimately touches `self.pc`
+                // without redirecting is a CSR write that does not change the
+                // PC; `csr_write_out` publishes the sequential next for it, so
+                // the check stays exactly as strict as it was when the loop
+                // stored `self.pc` every iteration.
                 debug_assert!(
                     out.is_redirect() || self.pc == expected_next,
                     "{:?} at {cur_insn_addr:#x} wrote pc without REDIRECT_BIT",
@@ -929,11 +951,14 @@ impl Cpu {
                 if out.is_redirect() {
                     // Taken branch, jump, xret, or an interrupt let in by a CSR
                     // write: the instruction set the PC itself, so stop here.
+                    cur_insn_addr = self.pc;
                     break;
                 } else if uop.is_branch_flag() {
                     untaken_branches += 1;
                 }
+                cur_insn_addr = expected_next;
             }
+            self.pc = cur_insn_addr;
             bb.untaken_branches += untaken_branches;
             bb.insn_hits += u64::from(n_executed);
             bb.block_hits += 1;
@@ -2818,7 +2843,12 @@ pub fn decode(a: u64, word: u32, rva23: bool) -> Uop {
 /// longer does, but here it is fine: CSR writes are a fraction of a percent of
 /// instructions.
 #[inline]
-fn csr_write_out(cpu: &mut Cpu, csrno: u16, value: u64, res: u64) -> ExecOut {
+fn csr_write_out(cpu: &mut Cpu, csrno: u16, value: u64, res: u64, next_pc: u64) -> ExecOut {
+    // The block executor keeps the PC in a local while a block runs, so
+    // `cpu.pc` may be stale here.  Establish the sequential next PC first: that
+    // is what the comparison below means, and it keeps `cpu.pc` coherent for
+    // the interrupt delivery inside `write_csr`.
+    cpu.pc = next_pc;
     let pc_before = cpu.pc;
     if let Err(e) = cpu.write_csr(csrno, value) {
         return ExecOut::err(e.trap, e.tval);
@@ -2840,19 +2870,19 @@ fn csr_write_out(cpu: &mut Cpu, csrno: u16, value: u64, res: u64) -> ExecOut {
     clippy::cast_lossless,
     clippy::too_many_lines
 )]
-fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u64) -> ExecOut {
+fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, insn_addr: u64) -> ExecOut {
     match uop.op {
         // Lui / Auipc
         Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
         Op::Auipc => ExecOut::ok(insn_addr.wrapping_add(uop.imm64())),
         // Jumps
         Op::Jal | Op::CJ => {
-            let tmp = cpu.pc;
+            let tmp = next_insn_addr(insn_addr, uop);
             cpu.pc = insn_addr.wrapping_add(uop.imm64());
             ExecOut::redirected(tmp)
         }
         Op::Jalr | Op::CJr | Op::CJalr => {
-            let tmp = cpu.pc;
+            let tmp = next_insn_addr(insn_addr, uop);
             cpu.pc = s1.wrapping_add(uop.imm64()) & !1;
             ExecOut::redirected(tmp)
         }
@@ -2972,8 +3002,29 @@ fn execute_fast(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: 
             ExecOut::ok(0)
         }
         // Everything else: float, CSR, atomic, vector, etc.
-        _ => new_execute(cpu, uop, s1, s2, s3, insn_addr),
+        //
+        // `rs3` is read here rather than by the caller because only the fused
+        // multiply-add family uses it.  Reading it up front put a third
+        // register-file load on the hot path for every instruction in the
+        // program to serve a handful of FNMADDs; the PC sampler attributed
+        // ~9% of a Geekbench 5 run to that one load.
+        _ => {
+            let s3 = cpu.read_x(uop.rs3);
+            new_execute(cpu, uop, s1, s2, s3, insn_addr)
+        }
     }
+}
+
+/// The address of the instruction following the one at `insn_addr`, i.e. the
+/// link value a `jal`/`jalr` writes and the address an instruction resumes at.
+///
+/// Needed because the block executor no longer leaves the sequential next PC in
+/// `Cpu::pc` before dispatching: it keeps it in a local, so an instruction that
+/// wants the link value has to compute it rather than read it back.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+const fn next_insn_addr(insn_addr: u64, uop: &Uop) -> u64 {
+    insn_addr.wrapping_add(uop.get_insn_size())
 }
 
 #[allow(
@@ -3005,12 +3056,12 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
         Op::Auipc => ExecOut::ok(insn_addr.wrapping_add(uop.imm64())),
         Op::Jal | Op::CJ => {
-            let tmp = cpu.pc;
+            let tmp = next_insn_addr(insn_addr, uop);
             cpu.pc = insn_addr.wrapping_add(uop.imm64());
             ExecOut::redirected(tmp)
         }
         Op::Jalr | Op::CJr | Op::CJalr => {
-            let tmp = cpu.pc;
+            let tmp = next_insn_addr(insn_addr, uop);
             cpu.pc = s1.wrapping_add(uop.imm64()) & !1;
             ExecOut::redirected(tmp)
         }
@@ -3166,14 +3217,14 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             } else {
                 etry!(cpu.read_csr(uop.imm as u16))
             };
-            csr_write_out(cpu, uop.imm as u16, s1, res)
+            csr_write_out(cpu, uop.imm as u16, s1, res, next_insn_addr(insn_addr, uop))
         }
         Op::Csrrs => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data | s1, data)
+                csr_write_out(cpu, uop.imm as u16, data | s1, data, next_insn_addr(insn_addr, uop))
             }
         }
         Op::Csrrc => {
@@ -3181,7 +3232,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data & !s1, data)
+                csr_write_out(cpu, uop.imm as u16, data & !s1, data, next_insn_addr(insn_addr, uop))
             }
         }
         Op::Csrrwi => {
@@ -3190,14 +3241,14 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             } else {
                 etry!(cpu.read_csr(uop.imm as u16))
             };
-            csr_write_out(cpu, uop.imm as u16, uop.rs1.get() as u64, res)
+            csr_write_out(cpu, uop.imm as u16, uop.rs1.get() as u64, res, next_insn_addr(insn_addr, uop))
         }
         Op::Csrrsi => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data | uop.rs1.get() as u64, data)
+                csr_write_out(cpu, uop.imm as u16, data | uop.rs1.get() as u64, data, next_insn_addr(insn_addr, uop))
             }
         }
         Op::Csrrci => {
@@ -3205,7 +3256,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data & !(uop.rs1.get() as u64), data)
+                csr_write_out(cpu, uop.imm as u16, data & !(uop.rs1.get() as u64), data, next_insn_addr(insn_addr, uop))
             }
         }
         // RV32M
