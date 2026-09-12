@@ -35,13 +35,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
-// prof: in-process PC sampling
+// prof: in-process PC sampling (macOS only)
 // ---------------------------------------------------------------------------
 
 /// Everything hot in this emulator is inlined into `step_block`, so a
@@ -53,10 +51,16 @@ use std::time::Instant;
 /// Enabled by setting `SIMMERV_PROF` to the output path; off (and so costing
 /// nothing) otherwise.  The handler only stores the PC, which is async-signal
 /// safe; aggregation happens after the run.
+///
+/// macOS only: it reads the PC out of Darwin's `ucontext_t` (`__ss.__pc`) and
+/// offsets the raw addresses by `_dyld_get_image_vmaddr_slide`.  Neither
+/// exists on Linux, so the module is compiled only where it can work; see the
+/// stub below.
+#[cfg(target_os = "macos")]
 mod prof {
-    use super::AtomicUsize;
-    use super::Ordering;
     use std::ffi::c_void;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     const CAP: usize = 1 << 21;
     static mut PCS: [u64; CAP] = [0; CAP];
@@ -128,6 +132,14 @@ mod prof {
         }
         let _ = std::fs::write(path, out);
     }
+}
+
+/// No sampler off macOS.  The harness still builds (and CI is Linux), it just
+/// cannot take PC samples; `start`/`dump` become no-ops.
+#[cfg(not(target_os = "macos"))]
+mod prof {
+    pub fn start() {}
+    pub fn dump() {}
 }
 
 fn new_emulator(ram_bytes: usize) -> Emulator {
