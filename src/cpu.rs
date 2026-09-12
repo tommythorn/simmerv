@@ -912,6 +912,19 @@ impl Cpu {
                 // bb is not mutated inside this loop, so NLL is satisfied.
                 let expected_next = cur_insn_addr + uop.get_insn_size();
 
+                // Debug builds only: keep `self.pc` tracking the sequential
+                // next, as this loop did before the PC moved into a register.
+                // The assertion below reads `self.pc`; without this it compares
+                // against whatever the previous block left there and fires on
+                // perfectly good code, observing a field that is stale by
+                // design rather than a PC that moved.  Release carries the PC
+                // in `cur_insn_addr` alone and both the store and the
+                // assertion compile away.
+                #[cfg(debug_assertions)]
+                {
+                    self.pc = expected_next;
+                }
+
                 let s1 = self.read_x(uop.rs1);
                 let s2 = self.read_x(uop.rs2);
                 let out = execute_fast(self, &uop, s1, s2, cur_insn_addr);
@@ -940,9 +953,8 @@ impl Cpu {
                 //
                 // The one instruction that legitimately touches `self.pc`
                 // without redirecting is a CSR write that does not change the
-                // PC; `csr_write_out` publishes the sequential next for it, so
-                // the check stays exactly as strict as it was when the loop
-                // stored `self.pc` every iteration.
+                // PC: `csr_write_out` publishes the sequential next before its
+                // comparison, so the assertion still sees `expected_next`.
                 debug_assert!(
                     out.is_redirect() || self.pc == expected_next,
                     "{:?} at {cur_insn_addr:#x} wrote pc without REDIRECT_BIT",
