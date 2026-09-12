@@ -89,7 +89,8 @@ mod prof {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1000);
-        // SAFETY: a zeroed sigaction with our handler and SA_SIGINFO|SA_RESTART.
+        // SAFETY: a zeroed sigaction with our handler and
+        // SA_SIGINFO|SA_RESTART.
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = handler as usize;
@@ -99,8 +100,14 @@ mod prof {
             // ITIMER_PROF counts CPU time, so the rate does not depend on how
             // many other processes are competing for the machine.
             let it = libc::itimerval {
-                it_interval: libc::timeval { tv_sec: 0, tv_usec: 1_000_000 / hz },
-                it_value: libc::timeval { tv_sec: 0, tv_usec: 1_000_000 / hz },
+                it_interval: libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 1_000_000 / hz,
+                },
+                it_value: libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 1_000_000 / hz,
+                },
             };
             libc::setitimer(libc::ITIMER_PROF, &raw const it, std::ptr::null_mut());
         }
@@ -352,7 +359,10 @@ fn bench_gb5(dir: &str, marker: &str, max_seconds: f64, budget: u64) -> anyhow::
     if hit.load(std::sync::atomic::Ordering::Relaxed) {
         println!("  reached marker {marker:?} in {:.1}s", wall.as_secs_f64());
     } else {
-        println!("  did NOT reach {marker:?} (gave up after {:.1}s)", wall.as_secs_f64());
+        println!(
+            "  did NOT reach {marker:?} (gave up after {:.1}s)",
+            wall.as_secs_f64()
+        );
     }
     // One `mark` line per subtest, with the time spent in that subtest: the
     // banner is printed just before the subtest starts, so the difference
@@ -367,8 +377,9 @@ fn bench_gb5(dir: &str, marker: &str, max_seconds: f64, budget: u64) -> anyhow::
     Ok(())
 }
 
-/// Wraps a `MarkerTerminal` and mirrors its hit flag into a shared `AtomicBool`,
-/// so the run loop can poll for the marker without reaching into the device.
+/// Wraps a `MarkerTerminal` and mirrors its hit flag into a shared
+/// `AtomicBool`, so the run loop can poll for the marker without reaching into
+/// the device.
 struct SharingTerminal {
     inner: MarkerTerminal,
     hit: Arc<AtomicBool>,
@@ -397,7 +408,9 @@ fn main() -> anyhow::Result<()> {
 fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("elf") => {
-            let path = args.get(1).map_or("benches/dhrystone.riscv", String::as_str);
+            let path = args
+                .get(1)
+                .map_or("benches/dhrystone.riscv", String::as_str);
             let reps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
             bench_elf(path, reps)
         }
