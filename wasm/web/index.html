@@ -94,11 +94,12 @@
       // directory and .github/workflows/pages.yml stages linux/ beside it.
       //
       // The root filesystem is a read-only squashfs, so the initramfs mounts a
-      // tmpfs over it before handing off to systemd; the device tree is what
-      // tells the kernel where that initramfs was placed, which is why the
-      // address below has to match linux/demo/build.sh.
+      // tmpfs over it before handing off to systemd. The kernel learns where
+      // that initramfs was placed from the device tree's /chosen node, and
+      // setup_initrd() below puts both the ramdisk and those properties there
+      // -- so there is no address to keep in sync with anything, and no
+      // device tree of our own to carry.
       const KERNEL  = './linux/fw_payload.bin';
-      const DTB     = './linux/demo/demo.dtb';
       const INITRD  = './linux/demo/initramfs.cpio';
       // A squashfs despite the extension: GitHub Pages gzips anything it
       // types application/octet-stream (.sqfs, .img, .iso, .bin all are), and
@@ -106,7 +107,6 @@
       // arrive as slices of a gzip stream. .cpio is typed application/x-cpio
       // and served untouched. See the note in .github/workflows/pages.yml.
       const ROOTFS  = './linux/demo/rootfs.cpio';
-      const INITRD_ADDR = 0x9e000000;
 
       // The root filesystem is streamed: rather than downloading it, we hand
       // the emulator its size and serve 64 KiB blocks as the guest asks for
@@ -116,32 +116,42 @@
       // linux/demo/mkdemo-image.sh.
       const BLOCK = 65536;
 
+      // Guest RAM. A save and a restore each transiently need about twice this,
+      // and mobile Safari kills the tab well before a desktop would, so phones
+      // get less by default. ?ram=512 overrides either way.
+      //
+      // The floor is no longer about the initramfs: that is placed just below
+      // the device tree at the top of RAM, so any size we accept can hold it,
+      // and the old 512 MB address-derived floor is gone. What still needs
+      // guarding is the guest itself. Measured on the demo image, 64 MB gets
+      // as far as systemd and then dies with "Failed to fork off sandboxing
+      // environment" / "Freezing execution", and 76 MB is still crawling
+      // through unit startup after several minutes. Refuse those rather than
+      // hand back a machine that only looks hung.
+      const RAM_FLOOR_MB = 128;
+      const RAM_MB = (() => {
+        const asked = Number(new URLSearchParams(location.search).get('ram'));
+        if (Number.isFinite(asked) && asked >= 64) return Math.min(Math.max(asked, RAM_FLOOR_MB), 4096);
+        return 512;
+      })();
+
       // Where a suspended session lives, in the origin private file system.
       // OPFS rather than IndexedDB because the state is one large opaque blob,
       // which is what it is good at, and `createWritable` keeps this on the
       // main thread -- `createSyncAccessHandle` would need a worker and the
       // cross-origin isolation headers that come with it.
-      // Guest RAM. A save and a restore each transiently need about twice this,
-      // and mobile Safari kills the tab well before a desktop would, so phones
-      // get less by default. ?ram=512 overrides either way.
-      const RAM_MB = (() => {
-        // The initramfs is written to INITRD_ADDR, 480 MB above the start of
-        // RAM, and demo.dtb points the kernel at that address. Any less memory
-        // than that and it lands outside RAM entirely: the kernel comes up with
-        // no /init and cannot mount root. Moving it down means rebuilding
-        // demo.dtb, so until then this is a hard floor and asking for less is
-        // refused rather than silently producing a machine that will not boot.
-        const floor = Math.ceil((INITRD_ADDR - 0x80000000) / 1048576) + 32;
-        const asked = Number(new URLSearchParams(location.search).get('ram'));
-        if (Number.isFinite(asked) && asked >= 64) return Math.min(Math.max(asked, floor), 4096);
-        return floor;
-      })();
-
       const STATE_FILE = 'session.simmerv';
       // Bump to invalidate every saved session: after changing the initramfs
       // or the device tree, which the key below cannot see, or after changing
       // the snapshot format itself.
-      const STATE_EPOCH = 3;
+      //
+      // 4: the demo stopped carrying a device tree of its own. It used to boot
+      // a demo.dtb with the initrd window baked in at 0x9e000000; the tree is
+      // now the emulator's default plus properties setup_initrd() inserts, and
+      // the ramdisk sits just below the top of RAM instead. A session saved
+      // under the old glue is self-consistent and would still resume, but it
+      // would resume the old geometry, which is not what this build models.
+      const STATE_EPOCH = 4;
 
       const COLUMNS = 80;
       // Exact, not a minimum: the terminal is always resized to this. Once the
@@ -599,14 +609,14 @@
           // caches and taken backends off the machine it gave up on.
           riscv = fresh();
           const kernel = await fetchWithProgress(KERNEL, 'kernel');
-          const [dtb, initrd] = await Promise.all([
-            fetch(DTB).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
-            fetch(INITRD).then(r => r.arrayBuffer()).then(b => new Uint8Array(b)),
-          ]);
+          const initrd = await fetch(INITRD).then(r => r.arrayBuffer()).then(b => new Uint8Array(b));
           terminal.write('\r\x1b[2K');
           riscv.load_image(kernel);
-          riscv.setup_dtb(dtb);
-          riscv.load_blob_at(initrd, INITRD_ADDR);
+          // Places the ramdisk below the device tree and inserts
+          // linux,initrd-start/-end into its /chosen node, so the kernel finds
+          // it. The machine already carries the emulator's default tree; there
+          // is nothing to supply and no address to agree on.
+          riscv.setup_initrd(initrd);
         }
 
         // Started here rather than earlier: a failed restore replaces the

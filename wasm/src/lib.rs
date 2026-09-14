@@ -118,22 +118,29 @@ impl WasmRiscv {
     /// * `content` DTB content binary
     pub fn setup_dtb(&mut self, content: Vec<u8>) { self.emulator.setup_dtb(&content).unwrap(); }
 
-    /// Places a raw blob at a physical address. Used for an initramfs, whose
-    /// location the guest learns from the device tree's `linux,initrd-start`
-    /// and `linux,initrd-end` -- so this must agree with the DTB passed to
-    /// [`Self::setup_dtb`].
+    /// Loads an initial ramdisk (a cpio archive) and points the device tree at
+    /// it.
     ///
-    /// `addr` is a `u32` rather than a `u64` because every address involved
-    /// sits in the low 4 GB, and it spares the JS caller a `BigInt`.
+    /// The ramdisk is placed in RAM below the device tree, page-aligned, and
+    /// `linux,initrd-start` / `linux,initrd-end` are inserted into the tree's
+    /// `/chosen` node so the kernel finds it. Nothing else has to be arranged:
+    /// there is no address to choose and no device tree to hand-write.
+    ///
+    /// This replaces a pair of calls -- `setup_dtb` with a tree that had the
+    /// two properties baked in, and `load_blob_at` with the matching address --
+    /// which had to agree with each other and with the tree's builder. The tree
+    /// in force is whichever is already loaded, so call this *after*
+    /// `setup_dtb` if you are supplying a tree of your own.
+    ///
+    /// Panics if the tree already defines those properties, naming which one:
+    /// that tree is stating where its own ramdisk lives, and contradicting it
+    /// silently would leave the two disagreeing. Also panics if the ramdisk
+    /// does not fit in RAM, or would land on an already-loaded image.
     ///
     /// # Arguments
-    /// * `content` Blob to place
-    /// * `addr` Physical address to place it at
-    pub fn load_blob_at(&mut self, content: Vec<u8>, addr: u32) {
-        self.emulator
-            .cpu
-            .get_mut_mmu()
-            .write_memory_at(u64::from(addr), &content);
+    /// * `content` The cpio archive
+    pub fn setup_initrd(&mut self, content: Vec<u8>) {
+        self.emulator.setup_initrd(&content).unwrap();
     }
 
     /// Attaches a disk whose blocks JavaScript fetches on demand.

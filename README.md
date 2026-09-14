@@ -191,14 +191,87 @@ or
 $ cargo r -r -- -c linux/opensbi/fw_jump.elf,0x80000000 linux/vmlinux,0x80200000 -f linux/rootfs.img
 ```
 
-## How to run Linux with initramfs (/dev/ram)
+## How to run Linux with an initramfs
 
-Allocate 2 GiB, use a device tree with initramfs at 0xa0000000 and
-load the initrd2+gdb.cpio binary at that address.
+`-i`/`--initfs` takes a cpio archive, loads it into RAM *below* the device
+tree, and inserts the `linux,initrd-start` / `linux,initrd-end` properties into
+the tree's `/chosen` node so the kernel finds it.  Nothing else has to be
+arranged: no address to work out, and no hand-maintained device tree.
 
 ```sh
-$ (cd linux;cargo r -r -- -m 2048 -d with-initrd.dtb fw_payload.bin,0x80000000 initrd2+gdb.cpio,0xa0000000)
+$ cargo r -r -- -m 2048 -i linux/gb6.cpio linux/fw_payload.bin,0x80000000
 ```
+
+The tree is placed at the top of RAM and the ramdisk goes flush underneath it,
+page-aligned:
+
+```
+initrd linux/gb6.cpio: [0xe608b000, 0xffffe600) = 435631616 byte(s), device tree at 0xfffff000
+```
+
+The end sits a little below the tree (2560 bytes here) because the start is
+rounded down to a page boundary; `end - start` is always exactly the file's
+length.
+
+The properties are inserted, never overwritten. If the tree you pass to `-d`
+already defines them, it is stating where its ramdisk lives, and `-i` refuses
+rather than silently contradicting it:
+
+```sh
+$ cargo r -r -- -m 2048 -i linux/gb6.cpio -d linux/with-initrd.dtb linux/fw_payload.bin,0x80000000
+Error: /chosen already defines linux,initrd-start (8 byte(s) at 0xb8); this
+device tree pins its own ramdisk address, so placing one would contradict it.
+Remove the property to let the emulator choose an address, or keep this tree
+and supply no ramdisk of your own
+```
+
+Append `,0xADDR` to pin the ramdisk's address instead of deriving it
+(`-i linux/gb6.cpio,0xa0000000`). The address must still leave room for the
+tree, and the properties are still written.
+
+### Seeing what the guest sees
+
+`--dumpdtb` writes the *effective* device tree — after the memory-size patch
+and after any `-i` properties have been inserted — to stdout and exits without
+running. That is byte-for-byte what the kernel would have been handed, which
+makes it the quickest way to check a layout:
+
+```sh
+$ cargo r -r -- --dumpdtb -m 2048 -i linux/gb6.cpio | dtc -I dtb -O dts | sed -n '/chosen/,/};/p'
+	chosen {
+		bootargs = "console=ttyS0 earlycon=sbi root=/dev/vda1 rw ignore_loglevel random.trust_bootloader=on";
+		stdout-path = "/uart@10000000";
+		rng-seed = <...>;
+		linux,initrd-start = <0x00 0xe608b000>;
+		linux,initrd-end = <0x00 0xffffe600>;
+	};
+```
+
+Note the stdout: redirect the blob to a file, and keep in mind that the
+emulator's own diagnostics go to stderr for exactly this reason.
+
+### Why this exists
+
+`linux/with-initrd.dtb`, the wasm demo's `linux/demo/demo.dtb` and the
+`linux/tiny128.dtb` placeholder were each hand-maintained trees that freeze a
+ramdisk address in them — `demo/build.sh` had to compute
+`INITRD_ADDR=0x9e000000`, sed the two properties into a copy of `dts.dts`, and
+`index.html` had to repeat the same address so the host side loaded the file to
+the right place. Three files, two languages and one number that had to agree
+everywhere.
+
+`-i` removes that on the `sim` path, and the wasm demo drops it too: it now
+calls the same machinery through `setup_initrd` on the emulator's default tree,
+so `demo.dtb` is deleted, `build.sh` builds nothing but the initramfs, and no
+address appears anywhere. The remaining trees still work — `tiny128.dtb` is a
+placeholder that pins its own ramdisk, and `with-initrd.dtb` is what `-i`
+refuses by name — but neither is how you should boot a ramdisk.
+
+`linux/demo/build.sh` also used to strip `root=/dev/vda1 rw` from the tree's
+`bootargs`, since the demo's init chooses its own root. That is unnecessary: the
+kernel runs the initramfs's `/init` when there is one, and `root=` is never
+consulted. Booting the demo geometry with the stock tree and `-i` reaches a
+login prompt, which is the check that this holds.
 
 ## How to set up networking (VirtIO-net)
 

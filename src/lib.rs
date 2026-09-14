@@ -5,6 +5,7 @@ pub mod buffered_serial_backend;
 pub mod cpu;
 pub mod csr;
 pub mod device;
+pub mod fdt;
 pub mod fp;
 pub mod generated_riscv_decoder;
 pub mod mmu;
@@ -177,6 +178,17 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
 /// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
 pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC11";
 
+/// Where [`Emulator::setup_initrd`] put the ramdisk and the tree it edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitrdPlacement {
+    /// Physical address of the ramdisk's first byte.
+    pub start: u64,
+    /// One past its last byte; `end - start` is the file's length.
+    pub end: u64,
+    /// Where the device tree carrying the two properties was placed.
+    pub dtb_base: u64,
+}
+
 /// RISC-V emulator. It emulates RISC-V CPU and peripheral devices.
 ///
 /// Sample code to run the emulator.
@@ -233,6 +245,31 @@ pub struct Emulator {
 
     /// Destination path for on-demand snapshots requested via `snapshot_flag`.
     pub snapshot_path: String,
+
+    /// The device tree exactly as supplied, before the memory-size patch.
+    ///
+    /// Kept because the tree has to be rebuildable: `set_rva23_enabled` swaps
+    /// the blob, `-d` replaces it, and an initrd placed afterwards must edit
+    /// whichever tree is actually in force.  Without this, placing a ramdisk
+    /// would mean re-reading a file the emulator was handed a copy of.
+    dtb_source: Vec<u8>,
+
+    /// `Some(addr)` when the caller pinned the tree's address (`-d FILE,0xADDR`),
+    /// which also suppresses the memory-size patch, matching `setup_dtb_at`.
+    dtb_fixed_addr: Option<u64>,
+
+    /// The tree as actually placed -- patched, with the ramdisk properties
+    /// embedded if one was placed.  This is what `--dumpdtb` prints and what
+    /// the guest actually reads.
+    dtb_effective: Vec<u8>,
+
+    /// The ramdisk extent once placed, so re-placing the tree (an RVA23 swap
+    /// after `-d`) can re-embed the properties rather than drop them.
+    initrd: Option<(u64, u64)>,
+
+    /// Lowest and highest physical address `load_image` has written, so an
+    /// initrd can be shown not to overlap a kernel image.
+    image_extent: Option<(u64, u64)>,
 }
 
 impl Emulator {
@@ -260,14 +297,6 @@ impl Emulator {
         mmu.add_memory(0x7000_0000, 1024 * 1024);
         mmu.attach_uart(backend);
 
-        let mut dtb = include_bytes!("./device/dtb.dtb").to_vec();
-        let dtb_base = dtb_end_of_ram(0x8000_0000, capacity, dtb.len());
-        // Report all of RAM. The DTB sits at the top of RAM, but the kernel
-        // reserves its own FDT footprint (early_init_fdt_reserve_self), so it
-        // needn't be carved out of the memory node.
-        #[allow(clippy::expect_used)]
-        patch_dtb_memory(&mut dtb, capacity as u64).expect("can't patch dtb");
-        mmu.write_memory_at(dtb_base, &dtb);
         mmu.add_device(
             Mmu::VIRTIO_BASE..Mmu::VIRTIO_END,
             Box::new(VirtioBlockDisk::new(Mmu::VIRTIO_IRQ)),
@@ -309,8 +338,19 @@ impl Emulator {
             verbose: Arc::new(AtomicBool::new(false)),
             snapshot_flag: Arc::new(AtomicBool::new(false)),
             snapshot_path: "snapshot".to_string(),
+
+            dtb_source: include_bytes!("./device/dtb.dtb").to_vec(),
+            dtb_fixed_addr: None,
+            dtb_effective: Vec::new(),
+            initrd: None,
+            image_extent: None,
         };
-        emulator.cpu.set_dtb_base(dtb_base);
+        // The default tree is the emulator's own, so failing to place it is a
+        // broken build rather than bad input.
+        #[allow(clippy::expect_used)]
+        emulator
+            .place_device_tree()
+            .expect("can't place the default device tree");
         emulator
     }
 
@@ -329,12 +369,13 @@ impl Emulator {
         if !on {
             return;
         }
-        let mut dtb = include_bytes!("./device/dtb-v.dtb").to_vec();
-        let dtb_base = dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len());
+        self.dtb_source = include_bytes!("./device/dtb-v.dtb").to_vec();
+        // The RVA23 tree reclaims the top of RAM, so a tree the caller had
+        // pinned no longer applies -- same as the old unconditional re-place.
+        self.dtb_fixed_addr = None;
         #[allow(clippy::expect_used)]
-        patch_dtb_memory(&mut dtb, self.memory_bytes).expect("can't patch vector dtb");
-        self.cpu.get_mut_mmu().write_memory_at(dtb_base, &dtb);
-        self.cpu.set_dtb_base(dtb_base);
+        self.place_device_tree()
+            .expect("can't place the vector device tree");
     }
 
     /// Set `VLEN` in bits (128, the default, or 256).  RVA23 must also be
@@ -815,6 +856,7 @@ impl Emulator {
                 .dma_slice(load_addr, size)
                 .map_err(|()| anyhow!("load_image reaches outside memory"))?
                 .copy_from_slice(buf);
+            self.record_image_extent(load_addr, load_addr + size as u64);
             return Ok(load_addr);
         }
         let elf_file = elf_file.map_err(|e| anyhow!(e))?;
@@ -842,6 +884,9 @@ impl Emulator {
         };
         let ph_iter = elf_file.program_iter();
         log::info!("ELF program headers");
+        // Tracked from the program headers, not the file length: `p_memsz`
+        // covers `.bss` and exceeds `p_filesz`, so a file's size bounds nothing.
+        let mut span: Option<(u64, u64)> = None;
         for sect in ph_iter {
             if !matches!(sect.get_type(), Ok(xmas_elf::program::Type::Load)) {
                 log::trace!("Skipping {sect}");
@@ -849,6 +894,10 @@ impl Emulator {
             }
             let addr = sect.physical_addr() + relocation_offset;
             let size = sect.mem_size();
+            span = Some(match span {
+                Some((lo, hi)) => (lo.min(addr), hi.max(addr.saturating_add(size))),
+                None => (addr, addr.saturating_add(size)),
+            });
             let xmas_elf::program::SegmentData::Undefined(data) =
                 sect.get_data(&elf_file).map_err(|e| anyhow!(e))?
             else {
@@ -902,8 +951,24 @@ impl Emulator {
             }
         }
 
+        if let Some((lo, hi)) = span {
+            self.record_image_extent(lo, hi);
+        }
         Ok(elf_file.header.pt2.entry_point() + relocation_offset)
     }
+
+    /// Grow the record of what `load_image` has written, so a ramdisk can be
+    /// shown not to land on top of it.
+    fn record_image_extent(&mut self, low: u64, high: u64) {
+        self.image_extent = Some(match self.image_extent {
+            Some((lo, hi)) => (lo.min(low), hi.max(high)),
+            None => (low, high),
+        });
+    }
+
+    /// Lowest and highest physical address written by `load_image` so far.
+    #[must_use]
+    pub const fn image_extent(&self) -> Option<(u64, u64)> { self.image_extent }
 
     /// MMIO window `(base, end)` and PLIC IRQ for virtio-blk disk `index`.
     /// Two block devices are wired up: index 0 (`/dev/vda`) and index 1
@@ -1029,22 +1094,228 @@ impl Emulator {
     /// # Errors
     /// Failing to patch the dtb will result in an error
     pub fn setup_dtb(&mut self, content: &[u8]) -> anyhow::Result<()> {
-        let mut dtb = content.to_vec();
-        #[allow(clippy::cast_possible_truncation)]
-        let dtb_base = dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len());
-        // Report all of RAM; the kernel reserves the FDT's own footprint.
-        patch_dtb_memory(&mut dtb, self.memory_bytes)?;
-        self.cpu.get_mut_mmu().write_memory_at(dtb_base, &dtb);
-        self.cpu.set_dtb_base(dtb_base);
+        self.dtb_source = content.to_vec();
+        self.dtb_fixed_addr = None;
+        self.place_device_tree()?;
         Ok(())
     }
 
     /// Load a DTB at an explicit address without patching its memory-size
     /// property.
+    ///
+    /// Placement failures are logged rather than returned: this is the escape
+    /// hatch the benchmark harnesses use to pin a frozen layout, and it has
+    /// always been infallible at the call sites that matter.
     pub fn setup_dtb_at(&mut self, content: &[u8], addr: u64) {
-        self.cpu.get_mut_mmu().write_memory_at(addr, content);
-        self.cpu.set_dtb_base(addr);
+        self.dtb_source = content.to_vec();
+        self.dtb_fixed_addr = Some(addr);
+        if let Err(e) = self.place_device_tree() {
+            log::error!("can't place device tree at {addr:#x}: {e}");
+        }
     }
+
+    /// Build and write out the device tree currently in force.
+    ///
+    /// The single place a tree reaches RAM.  Earlier this logic was copied
+    /// across four callers, which is why none of them could rebuild the tree
+    /// they had placed -- and why a ramdisk could not be advertised in a tree
+    /// that `set_rva23_enabled` or `-d` had since replaced.
+    ///
+    /// Order matters: everything is validated before the first byte is written,
+    /// because the memory writes in this module are not self-checking.
+    #[allow(clippy::cast_possible_truncation)] // RAM sizes come from `usize` in the first place
+    fn place_device_tree(&mut self) -> anyhow::Result<u64> {
+        let mut dtb = self.dtb_source.clone();
+        if self.dtb_fixed_addr.is_none() {
+            patch_dtb_memory(&mut dtb, self.memory_bytes)?;
+        }
+        if let Some((start, end)) = self.initrd {
+            dtb = fdt::analyze_initrd_slot(&dtb)?.embed(&dtb, start, end)?;
+        }
+
+        let base = match self.dtb_fixed_addr {
+            Some(addr) => addr,
+            None => dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len()),
+        };
+
+        let ram_end = 0x8000_0000u64.saturating_add(self.memory_bytes);
+        let tree_end = base
+            .checked_add(dtb.len() as u64)
+            .ok_or_else(|| anyhow!("device tree at {base:#x} has an overflowing footprint"))?;
+        if base < 0x8000_0000 || tree_end > ram_end {
+            bail!(
+                "device tree [{base:#x}, {tree_end:#x}) does not fit in RAM \
+                 [0x80000000, {ram_end:#x}); {} byte(s) needed",
+                dtb.len()
+            );
+        }
+        if let Some((start, end)) = self.initrd.filter(|&(_, end)| end > base) {
+            bail!(
+                "ramdisk [{start:#x}, {end:#x}) overlaps the device tree at {base:#x}; \
+                 the tree cannot move to make room"
+            );
+        }
+
+        // `dma_slice` rather than `write_memory_at`: the latter truncates
+        // silently past a region's end and does nothing at all when no region
+        // matches, so a tree that missed RAM would simply never appear.
+        self.cpu
+            .get_mut_mmu()
+            .dma_slice(base, dtb.len())
+            .map_err(|()| {
+                anyhow!(
+                    "device tree [{base:#x}, {tree_end:#x}) is not wholly inside one memory region"
+                )
+            })?
+            .copy_from_slice(&dtb);
+
+        self.dtb_effective = dtb;
+        self.cpu.set_dtb_base(base);
+        Ok(base)
+    }
+
+    /// Place `content` as the initial ramdisk and advertise it to the guest.
+    ///
+    /// The ramdisk is put directly below the device tree, at the highest
+    /// address that leaves it clear of the tree, and `linux,initrd-start` /
+    /// `linux,initrd-end` are inserted into `/chosen` so the kernel finds it.
+    /// Call after the tree has been chosen (`set_rva23_enabled`, `setup_dtb`).
+    ///
+    /// # Errors
+    /// If the tree already states a ramdisk address, if the image does not fit
+    /// in RAM clear of the tree and of anything already loaded, or if either
+    /// extent falls outside a memory region.
+    pub fn setup_initrd(&mut self, content: &[u8]) -> anyhow::Result<InitrdPlacement> {
+        self.place_initrd(content, None)
+    }
+
+    /// As [`Self::setup_initrd`], but at an address the caller chose.
+    ///
+    /// The tree is still edited and the properties still inserted -- only the
+    /// placement is overridden.  Pinning is how a known-good layout is
+    /// reproduced exactly, and it must still leave room for the tree, which
+    /// grows by a few dozen bytes when the properties are inserted.
+    ///
+    /// # Errors
+    /// As [`Self::setup_initrd`].
+    pub fn setup_initrd_at(
+        &mut self,
+        content: &[u8],
+        addr: u64,
+    ) -> anyhow::Result<InitrdPlacement> {
+        self.place_initrd(content, Some(addr))
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // as `place_device_tree`
+    fn place_initrd(
+        &mut self,
+        content: &[u8],
+        pinned: Option<u64>,
+    ) -> anyhow::Result<InitrdPlacement> {
+        const PAGE: u64 = 4096;
+        if content.is_empty() {
+            bail!("initrd is empty; an empty ramdisk is not a usable image");
+        }
+        let len = content.len() as u64;
+
+        // How much the tree grows is a function of the tree alone -- how many
+        // properties are missing, which names are already interned, the root's
+        // `#address-cells` -- and not of the addresses being written.  That is
+        // what resolves "the address depends on the tree's size" and "the tree
+        // depends on the address" in one pass instead of iterating.
+        let mut probe = self.dtb_source.clone();
+        if self.dtb_fixed_addr.is_none() {
+            patch_dtb_memory(&mut probe, self.memory_bytes)?;
+        }
+        let growth = fdt::analyze_initrd_slot(&probe)?.growth();
+        let base = match self.dtb_fixed_addr {
+            Some(addr) => addr,
+            None => dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, probe.len() + growth),
+        };
+
+        // Default placement is flush below the tree; a pinned address is used
+        // as given, page-aligned only so the reserved range's leading edge does
+        // not half-reserve the page beneath it.
+        let start = match pinned {
+            Some(addr) => addr & !(PAGE - 1),
+            None => base.checked_sub(len).map(|s| s & !(PAGE - 1)).ok_or_else(|| {
+                anyhow!(
+                    "initrd ({len} byte(s)) is larger than the {base:#x} bytes below \
+                     the device tree; increase -m"
+                )
+            })?,
+        };
+        let end = start + len;
+        if end > base {
+            bail!(
+                "initrd [{start:#x}, {end:#x}) overlaps the device tree at {base:#x}; \
+                 it must end at or below the tree"
+            );
+        }
+
+        let ram_base = 0x8000_0000u64;
+        if start < ram_base {
+            bail!(
+                "initrd ({len} byte(s)) does not fit in RAM below the device tree at \
+                 {base:#x}; it would start at {start:#x}, below RAM at {ram_base:#x}. \
+                 Increase -m"
+            );
+        }
+        // Firmware and any other reserved ranges are not ours to overwrite.
+        for (rsv_start, rsv_end) in fdt::mem_reserve_ranges(&probe) {
+            if start < rsv_end && end > rsv_start {
+                bail!(
+                    "initrd [{start:#x}, {end:#x}) overlaps reserved memory \
+                     [{rsv_start:#x}, {rsv_end:#x}) declared by the device tree"
+                );
+            }
+        }
+        // Anything already loaded -- the firmware and the kernel.  The extent is
+        // tracked inside `load_image`, which is the only place that knows how
+        // far an ELF's segments reach (a file's length does not bound them).
+        // `image_extent` is the only honest bound on a loaded kernel: a file's
+        // length does not bound the footprint of an ELF's segments.
+        if let Some((low, high)) = self
+            .image_extent
+            .filter(|&(low, high)| start < high && end > low)
+        {
+            bail!(
+                "initrd [{start:#x}, {end:#x}) would overwrite an image already loaded at \
+                 [{low:#x}, {high:#x}); the ramdisk goes below the device tree at {base:#x}"
+            );
+        }
+
+        self.cpu
+            .get_mut_mmu()
+            .dma_slice(start, content.len())
+            .map_err(|()| {
+                anyhow!("initrd [{start:#x}, {end:#x}) is not wholly inside one memory region")
+            })?
+            .copy_from_slice(content);
+
+        self.initrd = Some((start, end));
+        if let Err(e) = self.place_device_tree() {
+            self.initrd = None;
+            return Err(e);
+        }
+
+        let dtb_base = self.cpu.dtb_base;
+        log::info!(
+            "initrd [{start:#x}, {end:#x}) = {len} byte(s), device tree at {dtb_base:#x} \
+             (grew {growth} byte(s), address-cells {})",
+            fdt::analyze_initrd_slot(&self.dtb_effective)?.addr_cells()
+        );
+        Ok(InitrdPlacement {
+            start,
+            end,
+            dtb_base,
+        })
+    }
+
+    /// The device tree as actually placed -- memory-patched, and carrying the
+    /// ramdisk properties when one was set up.  This is what the guest reads.
+    #[must_use]
+    pub fn effective_dtb(&self) -> &[u8] { &self.dtb_effective }
 
     /// Set up the `fw_dynamic_info` struct for `OpenSBI` `fw_dynamic` firmware
     /// and place a pointer to it in a2, as required by the `fw_dynamic`

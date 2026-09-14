@@ -12,7 +12,9 @@ use simmerv::Emulator;
 use simmerv::serial_backend::SerialBackend;
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io;
 use std::io::Read;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -36,7 +38,23 @@ struct Args {
     #[argh(option, short = 'd')]
     dtb: Option<String>,
 
-    /// no popup terminal
+    /// initial ramdisk (a cpio archive), optionally followed by a comma and the
+/// "0x"-prefixed start address in hex. Loaded directly below the device tree
+/// and advertised to the guest through the tree's /chosen node, so no
+/// hand-maintained DTB is needed. An explicit address overrides the placement
+/// (and must still leave room for the tree).
+#[argh(option, short = 'i')]
+initfs: Option<String>,
+
+/// write the effective device tree to stdout as a DTB and exit without running.
+/// "Effective" means after the memory-size patch and after any -i/--initfs
+/// ramdisk properties have been inserted, so the output is exactly what the
+/// guest would have read. Redirect it to a file, or pipe it to dtc:
+/// `simmerv --dumpdtb -i fs.cpio | dtc -I dtb -O dts`
+#[argh(switch)]
+dumpdtb: bool,
+
+/// no popup terminal
     #[argh(switch, short = 'n')]
     no_terminal: bool,
 
@@ -321,6 +339,54 @@ fn main() -> anyhow::Result<()> {
         } else {
             emulator.setup_dtb(&contents)?;
         }
+    }
+
+    // The initrd goes below the tree, so this must follow the -d block: the
+    // tree in force is whichever the user last chose.
+    if let Some(initfs_arg) = args.initfs {
+        let mut parts_iter = initfs_arg.split(',');
+        let filename = parts_iter.next().unwrap_or("");
+        let mut contents = vec![];
+        File::open(filename)
+            .with_context(|| filename.to_string())?
+            .read_to_end(&mut contents)
+            .with_context(|| filename.to_string())?;
+        let mut initrd_addr = None;
+        for part in parts_iter {
+            if let Some(hex) = part.strip_prefix("0x") {
+                initrd_addr = Some(
+                    u64::from_str_radix(hex, 16)
+                        .with_context(|| format!("invalid initfs address: {part}"))?,
+                );
+            } else {
+                bail!("Unsupported initfs option {part}");
+            }
+        }
+        if loaded_snapshot {
+            bail!("-i/--initfs cannot be combined with a snapshot image: a snapshot restores RAM wholesale, including the device tree and ramdisk it was taken with");
+        }
+        let placement = if let Some(addr) = initrd_addr {
+            emulator.setup_initrd_at(&contents, addr)?
+        } else {
+            emulator.setup_initrd(&contents)?
+        };
+        // stderr, not stdout: stdout is reserved for --dumpdtb's blob, and a
+        // status line printed there would corrupt the dump for anyone
+        // redirecting it to a file.
+        eprintln!(
+            "initrd {filename}: [{:#x}, {:#x}) = {} byte(s), device tree at {:#x}",
+            placement.start,
+            placement.end,
+            placement.end - placement.start,
+            placement.dtb_base
+        );
+    }
+
+    if args.dumpdtb {
+        let mut stdout = io::stdout();
+        stdout.write_all(emulator.effective_dtb())?;
+        stdout.flush()?;
+        return Ok(());
     }
 
     if args.fs.len() > 2 {

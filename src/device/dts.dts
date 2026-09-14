@@ -1,6 +1,27 @@
 /dts-v1/;
 
 /*
+ * Reserve the M-mode firmware (OpenSBI) region so S-mode software (U-Boot, the
+ * kernel) does not treat it as free RAM.  Without it, and with PMP not
+ * enforced, the guest kernel allocates over OpenSBI and zeroes its trap
+ * handler: the next SBI ecall then executes a zeroed (illegal) instruction at
+ * the trap vector and loops forever.  OpenSBI's own runtime reservation
+ * survives the direct OpenSBI->kernel path but is lost through
+ * OpenSBI->U-Boot->GRUB->EFI, which is why booting the Ubuntu image via U-Boot
+ * hung while direct kernel boots did not.
+ *
+ * It is a top-level /memreserve/ rather than a /reserved-memory child node
+ * because OpenSBI adds mmode_resv0/mmode_resv1 nodes for these same addresses
+ * on every boot -- unconditionally, with no check for a pre-existing node --
+ * and Linux's reserved-memory scan prints "OVERLAP DETECTED!" for any two
+ * nodes sharing bytes.  Entries in this top-level block go straight into
+ * memblock without that scan, so the region is reserved just as firmly with no
+ * warning.  Both cover [0x80000000, 0x80200000): this one, and OpenSBI's own
+ * pair totalling [0x80000000, 0x80060000).
+ */
+/memreserve/ 0x80000000 0x200000;
+
+/*
  * Compiled into two blobs via the C preprocessor (the cpu node's isa
  * properties are #ifdef VECTOR):
  *   cpp -P -nostdinc -x assembler-with-cpp dts.dts | dtc -I dts -O dtb -o dtb.dtb
@@ -29,22 +50,6 @@
 			dc 37 f1 98 24 bb 60 0f
 			4a e2 7d 36 c5 19 8c a0
 		];
-        };
-
-        // Reserve the M-mode firmware (OpenSBI) region so S-mode (U-Boot, the
-        // kernel) does not treat it as free RAM. QEMU's generated DTB carries
-        // the equivalent "mmode_resv0" node; without it, and with PMP not
-        // enforced, the kernel allocates over OpenSBI and corrupts its trap
-        // handler.
-        reserved-memory {
-                #address-cells = <0x2>;
-                #size-cells = <0x2>;
-                ranges;
-
-                mmode_resv0@80000000 {
-                        reg = <0x0 0x80000000 0x0 0x200000>;
-                        no-map;
-                };
         };
 
         uart@10000000 {
@@ -127,18 +132,39 @@
                          * instructions, which a functional model meets
                          * trivially.
                          */
-                        riscv,isa = "rv64imafdcv_zicsr_zifencei_zicntr_zihpm_zicond_zicbom_zicbop_zicboz_zba_zbb_zbc_zbs_zca_zcb_zcd_zfa_zfhmin_zimop_zcmop_zawrs_zacas_zabha_zvbb_zvkb_zvkt";
+                        riscv,isa = "rv64imafdcv";
                         riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "zicond", "zicbom", "zicbop", "zicboz", "zba", "zbb", "zbc", "zbs", "zca", "zcb", "zcd", "zfa", "zfhmin", "zimop", "zcmop", "zawrs", "zacas", "zabha", "v", "zve32x", "zve32f", "zve64x", "zve64f", "zve64d", "zvl32b", "zvl64b", "zvl128b", "zvbb", "zvkb", "zvkt", "svinval", "svnapot", "svpbmt", "svade", "sstc", "zihintntl", "smstateen", "ssstateen";
 #else
                         /*
                          * The default machine.  Everything here is always on:
                          * only the RVA23 members above are gated by --rva23,
                          * and this tree used to name barely any of the rest.
+                         *
+                         * The legacy `riscv,isa` string is kept to the base ISA
+                         * it is named after.  Older parsers -- 5.4 among them --
+                         * validate it against a fixed whitelist and warn on any
+                         * extension they do not know, so a long string turns
+                         * into a warning per unknown member at boot.  What the
+                         * machine implements is named in `riscv,isa-extensions`,
+                         * which is what a parser that understands the split
+                         * binding reads; `riscv,isa-base` above is the half of
+                         * that pair the string form cannot express.
                          */
-                        riscv,isa = "rv64imafdc_zicsr_zifencei_zicntr_zihpm_zicond_zicbom_zicbop_zicboz_zba_zbb_zbc_zbs_zfhmin";
+                        riscv,isa = "rv64imafdc";
                         riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zicntr", "zihpm", "sscofpmf", "zicond", "zicbom", "zicbop", "zicboz", "zba", "zbb", "zbc", "zbs", "zfhmin", "svinval", "svnapot", "svpbmt", "svade", "sstc", "zihintntl", "smstateen", "ssstateen";
 #endif
                         mmu-type = "riscv,sv39";
+                        /*
+                         * Both trees advertise Zicbom/Zicbop/Zicboz, so both
+                         * must declare the block sizes with them: a kernel that
+                         * sees the extension without the size warns and then
+                         * disables the extension, which is strictly worse than
+                         * not advertising it.  64 bytes is what the model
+                         * implements -- `cbo.zero` zeroes one 64-byte block.
+                         */
+                        riscv,cbom-block-size = <0x40>;
+                        riscv,cbop-block-size = <0x40>;
+                        riscv,cboz-block-size = <0x40>;
 
                         interrupt-controller {
                                 #interrupt-cells = <0x1>;
