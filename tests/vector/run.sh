@@ -50,7 +50,7 @@ grep -c '' "$out/qemu.txt" | sed 's/^/qemu lines: /'
 
 echo "== simmerv =="
 (cd "$root" && cargo build --release -q)
-timeout 900 "$root/target/release/simmerv_cli" --rva23 --vlen "$VLEN" -n "$out/vtest.elf" \
+timeout 900 "$root/target/release/simmerv-cli" --rva23 --vlen "$VLEN" -n "$out/vtest.elf" \
     > "$out/simmerv.txt" 2>"$out/simmerv.err" < /dev/null || true
 grep -c '' "$out/simmerv.txt" | sed 's/^/simmerv lines: /'
 

@@ -548,7 +548,8 @@ fn vmem(
                     Ok(val) => set_elem_of_group(&mut cpu.v, vreg, i, ebytes, val),
                     Err(e) => {
                         if fof && i > 0 {
-                            // Trim the vector to the elements that did fault-free.
+                            // Trim the vector to the elements that did
+                            // fault-free.
                             cpu.v.vl = i as u64;
                             return Ok(0);
                         }

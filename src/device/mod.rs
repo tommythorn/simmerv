@@ -494,7 +494,8 @@ mod tests {
         let base = 0x1000_1000u64;
         let end = 0x1000_2000u64;
         let mut disk = virtio_block_disk::VirtioBlockDisk::new_with_contents(vec![0xABu8; 1024], 1);
-        // Simulate driver setup: STATUS = ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK
+        // Simulate driver setup: STATUS =
+        // ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK
         disk.store(0x070, 0x0f);
         disk.store(0x080, 0x00); // QueueDescLow  = 0x8000_1000
         disk.store(0x081, 0x10);

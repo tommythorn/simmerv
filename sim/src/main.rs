@@ -39,22 +39,22 @@ struct Args {
     dtb: Option<String>,
 
     /// initial ramdisk (a cpio archive), optionally followed by a comma and the
-/// "0x"-prefixed start address in hex. Loaded directly below the device tree
-/// and advertised to the guest through the tree's /chosen node, so no
-/// hand-maintained DTB is needed. An explicit address overrides the placement
-/// (and must still leave room for the tree).
-#[argh(option, short = 'i')]
-initfs: Option<String>,
+    /// "0x"-prefixed start address in hex. Loaded directly below the device
+    /// tree and advertised to the guest through the tree's /chosen node, so
+    /// no hand-maintained DTB is needed. An explicit address overrides the
+    /// placement (and must still leave room for the tree).
+    #[argh(option, short = 'i')]
+    initfs: Option<String>,
 
-/// write the effective device tree to stdout as a DTB and exit without running.
-/// "Effective" means after the memory-size patch and after any -i/--initfs
-/// ramdisk properties have been inserted, so the output is exactly what the
-/// guest would have read. Redirect it to a file, or pipe it to dtc:
-/// `simmerv --dumpdtb -i fs.cpio | dtc -I dtb -O dts`
-#[argh(switch)]
-dumpdtb: bool,
+    /// write the effective device tree to stdout as a DTB and exit without
+    /// running. "Effective" means after the memory-size patch and after any
+    /// -i/--initfs ramdisk properties have been inserted, so the output is
+    /// exactly what the guest would have read. Redirect it to a file, or
+    /// pipe it to dtc: `simmerv --dumpdtb -i fs.cpio | dtc -I dtb -O dts`
+    #[argh(switch)]
+    dumpdtb: bool,
 
-/// no popup terminal
+    /// no popup terminal
     #[argh(switch, short = 'n')]
     no_terminal: bool,
 
@@ -266,7 +266,8 @@ fn main() -> anyhow::Result<()> {
     let mut emu_start = None;
     let mut images = 0;
     let mut loaded_snapshot = false;
-    // Path to auto-save on Ctrl-C exit: the loaded snapshot name, or "snapshot".
+    // Path to auto-save on Ctrl-C exit: the loaded snapshot name, or
+    // "snapshot".
     let mut auto_snapshot_path = "snapshot".to_string();
 
     for img_path in args.images {
@@ -363,7 +364,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if loaded_snapshot {
-            bail!("-i/--initfs cannot be combined with a snapshot image: a snapshot restores RAM wholesale, including the device tree and ramdisk it was taken with");
+            bail!(
+                "-i/--initfs cannot be combined with a snapshot image: a snapshot restores RAM wholesale, including the device tree and ramdisk it was taken with"
+            );
         }
         let placement = if let Some(addr) = initrd_addr {
             emulator.setup_initrd_at(&contents, addr)?
@@ -448,8 +451,8 @@ fn main() -> anyhow::Result<()> {
         emulator.run_program();
     }
 
-    // Write riscof signature: dump physical memory [begin_signature, end_signature)
-    // as 32-bit hex.
+    // Write riscof signature: dump physical memory [begin_signature,
+    // end_signature) as 32-bit hex.
     if let Some(ref sigfile) = args.riscof_sigfile {
         let begin = symbols
             .get("begin_signature")

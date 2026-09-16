@@ -20,7 +20,7 @@ fn test(
 fn test_bool(f: impl Fn(u64, u64) -> (u64, u8), f1: u64, f2: u64, wantr: bool, wantfflag: u8) {
     let (r, fflag) = f(f1, f2);
     assert_eq!(
-        (wantr as u64, wantfflag),
+        (u64::from(wantr), wantfflag),
         (r, fflag),
         "{f1:08x}, {f2:08x} -> ({r}, {fflag:0x}) / ({wantr}, {wantfflag:0x})",
     );

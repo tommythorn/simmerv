@@ -287,7 +287,8 @@ impl VirtioBlockDisk {
     /// call rather than processing one request per notification.
     pub fn service_disk(&mut self, memory: &mut [(Range<u64>, Vec<u8>)]) -> Option<u32> {
         if self.pending_requests > 0 {
-            // avail->idx lives at queue_driver_addr + 2 (u16, wrapping counter).
+            // avail->idx lives at queue_driver_addr + 2 (u16, wrapping
+            // counter).
             let avail_idx = dma_read_u16(memory, self.queue_driver_addr.wrapping_add(2));
             let mut completed = 0u32;
             while self.used_ring_index != avail_idx {
@@ -520,8 +521,9 @@ impl VirtioBlockDisk {
     //
     // struct virtq_desc   { addr:u64, len:u32, flags:u16, next:u16 }
     // struct virtq_avail  { flags:u16, idx:u16, ring[queue_size]:u16, … }
-    // struct virtq_used   { flags:u16, idx:u16, ring[queue_size]:virtq_used_elem, …
-    // } struct virtq_used_elem { id:u32, len:u32 }
+    // struct virtq_used   { flags:u16, idx:u16,
+    // ring[queue_size]:virtq_used_elem, … } struct virtq_used_elem {
+    // id:u32, len:u32 }
     //
     // Block request descriptor chain (§5.2.6):
     //   desc[0]  header  { type:u32, reserved:u32, sector:u64 }  RO
@@ -571,7 +573,8 @@ impl VirtioBlockDisk {
                     blk_sector = dma_read_u64(memory, desc_addr.wrapping_add(8)) as usize;
                 }
                 1 => {
-                    // Data buffer: WRITE flag means device writes here (read from disk).
+                    // Data buffer: WRITE flag means device writes here (read
+                    // from disk).
                     data = Some((
                         desc_addr,
                         desc_len as usize,
@@ -744,7 +747,8 @@ impl MemoryMapped for VirtioBlockDisk {
         if n > 0 {
             self.storage = DiskStorage::Memory(r.raw(n)?.to_vec());
         }
-        // else: zero sentinel — leave existing storage (file-backed or empty) in place.
+        // else: zero sentinel — leave existing storage (file-backed or empty)
+        // in place.
         self.pending_requests = r.u32()?;
         self.irq = r.u32()?;
         Ok(())

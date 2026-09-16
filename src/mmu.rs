@@ -147,6 +147,41 @@ pub struct Mmu {
     pub flush_asid: u64,
     pub flush_vpage: u64,
     pub flush_vpage_asid: u64,
+
+    /// SFENCE.VMA instructions retired, by operand class.  Unlike the counters
+    /// above, these are one-per-instruction and are not touched by SATP writes,
+    /// FENCE.I or state restore, all of which call `flush_tlb`.
+    pub sfence_full: u64,
+    pub sfence_asid: u64,
+    pub sfence_vpage: u64,
+    pub sfence_vpage_asid: u64,
+
+    /// SINVAL.VMA instructions retired, by operand class.  Same operand
+    /// encoding and same effect as SFENCE.VMA, so the two share a dispatch arm
+    /// and a flush implementation; they are counted separately because SINVAL
+    /// belongs to Zisvinval and therefore says something quite different about
+    /// the guest -- a SINVAL.VMA is only ever emitted as part of the
+    /// SFENCE.W.INVAL / SINVAL.VMA / SFENCE.INVAL.IR sequence, so its presence
+    /// means software is batching invalidations rather than flushing one page
+    /// at a time.
+    pub sinval_full: u64,
+    pub sinval_asid: u64,
+    pub sinval_vpage: u64,
+    pub sinval_vpage_asid: u64,
+
+    /// `SFENCE.W.INVAL` and `SFENCE.INVAL.IR`, the two bookends of the above.
+    /// They have no operand encoding and no architectural effect of their own,
+    /// so they are bare counters.
+    pub sfence_w_inval: u64,
+    pub sfence_inval_ir: u64,
+
+    /// SATP writes that carried a non-zero ASID, and the set of non-zero ASIDs
+    /// ever seen (one bit per ASID).  If `satp_asid_nonzero` stays 0 across a
+    /// whole boot then every SFENCE.VMA `rs2` operand is 0 because the field is
+    /// *zero*, not because software chose a global flush — and everything
+    /// ASID-shaped is moot.
+    pub satp_asid_nonzero: u64,
+    pub asid_seen: [u64; 16],
 }
 
 /// Result of a data address translation.
@@ -199,6 +234,16 @@ pub struct TlbDisplayStats {
     pub flush_asid: u64,
     pub flush_vpage: u64,
     pub flush_vpage_asid: u64,
+    pub sfence_full: u64,
+    pub sfence_asid: u64,
+    pub sfence_vpage: u64,
+    pub sfence_vpage_asid: u64,
+    pub sinval_full: u64,
+    pub sinval_asid: u64,
+    pub sinval_vpage: u64,
+    pub sinval_vpage_asid: u64,
+    pub sfence_w_inval: u64,
+    pub sfence_inval_ir: u64,
 }
 
 impl Default for Mmu {
@@ -272,6 +317,18 @@ impl Mmu {
             flush_asid: 0,
             flush_vpage: 0,
             flush_vpage_asid: 0,
+            sfence_full: 0,
+            sfence_asid: 0,
+            sfence_vpage: 0,
+            sfence_vpage_asid: 0,
+            sinval_full: 0,
+            sinval_asid: 0,
+            sinval_vpage: 0,
+            sinval_vpage_asid: 0,
+            sfence_w_inval: 0,
+            sfence_inval_ir: 0,
+            satp_asid_nonzero: 0,
+            asid_seen: [0; 16],
         }
     }
 
@@ -416,6 +473,47 @@ impl Mmu {
         self.dtlb2m.flush_vpage_asid(vpage >> 9, asid);
     }
 
+    /// Count one retired fence by operand class.
+    ///
+    /// `is_sinval` selects the SINVAL.VMA counters over the SFENCE.VMA ones.
+    /// `has_vaddr` is `rs1 != x0`, `has_asid` is `rs2 != x0`; the pair selects
+    /// the same four classes the dispatch uses.  The `flush_*` counters above
+    /// cannot recover the `(false, false)` class, because `flush_tlb` also runs
+    /// on SATP writes, FENCE.I and state restore.
+    pub const fn record_fence(&mut self, is_sinval: bool, has_vaddr: bool, has_asid: bool) {
+        if is_sinval {
+            match (has_vaddr, has_asid) {
+                (false, false) => self.sinval_full += 1,
+                (true, false) => self.sinval_vpage += 1,
+                (false, true) => self.sinval_asid += 1,
+                (true, true) => self.sinval_vpage_asid += 1,
+            }
+        } else {
+            match (has_vaddr, has_asid) {
+                (false, false) => self.sfence_full += 1,
+                (true, false) => self.sfence_vpage += 1,
+                (false, true) => self.sfence_asid += 1,
+                (true, true) => self.sfence_vpage_asid += 1,
+            }
+        }
+    }
+
+    /// Record the ASID field of a SATP write.  The field is 16 bits wide at
+    /// `SATP_ASID_SHIFT`; `asid_seen` is sized for the full field, not for the
+    /// 10 bits the model implements.
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn record_satp(&mut self, satp: u64) {
+        let asid = ((satp >> SATP_ASID_SHIFT) & csr::SATP_ASID_MASK) as usize;
+        if asid != 0 {
+            self.satp_asid_nonzero += 1;
+            self.asid_seen[asid >> 6] |= 1u64 << (asid & 63);
+        }
+    }
+
+    /// Number of distinct non-zero ASIDs ever written to SATP.
+    #[must_use]
+    pub fn distinct_asids(&self) -> u32 { self.asid_seen.iter().map(|w| w.count_ones()).sum() }
+
     /// Snapshot all TLB statistics for display.
     #[must_use]
     pub const fn tlb_stats(&self) -> TlbDisplayStats {
@@ -430,6 +528,16 @@ impl Mmu {
             flush_asid: self.flush_asid,
             flush_vpage: self.flush_vpage,
             flush_vpage_asid: self.flush_vpage_asid,
+            sfence_full: self.sfence_full,
+            sfence_asid: self.sfence_asid,
+            sfence_vpage: self.sfence_vpage,
+            sfence_vpage_asid: self.sfence_vpage_asid,
+            sinval_full: self.sinval_full,
+            sinval_asid: self.sinval_asid,
+            sinval_vpage: self.sinval_vpage,
+            sinval_vpage_asid: self.sinval_vpage_asid,
+            sfence_w_inval: self.sfence_w_inval,
+            sfence_inval_ir: self.sfence_inval_ir,
         }
     }
 
@@ -505,7 +613,8 @@ impl Mmu {
                 next_service_in: None,
                 cycle,
             };
-            // Split borrow: self.devices[idx].1 and self.memory are separate fields
+            // Split borrow: self.devices[idx].1 and self.memory are separate
+            // fields
             self.devices[idx].1.service(&mut ctx, &mut self.memory);
             self.mip = ctx.mip;
             if let Some(irq) = ctx.asserted_irq
@@ -1243,11 +1352,13 @@ impl Mmu {
         if effective_prv == PrivMode::M
             || (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64
         {
-            // Physical access (no translation). Resolve to the backing RAM range so the
-            // value is read from / written to real memory -- and, crucially for the cosim,
-            // so a physical-mode (M-mode / Bare) RAM load is VERIFIED against the model
-            // instead of blindly taking the DUT's armed MMIO value. Only a PA outside RAM
-            // stays NO_RAM: a genuine device register (or the cosim DUT-follow override).
+            // Physical access (no translation). Resolve to the backing RAM
+            // range so the value is read from / written to real
+            // memory -- and, crucially for the cosim,
+            // so a physical-mode (M-mode / Bare) RAM load is VERIFIED against
+            // the model instead of blindly taking the DUT's armed
+            // MMIO value. Only a PA outside RAM stays NO_RAM: a
+            // genuine device register (or the cosim DUT-follow override).
             let mut found = None;
             for (i, (range, _)) in self.memory.iter().enumerate() {
                 if range.contains(&address) {
@@ -1438,11 +1549,11 @@ impl Mmu {
             // Svnapot N bit, the Svpbmt PBMT field [62:61], and the reserved
             // bits [60:54] cannot leak into the formed physical address.
             // NOTE (cosim gating gap): we accept PBMT pages unconditionally and
-            // do NOT gate on menvcfg.PBMTE, nor fault on PBMT!=0 when disabled or
-            // on the reserved PBMT=11 encoding.  A spec-correct DUT page-faults
-            // those; we treat every page as plain cached memory.  Safe only
-            // because OpenSBI sets menvcfg before S-mode.  See MENVCFG_STCE in
-            // csr.rs.
+            // do NOT gate on menvcfg.PBMTE, nor fault on PBMT!=0 when disabled
+            // or on the reserved PBMT=11 encoding.  A spec-correct
+            // DUT page-faults those; we treat every page as plain
+            // cached memory.  Safe only because OpenSBI sets
+            // menvcfg before S-mode.  See MENVCFG_STCE in csr.rs.
             let ppn = (pte >> 10) & ((1u64 << 44) - 1);
             let is_napot = pte & PTE_N_MASK != 0;
             if xwr == 0 {
@@ -1548,7 +1659,8 @@ impl Mmu {
         // and compressed as their own section, so that restoring can inflate
         // them straight into the region that will own them. Keeping them in
         // this blob means the decompressed copy and the region's copy are both
-        // live at once, which doubles peak memory -- see `Emulator::load_snapshot`.
+        // live at once, which doubles peak memory -- see
+        // `Emulator::load_snapshot`.
         for (range, mem) in &self.memory {
             let mut w = Pack::new(out);
             w.u64(range.start);
@@ -1600,8 +1712,8 @@ impl Mmu {
         self.satp = r.u64()?;
 
         // Restore memory regions. Extents only: the contents arrive separately
-        // through `install_ram`, and until then these regions are empty. Nothing
-        // may run in between.
+        // through `install_ram`, and until then these regions are empty.
+        // Nothing may run in between.
         self.memory.clear();
         let mem_count = r.u64()? as usize;
         // Reject rather than let `push_memory_region` panic: this count comes

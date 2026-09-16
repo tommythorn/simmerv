@@ -192,7 +192,8 @@ impl VirtioNet {
                 .wrapping_add(avail_ring_idx * 2);
             let desc_head = u64::from(dma_read_u16(memory, desc_index_addr)) % queue_size;
 
-            // Collect the packet: skip the first NET_HDR_LEN bytes (virtio_net_hdr).
+            // Collect the packet: skip the first NET_HDR_LEN bytes
+            // (virtio_net_hdr).
             let mut packet: Vec<u8> = Vec::new();
             let mut skipped: usize = 0;
             let mut desc_next = desc_head;
@@ -333,8 +334,8 @@ impl MemoryMapped for VirtioNet {
             debug!("virtio-net: probed by kernel (magic read)");
         }
         let q = self.q();
-        // Config space §5.1.4: MAC (6B) + status (2B) + max_virtqueue_pairs (2B) + mtu
-        // (2B)
+        // Config space §5.1.4: MAC (6B) + status (2B) + max_virtqueue_pairs
+        // (2B) + mtu (2B)
         let link_status: u8 = if self.backend.is_connected() {
             LINK_UP as u8
         } else {
@@ -399,7 +400,8 @@ impl MemoryMapped for VirtioNet {
         match offset {
             0x014..=0x017 => write_u32(offset, size, &mut self.device_features_sel, data)?,
             0x020..=0x023 => {
-                // DriverFeatures word selected by DriverFeaturesSel (0 = low 32 bits, 1 = high)
+                // DriverFeatures word selected by DriverFeaturesSel (0 = low 32
+                // bits, 1 = high)
                 let sel = self.driver_features_sel;
                 let mut word = (self.driver_features >> (u64::from(sel) * 32)) as u32;
                 write_u32(offset, size, &mut word, data)?;

@@ -200,8 +200,9 @@ mod tests {
         let mut wanted = s.borrow_mut().take_wanted();
         wanted.sort_unstable();
         assert_eq!(wanted, vec![0, 1]);
-        // Draining clears the list, so a block in flight is not asked for twice.
-        assert!(s.borrow_mut().take_wanted().is_empty());
+        // Draining clears the list, so a block in flight is not asked for
+        // twice.
+        assert_eq!(s.borrow_mut().take_wanted(), [] as [u64; 0]);
     }
 
     #[test]
@@ -259,7 +260,7 @@ mod tests {
         let mut inner = s.borrow_mut();
         inner.blocks.clear();
         assert!(inner.is_resident(0, BS as usize));
-        assert!(inner.take_wanted().is_empty());
+        assert_eq!(inner.take_wanted(), [] as [u64; 0]);
         drop(inner);
 
         let mut buf = [0u8; 512];

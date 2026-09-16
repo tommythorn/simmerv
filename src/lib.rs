@@ -19,6 +19,8 @@ pub mod serial_backend;
 pub mod speedometer;
 pub mod tlb;
 pub mod uop_cache;
+#[cfg(feature = "bb-trace")]
+pub mod uop_trace;
 pub mod vector;
 
 use crate::cpu::Cpu;
@@ -101,7 +103,8 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
         }
     };
 
-    // Walk the structure block looking for a node whose name starts with "memory".
+    // Walk the structure block looking for a node whose name starts with
+    // "memory".
     let mut pos = off_dt_struct;
     let mut depth = 0u32;
     let mut memory_depth = 0u32;
@@ -115,7 +118,8 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
         pos += 4;
         match token {
             1 => {
-                // FDT_BEGIN_NODE: null-terminated name follows, aligned to 4 bytes.
+                // FDT_BEGIN_NODE: null-terminated name follows, aligned to 4
+                // bytes.
                 let name_start = pos;
                 while pos < dtb.len() && dtb[pos] != 0 {
                     pos += 1;
@@ -137,14 +141,16 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
                 depth = depth.saturating_sub(1);
             }
             3 => {
-                // FDT_PROP: len (u32), nameoff (u32), value (len bytes, aligned).
+                // FDT_PROP: len (u32), nameoff (u32), value (len bytes,
+                // aligned).
                 if pos + 8 > dtb.len() {
                     bail!("found not reg here");
                 }
                 let len = read_u32(dtb, pos) as usize;
                 let nameoff = read_u32(dtb, pos + 4) as usize;
                 pos += 8;
-                // Patch: memory node, "reg" property, 2-cell address + 2-cell size = 16 bytes.
+                // Patch: memory node, "reg" property, 2-cell address + 2-cell
+                // size = 16 bytes.
                 if in_memory_node && nameoff == reg_nameoff && len == 16 {
                     if old.is_some() {
                         bail!("multiple memory entries");
@@ -254,8 +260,9 @@ pub struct Emulator {
     /// would mean re-reading a file the emulator was handed a copy of.
     dtb_source: Vec<u8>,
 
-    /// `Some(addr)` when the caller pinned the tree's address (`-d FILE,0xADDR`),
-    /// which also suppresses the memory-size patch, matching `setup_dtb_at`.
+    /// `Some(addr)` when the caller pinned the tree's address (`-d
+    /// FILE,0xADDR`), which also suppresses the memory-size patch, matching
+    /// `setup_dtb_at`.
     dtb_fixed_addr: Option<u64>,
 
     /// The tree as actually placed -- patched, with the ramdisk properties
@@ -291,8 +298,9 @@ impl Emulator {
         cache_mode: CacheMode,
     ) -> Self {
         let mut mmu = Mmu::new();
-        // RAM regions must be added before I/O devices so the dispatch fast-path
-        // hits on the first iteration.  Primary RAM first, then secondary.
+        // RAM regions must be added before I/O devices so the dispatch
+        // fast-path hits on the first iteration.  Primary RAM first,
+        // then secondary.
         mmu.add_memory(0x8000_0000, capacity);
         mmu.add_memory(0x7000_0000, 1024 * 1024);
         mmu.attach_uart(backend);
@@ -425,8 +433,8 @@ impl Emulator {
     /// When `tracing_flag` is set, prints a disassembly line for every
     /// instruction.
     pub fn run_program(&mut self) {
-        // Arm the cosim store log now that the ELF loader is done (its stores are
-        // excluded).
+        // Arm the cosim store log now that the ELF loader is done (its stores
+        // are excluded).
         crate::mmu::STORELOG_ARMED.store(true, Ordering::Relaxed);
         let mut s = String::new();
         loop {
@@ -611,8 +619,9 @@ impl Emulator {
                         .take()
                         .map(|b| Box::new(Uart::new(b, 0)) as Box<dyn crate::device::MemoryMapped>),
                     "VirtIO Block" => {
-                        // Two block disks share this name; pick the IRQ from the
-                        // saved MMIO window. `restore_state` overwrites it, but
+                        // Two block disks share this name; pick the IRQ from
+                        // the saved MMIO window.
+                        // `restore_state` overwrites it, but
                         // this keeps the fresh device self-consistent.
                         let second = range.start == Mmu::VIRTIO2_BASE;
                         let irq = if second {
@@ -801,6 +810,22 @@ impl Emulator {
         self.bb_cache.inserted_len()
     }
 
+    /// Distribution of *executed* block lengths, weighted by how often each
+    /// block ran; see [`crate::uop_cache::BbCache::dyn_len`].
+    #[must_use]
+    pub const fn bb_dyn_len_histogram(&self) -> &[u64; crate::uop_cache::MAX_BLOCK_LEN + 1] {
+        self.bb_cache.dyn_len()
+    }
+
+    /// Live directory usage `(live_blocks, stored_uops)`; see
+    /// [`crate::uop_cache::BbCache::residency`].
+    #[must_use]
+    pub fn bb_residency(&self) -> (usize, u64) { self.bb_cache.residency() }
+
+    /// Ring size in uops; see [`crate::uop_cache::BbCache::ring_uops`].
+    #[must_use]
+    pub const fn bb_ring_uops(&self) -> u64 { self.bb_cache.ring_uops() }
+
     /// Runs CPU one cycle
     pub fn tick(&mut self, n: usize) -> bool {
         // XXX We should be able to set this arbitrarily high, but we seem
@@ -885,7 +910,8 @@ impl Emulator {
         let ph_iter = elf_file.program_iter();
         log::info!("ELF program headers");
         // Tracked from the program headers, not the file length: `p_memsz`
-        // covers `.bss` and exceeds `p_filesz`, so a file's size bounds nothing.
+        // covers `.bss` and exceeds `p_filesz`, so a file's size bounds
+        // nothing.
         let mut span: Option<(u64, u64)> = None;
         for sect in ph_iter {
             if !matches!(sect.get_type(), Ok(xmas_elf::program::Type::Load)) {
@@ -1230,7 +1256,11 @@ impl Emulator {
         let growth = fdt::analyze_initrd_slot(&probe)?.growth();
         let base = match self.dtb_fixed_addr {
             Some(addr) => addr,
-            None => dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, probe.len() + growth),
+            None => dtb_end_of_ram(
+                0x8000_0000,
+                self.memory_bytes as usize,
+                probe.len() + growth,
+            ),
         };
 
         // Default placement is flush below the tree; a pinned address is used
@@ -1238,12 +1268,15 @@ impl Emulator {
         // not half-reserve the page beneath it.
         let start = match pinned {
             Some(addr) => addr & !(PAGE - 1),
-            None => base.checked_sub(len).map(|s| s & !(PAGE - 1)).ok_or_else(|| {
-                anyhow!(
-                    "initrd ({len} byte(s)) is larger than the {base:#x} bytes below \
+            None => base
+                .checked_sub(len)
+                .map(|s| s & !(PAGE - 1))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "initrd ({len} byte(s)) is larger than the {base:#x} bytes below \
                      the device tree; increase -m"
-                )
-            })?,
+                    )
+                })?,
         };
         let end = start + len;
         if end > base {
@@ -1270,11 +1303,12 @@ impl Emulator {
                 );
             }
         }
-        // Anything already loaded -- the firmware and the kernel.  The extent is
-        // tracked inside `load_image`, which is the only place that knows how
-        // far an ELF's segments reach (a file's length does not bound them).
-        // `image_extent` is the only honest bound on a loaded kernel: a file's
-        // length does not bound the footprint of an ELF's segments.
+        // Anything already loaded -- the firmware and the kernel.  The extent
+        // is tracked inside `load_image`, which is the only place that
+        // knows how far an ELF's segments reach (a file's length does
+        // not bound them). `image_extent` is the only honest bound on a
+        // loaded kernel: a file's length does not bound the footprint
+        // of an ELF's segments.
         if let Some((low, high)) = self
             .image_extent
             .filter(|&(low, high)| start < high && end > low)
@@ -1328,7 +1362,8 @@ impl Emulator {
         const MAGIC: u64 = 0x4942_534f;
         const VERSION: u64 = 2;
         const NEXT_MODE_S: u64 = 1;
-        // options: FLAG_NEXT_ADDR_VALID | FLAG_NEXT_MODE_VALID | FLAG_NEXT_ARG1_VALID
+        // options: FLAG_NEXT_ADDR_VALID | FLAG_NEXT_MODE_VALID |
+        // FLAG_NEXT_ARG1_VALID
         const OPTIONS: u64 = 7;
         let boot_hart: u64 = 0;
 

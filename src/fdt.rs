@@ -28,9 +28,11 @@
 //! depends on the tree's final size" and "the tree's contents depend on the
 //! ramdisk's address" in a single pass instead of iterating to a fixed point.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
+use anyhow::bail;
 
-/// Physical address the ramdisk starts at, as read by `early_init_dt_scan_chosen`.
+/// Physical address the ramdisk starts at, as read by
+/// `early_init_dt_scan_chosen`.
 pub const INITRD_START: &str = "linux,initrd-start";
 /// One past the ramdisk's last byte.
 pub const INITRD_END: &str = "linux,initrd-end";
@@ -47,14 +49,18 @@ const FDT_END: u32 = 9;
 const DEFAULT_ADDR_CELLS: u32 = 2;
 
 fn read_u32(data: &[u8], off: usize) -> u32 {
-    data.get(off..off + 4)
-        .map_or(0, |bytes| u32::from_be_bytes(bytes.try_into().unwrap_or([0; 4])))
+    data.get(off..off + 4).map_or(0, |bytes| {
+        u32::from_be_bytes(bytes.try_into().unwrap_or([0; 4]))
+    })
 }
 
 /// Offset of the NUL-terminated string starting at `off`, or `None` if it runs
 /// off the end of `data`.
 fn cstr_end(data: &[u8], off: usize) -> Option<usize> {
-    data.get(off..)?.iter().position(|&b| b == 0).map(|i| off + i)
+    data.get(off..)?
+        .iter()
+        .position(|&b| b == 0)
+        .map(|i| off + i)
 }
 
 /// Name of the property at `nameoff`, or `None` if it is out of range.
@@ -98,7 +104,8 @@ pub struct InitrdSlot {
     /// File offset of the strings block, and its length.
     off_dt_strings: usize,
     size_dt_strings: usize,
-    /// Length of the structure block, so a splice can be shown to stay inside it.
+    /// Length of the structure block, so a splice can be shown to stay inside
+    /// it.
     size_dt_struct: usize,
     /// `nameoff`s of names already present in the strings block, if any.
     start_nameoff: Option<usize>,
@@ -167,7 +174,8 @@ impl InitrdSlot {
         };
 
         // Assign each name its `nameoff`, appending only what is missing, and
-        // build the two property records in the same order so the offsets agree.
+        // build the two property records in the same order so the offsets
+        // agree.
         let mut strings_added = 0;
         let mut appended = Vec::new();
         let mut records = Vec::with_capacity(2 * (12 + cells * 4));
@@ -212,7 +220,8 @@ impl InitrdSlot {
         // `off_mem_rsvmap` and the version fields are untouched, and the
         // zero-slack relation `totalsize == off_dt_strings + size_dt_strings`
         // is preserved exactly.
-        out[4..8].copy_from_slice(&((dtb.len() + struct_added + strings_added) as u32).to_be_bytes());
+        out[4..8]
+            .copy_from_slice(&((dtb.len() + struct_added + strings_added) as u32).to_be_bytes());
         out[12..16].copy_from_slice(&((self.off_dt_strings + struct_added) as u32).to_be_bytes());
         out[32..36].copy_from_slice(&((self.size_dt_strings + strings_added) as u32).to_be_bytes());
         out[36..40].copy_from_slice(&((self.size_dt_struct + struct_added) as u32).to_be_bytes());
@@ -263,8 +272,8 @@ pub fn mem_reserve_ranges(dtb: &[u8]) -> Vec<(u64, u64)> {
 /// The edit splices into the structure block and assumes the strings block
 /// follows it in the same buffer, so a shift moves both and every existing
 /// `nameoff` -- an offset from the strings block's start -- keeps resolving.
-/// A tree with the blocks the other way round would need each `nameoff` rebased;
-/// refuse rather than guess.
+/// A tree with the blocks the other way round would need each `nameoff`
+/// rebased; refuse rather than guess.
 fn validate_header(dtb: &[u8]) -> Result<(usize, usize, usize, usize)> {
     let totalsize = read_u32(dtb, 4) as usize;
     let off_dt_struct = read_u32(dtb, 8) as usize;
@@ -319,10 +328,16 @@ fn validate_header(dtb: &[u8]) -> Result<(usize, usize, usize, usize)> {
 /// if `/chosen` already defines either ramdisk property.
 pub fn analyze_initrd_slot(dtb: &[u8]) -> Result<InitrdSlot> {
     if dtb.len() < 40 {
-        bail!("device tree is {} bytes, too short for an FDT header", dtb.len());
+        bail!(
+            "device tree is {} bytes, too short for an FDT header",
+            dtb.len()
+        );
     }
     if read_u32(dtb, 0) != FDT_MAGIC {
-        bail!("device tree has bad magic {:#010x} (expected {FDT_MAGIC:#010x})", read_u32(dtb, 0));
+        bail!(
+            "device tree has bad magic {:#010x} (expected {FDT_MAGIC:#010x})",
+            read_u32(dtb, 0)
+        );
     }
 
     let (off_dt_struct, off_dt_strings, size_dt_strings, size_dt_struct) = validate_header(dtb)?;
@@ -351,7 +366,8 @@ pub fn analyze_initrd_slot(dtb: &[u8]) -> Result<InitrdSlot> {
                 let name = dtb.get(pos..end).unwrap_or(&[]);
                 pos = (end + 1 + 3) & !3;
                 depth += 1;
-                // `/chosen` is a direct child of the root, so it opens at depth 2.
+                // `/chosen` is a direct child of the root, so it opens at depth
+                // 2.
                 if depth == 2 && name == b"chosen" {
                     chosen_depth = Some(depth);
                 }

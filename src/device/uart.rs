@@ -209,7 +209,8 @@ impl MemoryMapped for Uart {
                 (0, true) => self.dll = byte,
                 (1, true) => self.dlm = byte,
                 (0, false) => {
-                    // THR write: transmit. Keep regs[RBR_THR] synced to FIFO front.
+                    // THR write: transmit. Keep regs[RBR_THR] synced to FIFO
+                    // front.
                     if let Some(b) = &mut self.backend {
                         b.put_byte(byte);
                     }
@@ -254,10 +255,11 @@ impl MemoryMapped for Uart {
             b.poll_input();
         }
         // Move buffered input into the FIFO only while there is room. When the
-        // FIFO fills we stop pulling so the excess stays buffered in the backend
-        // (delivered on later ticks as the guest drains the FIFO) rather than
-        // being read out and dropped — otherwise a paste longer than the FIFO
-        // would lose everything past the first FIFO_CAPACITY bytes.
+        // FIFO fills we stop pulling so the excess stays buffered in the
+        // backend (delivered on later ticks as the guest drains the
+        // FIFO) rather than being read out and dropped — otherwise a
+        // paste longer than the FIFO would lose everything past the
+        // first FIFO_CAPACITY bytes.
         while self.rx_fifo.len() < FIFO_CAPACITY {
             let value = self.backend.as_mut().map_or(0, |b| b.get_input());
             if value == 0 {

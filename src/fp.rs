@@ -886,8 +886,8 @@ pub trait Sf {
         let rnd_bits;
 
         if a_exp <= 0 {
-            // Note: we set the underflow flag if the rounded result is subnormal and
-            // inexact
+            // Note: we set the underflow flag if the rounded result is
+            // subnormal and inexact
             let is_subnormal = a_exp < 0 || (a_mant + addend) < (1 << (Self::N - 1));
             let diff = 1 - a_exp;
             a_mant = Self::rshift_rnd(a_mant, diff);
@@ -1169,8 +1169,9 @@ pub fn fcvt_h_s(a: u64, rm: RoundingMode) -> (u64, u8) {
         (exp32 as i64 - 127 + 15, (1u64 << Sf32::MANT_SIZE) | mant32)
     };
 
-    // Shift 24-bit f32 mantissa (MSB at bit 23) right to 15-bit Sf16 form (MSB at
-    // bit 14). shift = 23 - 14 = 9; lower 9 bits collapse into sticky LSB.
+    // Shift 24-bit f32 mantissa (MSB at bit 23) right to 15-bit Sf16 form (MSB
+    // at bit 14). shift = 23 - 14 = 9; lower 9 bits collapse into sticky
+    // LSB.
     let shift = Sf32::MANT_SIZE - Sf16::IMANT_SIZE;
     let mask = (1u64 << shift) - 1;
     let a_mant = (a_mant_full >> shift) | u64::from((a_mant_full & mask) != 0);
@@ -1243,8 +1244,9 @@ pub fn fcvt_h_d(a: u64, rm: RoundingMode) -> (u64, u8) {
         (exp64 as i64 - 1023 + 15, (1u64 << Sf64::MANT_SIZE) | mant64)
     };
 
-    // Shift 53-bit f64 mantissa (MSB at bit 52) right to 15-bit Sf16 form (MSB at
-    // bit 14). shift = 52 - 14 = 38; lower 38 bits collapse into sticky LSB.
+    // Shift 53-bit f64 mantissa (MSB at bit 52) right to 15-bit Sf16 form (MSB
+    // at bit 14). shift = 52 - 14 = 38; lower 38 bits collapse into sticky
+    // LSB.
     let shift = Sf64::MANT_SIZE - Sf16::IMANT_SIZE;
     let mask = (1u64 << shift) - 1;
     let a_mant = (a_mant_full >> shift) | u64::from((a_mant_full & mask) != 0);

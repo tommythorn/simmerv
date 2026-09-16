@@ -60,19 +60,19 @@ fn handle(stream: TcpStream, image: &[u8], hits: &AtomicUsize) -> std::io::Resul
         if line.is_empty() {
             break; // end of headers
         }
-        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("range:") {
-            if let Some(spec) = rest.trim().strip_prefix("bytes=") {
-                let mut parts = spec.split('-');
-                let a: u64 = parts
-                    .next()
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0);
-                let b: u64 = parts
-                    .next()
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(image.len() as u64 - 1);
-                range = Some((a, b));
-            }
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("range:")
+            && let Some(spec) = rest.trim().strip_prefix("bytes=")
+        {
+            let mut parts = spec.split('-');
+            let a: u64 = parts
+                .next()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            let b: u64 = parts
+                .next()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(image.len() as u64 - 1);
+            range = Some((a, b));
         }
     }
 

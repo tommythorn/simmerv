@@ -344,7 +344,7 @@ address. `vmnet` shared mode requires elevated privileges, so run under
 
 ```sh
 $ cargo build -r
-$ sudo ./target/release/simmerv_cli --vmnet linux/fw_payload.bin,0x80000000 -f linux/rootfs.img
+$ sudo ./target/release/simmerv-cli --vmnet linux/fw_payload.bin,0x80000000 -f linux/rootfs.img
 ```
 
 The guest receives an address on vmnet's subnet (typically `192.168.x.x`) with

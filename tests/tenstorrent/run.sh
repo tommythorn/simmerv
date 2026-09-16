@@ -23,7 +23,7 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 suite=${SUITE:-$here/riscv_arch_tests}
-sim=${SIM:-$root/target/release/simmerv_cli}
+sim=${SIM:-$root/target/release/simmerv-cli}
 jobs=${JOBS:-$(( $(nproc) - 2 ))}
 timeout_s=${TIMEOUT:-60}
 out=${OUT:-$here/out}

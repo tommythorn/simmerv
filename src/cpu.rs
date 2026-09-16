@@ -506,6 +506,13 @@ pub struct Cpu {
     // restored counters with the whole history of whatever cache it lands on.
     hpm_rebase: bool,
 
+    // Uop-cache reference-stream recorder; see `crate::uop_trace`.  `None`
+    // unless `SIMMERV_TRACE` names an output path, and the whole field is
+    // compiled out without the `bb-trace` feature, so the hot loop pays
+    // nothing in a normal build.
+    #[cfg(feature = "bb-trace")]
+    tracer: Option<crate::uop_trace::UopTracer>,
+
     pub speedometer: Speedometer,
     pub speedometer_flag: Arc<AtomicBool>,
     speedometer_next_cycle: u64,
@@ -565,6 +572,8 @@ impl Cpu {
             hpm_bb: crate::uop_cache::UopCacheStats::default(),
             hpm_last: [0; csr::HPM_LAST + 1],
             hpm_active: false,
+            #[cfg(feature = "bb-trace")]
+            tracer: crate::uop_trace::UopTracer::from_env(),
             hpm_rebase: false,
             speedometer: Speedometer::new(),
             speedometer_flag: Arc::new(AtomicBool::new(false)),
@@ -823,7 +832,71 @@ impl Cpu {
         clippy::cast_possible_truncation,
         clippy::too_many_lines
     )]
+    /// Record one block execution into the reference-stream tracer.
+    ///
+    /// `len == 0` is an escape code for "probed and missed, but did not
+    /// insert": a block that faults part-way through is executed and counted as
+    /// a miss, yet deliberately not cached (`step_block` returns before
+    /// `bb.insert`), so a replay that assumed every miss inserts would
+    /// over-insert.  Real blocks always execute at least one uop, so zero is
+    /// free to mean this.
+    #[cfg(feature = "bb-trace")]
+    #[inline]
+    fn trace_ref(&mut self, key: u64, len: u32) {
+        if let Some(t) = self.tracer.as_mut() {
+            t.record(self.cycle, key, len);
+        }
+    }
+
+    /// Record a pending cache invalidation into the reference-stream tracer.
+    /// A replay that missed these would keep entries the emulator dropped, and
+    /// report a miss count that is too *low* -- on a Linux boot the full
+    /// flushes alone discard more live blocks than the whole miss count.
+    #[cfg(feature = "bb-trace")]
+    #[inline]
+    fn trace_flush(&mut self, kind: IcacheFlushKind) {
+        use crate::uop_trace::Flush;
+        let f = match kind {
+            IcacheFlushKind::None => return,
+            IcacheFlushKind::Full => Flush::Full,
+            IcacheFlushKind::Asid(a) => Flush::Asid(a),
+            IcacheFlushKind::Vpage(p) => Flush::Vpage(p),
+            IcacheFlushKind::VpageAsid(p, a) => Flush::VpageAsid(p, a),
+        };
+        if let Some(t) = self.tracer.as_mut() {
+            t.record_flush(self.cycle, f);
+        }
+    }
+
+    /// Record a workload boundary -- a subtest banner -- into the reference
+    /// stream, so a replay can attribute its counters to the interval the work
+    /// came from instead of reporting one number for a whole suite.  On GB5
+    /// that distinction is the difference between a report and a number:
+    /// Clang is 1.4% of the cycles but 93% of the conflict misses, so a
+    /// suite-wide aggregate is Clang plus forty billion free lookups.
+    // Only trivially const with `bb-trace` off; with it on this takes the
+    // tracer's `&mut` and records.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn trace_mark(&mut self, name: &str) {
+        #[cfg(feature = "bb-trace")]
+        if let Some(t) = self.tracer.as_mut() {
+            t.record_mark(self.cycle, name);
+        }
+        #[cfg(not(feature = "bb-trace"))]
+        let _ = name;
+    }
+
+    // The block executor is one function on purpose: the hit path, the miss
+    // path and the fetch loop share the PC, the uop and the exception state,
+    // and splitting them would put that traffic through arguments in the
+    // hottest loop in the emulator.
+    #[allow(clippy::too_many_lines)]
     fn step_block(&mut self, bb: &mut BbCache) -> Result<u32, (Exception, u64)> {
+        // Captured before the match below consumes it, so the tracer can report
+        // the invalidation at the cycle of the probe it precedes rather than
+        // one cycle earlier.
+        #[cfg(feature = "bb-trace")]
+        let pending_flush = self.icache_flush;
         // Apply any pending icache flush.
         match self.icache_flush {
             IcacheFlushKind::None => {}
@@ -855,6 +928,9 @@ impl Cpu {
 
         self.cycle = self.cycle.wrapping_add(1);
 
+        #[cfg(feature = "bb-trace")]
+        self.trace_flush(pending_flush);
+
         // WFI fast-path
         if self.wfi {
             if self.mmu.mip & self.csr.mie != 0 {
@@ -883,8 +959,8 @@ impl Cpu {
 
         // ── Cache hit path ────────────────────────────────────────────────
         if let Some(slot) = bb.probe(cache_key) {
-            // Read len/truncated: temporary borrows of bb.data, released immediately
-            // since `u8` and `bool` are Copy.
+            // Read len/truncated: temporary borrows of bb.data, released
+            // immediately since `u8` and `bool` are Copy.
             let mut n_executed: u32 = 0;
             let mut untaken_branches: u64 = 0;
             let mut exception: Option<(Exception, u64)> = None;
@@ -974,6 +1050,10 @@ impl Cpu {
             bb.untaken_branches += untaken_branches;
             bb.insn_hits += u64::from(n_executed);
             bb.block_hits += 1;
+            #[cfg(feature = "bb-hist")]
+            bb.record_dyn_len(n_executed as usize);
+            #[cfg(feature = "bb-trace")]
+            self.trace_ref(cache_key, n_executed);
             // Batch seqno update (only used for snapshots, not CSRs)
             self.seqno = self.seqno.wrapping_add(n_executed as usize);
             // Extra cycles for instructions beyond the first.
@@ -1014,9 +1094,19 @@ impl Cpu {
 
             // Fetch instruction (4 bytes; actual size determined after decode).
             let insn = match self.memop_code(fetch_pc) {
+                // `memop_code` fetches four bytes, so the value is a u32 that
+                // happens to travel in a u64.
+                #[allow(clippy::cast_possible_truncation)]
                 Ok(v) => v as u32,
                 Err(e) => {
                     if i == 0 {
+                        // The probe already happened and missed; it just did
+                        // not insert.  Same escape code
+                        // as the exception path below,
+                        // or the trace would be short one lookup per such
+                        // fault.
+                        #[cfg(feature = "bb-trace")]
+                        self.trace_ref(cache_key, 0);
                         return Err((e, fetch_pc));
                     }
                     break;
@@ -1034,6 +1124,9 @@ impl Cpu {
 
             if matches!(uop.op, Op::CUnimp | Op::End) {
                 if i == 0 {
+                    // Probe missed, nothing cached -- see the fetch-fault arm.
+                    #[cfg(feature = "bb-trace")]
+                    self.trace_ref(cache_key, 0);
                     return Err((
                         Exception {
                             trap: Trap::IllegalInstruction,
@@ -1085,11 +1178,19 @@ impl Cpu {
 
         if let Some(err) = exception {
             // Do not cache blocks that raised an exception.
+            //
+            // The lookup still happened, so it goes into the trace marked as a
+            // non-inserting miss (`len == 0`); a replay that assumed every miss
+            // inserts would otherwise cache a block the emulator never did.
+            #[cfg(feature = "bb-trace")]
+            self.trace_ref(cache_key, 0);
             return Err(err);
         }
 
         // Cache the complete block.
         bb.insert(cache_key, &block);
+        #[cfg(feature = "bb-trace")]
+        self.trace_ref(cache_key, n_executed);
         self.cycle = self
             .cycle
             .wrapping_add(u64::from(n_executed).saturating_sub(1));
@@ -1105,7 +1206,8 @@ impl Cpu {
     /// page fault, etc.).
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn step_single(&mut self) -> Result<(), Exception> {
-        // Apply any pending icache flush (no cache to flush, but clear the flag).
+        // Apply any pending icache flush (no cache to flush, but clear the
+        // flag).
         self.icache_flush = IcacheFlushKind::None;
 
         self.cycle = self.cycle.wrapping_add(1);
@@ -1192,9 +1294,10 @@ impl Cpu {
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
             cap.mem_pa = self.mmu.cosim_mem_pa;
-            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
-            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
-            // reading a device register has side effects and would fork REF from DUT.
+            // Read back the aligned word ONLY for a RAM store: this catches
+            // wrong bytes and wrong byte-enables, not merely a
+            // wrong address.  Never for MMIO -- reading a device
+            // register has side effects and would fork REF from DUT.
             cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
                 self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
             } else {
@@ -1215,9 +1318,10 @@ impl Cpu {
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
             cap.mem_pa = self.mmu.cosim_mem_pa;
-            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
-            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
-            // reading a device register has side effects and would fork REF from DUT.
+            // Read back the aligned word ONLY for a RAM store: this catches
+            // wrong bytes and wrong byte-enables, not merely a
+            // wrong address.  Never for MMIO -- reading a device
+            // register has side effects and would fork REF from DUT.
             cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
                 self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
             } else {
@@ -1239,9 +1343,11 @@ impl Cpu {
                 cap.mem_kind = self.mmu.cosim_mem_kind;
                 cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
                 cap.mem_pa = self.mmu.cosim_mem_pa;
-                // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
-                // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
-                // reading a device register has side effects and would fork REF from DUT.
+                // Read back the aligned word ONLY for a RAM store: this catches
+                // wrong bytes and wrong byte-enables, not
+                // merely a wrong address.  Never for MMIO --
+                // reading a device register has side effects and would fork REF
+                // from DUT.
                 cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
                     self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
                 } else {
@@ -1267,9 +1373,10 @@ impl Cpu {
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
             cap.mem_pa = self.mmu.cosim_mem_pa;
-            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
-            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
-            // reading a device register has side effects and would fork REF from DUT.
+            // Read back the aligned word ONLY for a RAM store: this catches
+            // wrong bytes and wrong byte-enables, not merely a
+            // wrong address.  Never for MMIO -- reading a device
+            // register has side effects and would fork REF from DUT.
             cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
                 self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
             } else {
@@ -1285,10 +1392,12 @@ impl Cpu {
         if result.is_err() {
             let mut exc = result.to_exception();
             // mtval convention: the sharded-OoO (probe) core reports mtval=0 on
-            // illegal-instruction -- carrying the raw insn bits to the (non-speculative)
-            // commit point in an OoO pipeline is real cost, and tval=0 is spec-conformant.
-            // Force 0 here to match it (overrides any insn set by new_execute's checks).
-            // (Legacy smolrv64 inner core used the insn word; its cosim would differ here.)
+            // illegal-instruction -- carrying the raw insn bits to the
+            // (non-speculative) commit point in an OoO pipeline is
+            // real cost, and tval=0 is spec-conformant.
+            // Force 0 here to match it (overrides any insn set by new_execute's
+            // checks). (Legacy smolrv64 inner core used the insn
+            // word; its cosim would differ here.)
             if matches!(exc.trap, Trap::IllegalInstruction) {
                 exc.tval = 0;
             }
@@ -1301,9 +1410,10 @@ impl Cpu {
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
             cap.mem_pa = self.mmu.cosim_mem_pa;
-            // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
-            // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
-            // reading a device register has side effects and would fork REF from DUT.
+            // Read back the aligned word ONLY for a RAM store: this catches
+            // wrong bytes and wrong byte-enables, not merely a
+            // wrong address.  Never for MMIO -- reading a device
+            // register has side effects and would fork REF from DUT.
             cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
                 self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
             } else {
@@ -1335,9 +1445,10 @@ impl Cpu {
         cap.mem_kind = self.mmu.cosim_mem_kind;
         cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
         cap.mem_pa = self.mmu.cosim_mem_pa;
-        // Read back the aligned word ONLY for a RAM store: this catches wrong bytes
-        // and wrong byte-enables, not merely a wrong address.  Never for MMIO --
-        // reading a device register has side effects and would fork REF from DUT.
+        // Read back the aligned word ONLY for a RAM store: this catches wrong
+        // bytes and wrong byte-enables, not merely a wrong address.
+        // Never for MMIO -- reading a device register has side effects
+        // and would fork REF from DUT.
         cap.mem_rdback = if self.mmu.cosim_mem_kind == 2 && self.mmu.cosim_mem_ram {
             self.mmu.load_phys_u64(self.mmu.cosim_mem_pa & !7)
         } else {
@@ -1354,10 +1465,11 @@ impl Cpu {
         use self::Trap::SupervisorExternalInterrupt;
         use self::Trap::SupervisorSoftwareInterrupt;
         use self::Trap::SupervisorTimerInterrupt;
-        // Cosim DUT-follow: simmerv's mip/mie are retire-stale vs the DUT, so it does
-        // NOT decide interrupts itself -- it takes EXACTLY the interrupt the DUT took
-        // this retire (cosim_forced_cause), forced through handle_trap's enable checks
-        // (likewise stale). 0 -> the DUT took none -> take none.
+        // Cosim DUT-follow: simmerv's mip/mie are retire-stale vs the DUT, so
+        // it does NOT decide interrupts itself -- it takes EXACTLY the
+        // interrupt the DUT took this retire (cosim_forced_cause),
+        // forced through handle_trap's enable checks (likewise stale).
+        // 0 -> the DUT took none -> take none.
         if self.cosim_mode {
             if self.cosim_forced_cause == 0 {
                 return;
@@ -1446,10 +1558,11 @@ impl Cpu {
             PrivMode::U
         };
 
-        // A trap never transitions to a less-privileged mode than the one in which it
-        // occurred: medeleg/sedeleg lower an *exception* handler from M toward the
-        // current mode, but never below it.  In particular a fault taken in M-mode --
-        // e.g. an MPRV load/store page fault while OpenSBI accesses S/U memory on
+        // A trap never transitions to a less-privileged mode than the one in
+        // which it occurred: medeleg/sedeleg lower an *exception*
+        // handler from M toward the current mode, but never below it.
+        // In particular a fault taken in M-mode -- e.g. an MPRV
+        // load/store page fault while OpenSBI accesses S/U memory on
         // behalf of the kernel -- is handled in M-mode regardless of
         // medeleg[cause].  (An interrupt expresses the same rule by staying
         // pending instead; that is the `new_priv_encoding <
@@ -1458,9 +1571,9 @@ impl Cpu {
             new_priv_mode = self.mmu.prv;
         }
 
-        // Cosim DUT-follow: a forced interrupt was already validated takeable by the
-        // DUT, and simmerv's enable bits are retire-stale -- so skip the reject
-        // checks entirely.
+        // Cosim DUT-follow: a forced interrupt was already validated takeable
+        // by the DUT, and simmerv's enable bits are retire-stale -- so
+        // skip the reject checks entirely.
         if is_interrupt && !self.cosim_mode {
             let new_priv_encoding = u64::from(new_priv_mode);
             // Second, ignore the interrupt if it's disabled by some conditions
@@ -1497,7 +1610,8 @@ impl Cpu {
             // than current privilege level
             // 2. Interrupt is always disabled if new privilege level is lower
             // than current privilege level
-            // 3. Interrupt is enabled if xIE in xstatus is 1 where x is privilege level
+            // 3. Interrupt is enabled if xIE in xstatus is 1 where x is
+            //    privilege level
             // and new privilege level equals to current privilege level
 
             if new_priv_encoding < current_priv_encoding
@@ -1586,16 +1700,16 @@ impl Cpu {
             PrivMode::M => {
                 let status = self.read_csr_raw(Csr::Mstatus);
                 let mie = (status >> 3) & 1;
-                // clear MIE[3], override MPIE[7] with MIE[3], override MPP[12:11] with current
-                // privilege encoding
+                // clear MIE[3], override MPIE[7] with MIE[3], override
+                // MPP[12:11] with current privilege encoding
                 let new_status = (status & !0x1888) | (mie << 7) | (current_priv_encoding << 11);
                 self.write_csr_raw(Csr::Mstatus, new_status);
             }
             PrivMode::S => {
                 let status = self.read_csr_raw(Csr::Sstatus);
                 let sie = (status >> 1) & 1;
-                // clear SIE[1], override SPIE[5] with SIE[1], override SPP[8] with current
-                // privilege encoding
+                // clear SIE[1], override SPIE[5] with SIE[1], override SPP[8]
+                // with current privilege encoding
                 let new_status =
                     (status & !0x122) | (sie << 5) | ((current_priv_encoding & 1) << 8);
                 self.write_csr_raw(Csr::Sstatus, new_status);
@@ -1762,10 +1876,11 @@ impl Cpu {
             _ => None,
         };
 
-        // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode only.
-        // The DUTs (SmolRV64, probe) implement 0 PMP entries: reads return 0, writes
-        // ignored. A nonzero readback would make OpenSBI see PMP present and attempt
-        // root-domain hart isolation, which the DUTs (no PMP) skip -> boot divergence.
+        // PMP: pmpcfg0-15 (0x3A0-0x3AF) and pmpaddr0-63 (0x3B0-0x3EF) — M-mode
+        // only. The DUTs (SmolRV64, probe) implement 0 PMP entries:
+        // reads return 0, writes ignored. A nonzero readback would make
+        // OpenSBI see PMP present and attempt root-domain hart
+        // isolation, which the DUTs (no PMP) skip -> boot divergence.
         if matches!(csrno, 0x3A0..=0x3EF) {
             if u64::from(self.mmu.prv) < 3 {
                 return illegal;
@@ -1773,12 +1888,14 @@ impl Cpu {
             return Ok(0);
         }
 
-        // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31 (0xB03-0xB1F,
-        // M-mode), mhpmevent3-31 (0x323-0x33F, M-mode). Counters HPM_FIRST..=HPM_LAST
-        // are implemented and count the events named in csr::HPM_EV_*; the rest are
-        // hardwired 0 (which is also how OpenSBI discovers how many exist -- it
-        // writes a value and checks the read-back). These count at a model-specific
-        // rate, so in cosim the DUT arms its read value and the two models agree.
+        // Zihpm: hpmcounter3-31 (0xC03-0xC1F, U-mode), mhpmcounter3-31
+        // (0xB03-0xB1F, M-mode), mhpmevent3-31 (0x323-0x33F, M-mode).
+        // Counters HPM_FIRST..=HPM_LAST are implemented and count the
+        // events named in csr::HPM_EV_*; the rest are hardwired 0
+        // (which is also how OpenSBI discovers how many exist -- it
+        // writes a value and checks the read-back). These count at a
+        // model-specific rate, so in cosim the DUT arms its read value
+        // and the two models agree.
         if matches!(csrno, 0xC03..=0xC1F) {
             if self.mmu.prv != PrivMode::M {
                 let bit = 1u32 << (csrno - 0xC00);
@@ -1960,6 +2077,7 @@ impl Cpu {
                 let value = value & !((SATP_ASID_MASK << SATP_ASID_SHIFT) & !asid_keep);
                 let old_satp = self.mmu.satp;
                 self.mmu.satp = value;
+                self.mmu.record_satp(value);
                 // Both the TLBs and the uop cache are ASID-tagged -- entries
                 // carry the ASID and a lookup only matches its own -- so
                 // switching to a *different* ASID cannot alias and needs no
@@ -1968,9 +2086,10 @@ impl Cpu {
                 //
                 // What does need one:
                 //   * a MODE change, which reinterprets every entry;
-                //   * a PPN change that keeps the same ASID, i.e. software reusing an ASID for
-                //     a different address space.  The spec obliges it to announce that with
-                //     SFENCE.VMA, so this is belt-and-braces, but it is rare enough to be free.
+                //   * a PPN change that keeps the same ASID, i.e. software
+                //     reusing an ASID for a different address space.  The spec
+                //     obliges it to announce that with SFENCE.VMA, so this is
+                //     belt-and-braces, but it is rare enough to be free.
                 let field = |v: u64, sh: u64, m: u64| (v >> sh) & m;
                 let mode_changed = field(old_satp, SATP_MODE_SHIFT, SATP_MODE_MASK)
                     != field(value, SATP_MODE_SHIFT, SATP_MODE_MASK);
@@ -2620,13 +2739,14 @@ impl Cpu {
 
         let is_mmio = addr.mem_idx == DataAddr::NO_RAM;
         // cosim: record the PA this load resolved to (see Mmu::cosim_mem_pa).
-        // FIRST access wins.  One retired instruction can decompose into several
-        // accesses here while the DUT's LSU performs exactly one and reports
-        // the address it translated -- the first.  `cbo.zero` is the case that
-        // found this: the ISS zeroes a 64-byte block as eight 8-byte stores, so
-        // last-wins reported base+0x38 against the DUT's block base.
-        // First-wins makes the two models comparable with no special case,
-        // and it is also the right answer for a page-spanning access.
+        // FIRST access wins.  One retired instruction can decompose into
+        // several accesses here while the DUT's LSU performs exactly
+        // one and reports the address it translated -- the first.
+        // `cbo.zero` is the case that found this: the ISS zeroes a
+        // 64-byte block as eight 8-byte stores, so last-wins reported
+        // base+0x38 against the DUT's block base. First-wins makes the
+        // two models comparable with no special case, and it is also
+        // the right answer for a page-spanning access.
         if self.mmu.cosim_mem_kind == 0 {
             self.mmu.cosim_mem_pa = addr.pa;
             self.mmu.cosim_mem_kind = 1;
@@ -2634,8 +2754,9 @@ impl Cpu {
         }
         let result =
             if is_mmio {
-                // Perform the MMIO read for its side effects, then let the DUT's
-                // armed value win (device-register bits are model-specific).
+                // Perform the MMIO read for its side effects, then let the
+                // DUT's armed value win (device-register bits
+                // are model-specific).
                 let model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
                     trap: Trap::LoadAccessFault,
                     tval: va,
@@ -2715,15 +2836,16 @@ impl Cpu {
 
         let addr = self.mmu.translate_data_address(va, Write, false)?;
         // cosim: record the PA this store resolved to (see Mmu::cosim_mem_pa).
-        // FIRST access wins -- see the load site for why (`cbo.zero` is eight stores
-        // here and one block operation in the DUT).
+        // FIRST access wins -- see the load site for why (`cbo.zero` is eight
+        // stores here and one block operation in the DUT).
         if self.mmu.cosim_mem_kind == 0 {
             self.mmu.cosim_mem_pa = addr.pa;
             self.mmu.cosim_mem_kind = 2;
             self.mmu.cosim_mem_ram = addr.mem_idx != DataAddr::NO_RAM;
         }
 
-        // cosim store-stream log (VIRTUAL address -> frame-allocation-independent)
+        // cosim store-stream log (VIRTUAL address ->
+        // frame-allocation-independent)
         if crate::mmu::storelog_active() {
             let m = if size >= 8 {
                 u64::MAX
@@ -2755,7 +2877,8 @@ impl Cpu {
             })
     }
 
-    // Slow path where we either span multiple pages and/or access outside memory
+    // Slow path where we either span multiple pages and/or access outside
+    // memory
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn memop_slow(
         &mut self,
@@ -3055,14 +3178,25 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         // when the enable bits are clear; we never do.  Safe only because
         // OpenSBI sets menvcfg before S-mode.  See MENVCFG_STCE in csr.rs.
         Op::CNop
-        | Op::SfenceWInval
-        | Op::SfenceInvalIr
         | Op::CboInval
         | Op::CboClean
         | Op::CboFlush
         | Op::PrefetchI
         | Op::PrefetchR
         | Op::PrefetchW => ExecOut::ok(0),
+        // Svinval's two bookends.  They order the SINVAL.VMA batch but have no
+        // effect a functional model needs to implement, so they are counted and
+        // otherwise dropped -- unlike the ops above they are not no-ops in the
+        // architecture, and the pair says whether the guest is using the
+        // batching sequence at all.
+        Op::SfenceWInval => {
+            cpu.mmu.sfence_w_inval += 1;
+            ExecOut::ok(0)
+        }
+        Op::SfenceInvalIr => {
+            cpu.mmu.sfence_inval_ir += 1;
+            ExecOut::ok(0)
+        }
         Op::CEbreak => ExecOut::err(Trap::Breakpoint, insn_addr),
 
         Op::Lui | Op::CLui => ExecOut::ok(uop.imm64()),
@@ -3236,7 +3370,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data | s1, data, next_insn_addr(insn_addr, uop))
+                csr_write_out(
+                    cpu,
+                    uop.imm as u16,
+                    data | s1,
+                    data,
+                    next_insn_addr(insn_addr, uop),
+                )
             }
         }
         Op::Csrrc => {
@@ -3244,7 +3384,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data & !s1, data, next_insn_addr(insn_addr, uop))
+                csr_write_out(
+                    cpu,
+                    uop.imm as u16,
+                    data & !s1,
+                    data,
+                    next_insn_addr(insn_addr, uop),
+                )
             }
         }
         Op::Csrrwi => {
@@ -3253,14 +3399,26 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             } else {
                 etry!(cpu.read_csr(uop.imm as u16))
             };
-            csr_write_out(cpu, uop.imm as u16, uop.rs1.get() as u64, res, next_insn_addr(insn_addr, uop))
+            csr_write_out(
+                cpu,
+                uop.imm as u16,
+                uop.rs1.get() as u64,
+                res,
+                next_insn_addr(insn_addr, uop),
+            )
         }
         Op::Csrrsi => {
             let data = etry!(cpu.read_csr(uop.imm as u16));
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data | uop.rs1.get() as u64, data, next_insn_addr(insn_addr, uop))
+                csr_write_out(
+                    cpu,
+                    uop.imm as u16,
+                    data | uop.rs1.get() as u64,
+                    data,
+                    next_insn_addr(insn_addr, uop),
+                )
             }
         }
         Op::Csrrci => {
@@ -3268,7 +3426,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             if uop.rs1.get() == 0 {
                 ExecOut::ok(data)
             } else {
-                csr_write_out(cpu, uop.imm as u16, data & !(uop.rs1.get() as u64), data, next_insn_addr(insn_addr, uop))
+                csr_write_out(
+                    cpu,
+                    uop.imm as u16,
+                    data & !(uop.rs1.get() as u64),
+                    data,
+                    next_insn_addr(insn_addr, uop),
+                )
             }
         }
         // RV32M
@@ -3499,16 +3663,17 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // RV32F
         Op::Flw => {
-            // ro-check may trap (FP off); the load may page-fault. Dirty FS only AFTER the
-            // value reaches the f-reg -- a faulting load writes nothing, so must not dirty.
+            // ro-check may trap (FP off); the load may page-fault. Dirty FS
+            // only AFTER the value reaches the f-reg -- a faulting
+            // load writes nothing, so must not dirty.
             etry!(cpu.check_float_access_ro(0));
             let v = etry!(cpu.memop_read(s1, uop.imm64(), 4)) | fp::NAN_BOX_F32;
             cpu.mark_fp_dirty();
             ExecOut::ok(v)
         }
         Op::Fsw => {
-            // FP store READS an f-reg (does not modify FP state) -> access-check only, no
-            // FS-dirty.
+            // FP store READS an f-reg (does not modify FP state) ->
+            // access-check only, no FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             etry!(cpu.memop_write(s1, uop.imm64(), s2, 4));
             ExecOut::ok(0)
@@ -3520,8 +3685,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(v)
         }
         Op::Fsh => {
-            // FP store READS an f-reg (does not modify FP state) -> access-check only, no
-            // FS-dirty.
+            // FP store READS an f-reg (does not modify FP state) ->
+            // access-check only, no FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             etry!(cpu.memop_write(s1, uop.imm64(), s2, 2));
             ExecOut::ok(0)
@@ -3605,14 +3770,14 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf_w(cvt_sf32_u32(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvXW => {
-            // FMV.X.W READS an f-reg (does not modify FP state) -> access-check only, no
-            // FS-dirty.
+            // FMV.X.W READS an f-reg (does not modify FP state) -> access-check
+            // only, no FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(s1 as i32 as u64)
         }
         Op::FmvXH => {
-            // FMV.X.H READS an f-reg (does not modify FP state) -> access-check only, no
-            // FS-dirty.
+            // FMV.X.H READS an f-reg (does not modify FP state) -> access-check
+            // only, no FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(Sf16::unbox(s1) as i16 as u64)
         }
@@ -3629,7 +3794,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf(Sf32::fle(s1, s2))
         }
         Op::FclassS => {
-            // FCLASS READS an f-reg, writes an x-reg (no FP-state change) -> no FS-dirty.
+            // FCLASS READS an f-reg, writes an x-reg (no FP-state change) -> no
+            // FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(1 << Sf32::fclass(s1) as usize)
         }
@@ -3674,8 +3840,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::ok(v)
         }
         Op::Fsd | Op::CFsd | Op::CFsdsp => {
-            // FP store READS an f-reg (does not modify FP state) -> access-check only, no
-            // FS-dirty.
+            // FP store READS an f-reg (does not modify FP state) ->
+            // access-check only, no FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             etry!(cpu.mmu.store64(s1.wrapping_add(uop.imm64()), s2));
             ExecOut::ok(0)
@@ -3787,7 +3953,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf(Sf64::fle(s1, s2))
         }
         Op::FclassD => {
-            // FCLASS READS an f-reg, writes an x-reg (no FP-state change) -> no FS-dirty.
+            // FCLASS READS an f-reg, writes an x-reg (no FP-state change) -> no
+            // FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(1 << Sf64::fclass(s1) as usize)
         }
@@ -3817,8 +3984,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             ExecOut::from_wf(cvt_sf64_u64(s1, cpu.get_rm(uop.rm)))
         }
         Op::FmvXD => {
-            // FMV.X.D READS an f-reg (does not modify FP state) -> access-check only, no
-            // FS-dirty.
+            // FMV.X.D READS an f-reg (does not modify FP state) -> access-check
+            // only, no FS-dirty.
             etry!(cpu.check_float_access_ro(0));
             ExecOut::ok(s1)
         }
@@ -3847,8 +4014,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
                 PrivMode::M => (status >> 17) & 1,
                 _ => 0,
             };
-            // Override MIE[3] with MPIE[7], set MPIE[7] to 1, set MPP[12:11] to 0
-            // and override MPRV[17]
+            // Override MIE[3] with MPIE[7], set MPIE[7] to 1, set MPP[12:11] to
+            // 0 and override MPRV[17]
             let new_status = (status & !0x21888) | (mprv << 17) | (mpie << 3) | (1 << 7);
             cpu.write_csr_raw(Csr::Mstatus, new_status);
             cpu.hpm_sync_if_active();
@@ -3887,6 +4054,12 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
 
             let rs1_val = cpu.read_x(uop.rs1);
             let rs2_val = cpu.read_x(uop.rs2);
+            // Counted past the privilege check, so a trapping fence is not
+            // reported as executed.  SINVAL.VMA and SFENCE.VMA are
+            // architecturally identical here but are booked
+            // separately: see `Mmu::record_fence`.
+            cpu.mmu
+                .record_fence(matches!(uop.op, Op::SinvalVma), rs1_val != 0, rs2_val != 0);
             #[allow(clippy::cast_possible_truncation)]
             match (rs1_val != 0, rs2_val != 0) {
                 (false, false) => cpu.mmu.flush_tlb(),
@@ -4006,9 +4179,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
         Op::CboZero => {
-            // NOTE (cosim gating gap): not gated on menvcfg.CBZE.  A spec-correct
-            // DUT traps cbo.zero (illegal instr) when CBZE is clear; we always
-            // execute it.  Safe only because OpenSBI sets menvcfg before S-mode.
+            // NOTE (cosim gating gap): not gated on menvcfg.CBZE.  A
+            // spec-correct DUT traps cbo.zero (illegal instr) when
+            // CBZE is clear; we always execute it.  Safe only
+            // because OpenSBI sets menvcfg before S-mode.
             // See MENVCFG_STCE in csr.rs.
             let base = s1 & !63;
             for i in 0..8u64 {
@@ -4788,11 +4962,12 @@ mod test_cpu {
 
     #[test]
     fn fp_load_dirties_fs_only_on_success() {
-        // Regression for 44f628f: a page-faulting FP load writes no f-reg, so it must
-        // NOT dirty mstatus.FS; a successful FP load does. (Pre-fix,
-        // check_float_access_and_dirty set fs=3 BEFORE memop_read, so even a
-        // FAULTING load dirtied FS -> diverged from the cosim DUT on the
-        // kernel's sstatus read.) Encoding: FLD f0, 0(x1) = 0x0000_b007.
+        // Regression for 44f628f: a page-faulting FP load writes no f-reg, so
+        // it must NOT dirty mstatus.FS; a successful FP load does.
+        // (Pre-fix, check_float_access_and_dirty set fs=3 BEFORE
+        // memop_read, so even a FAULTING load dirtied FS -> diverged
+        // from the cosim DUT on the kernel's sstatus read.) Encoding:
+        // FLD f0, 0(x1) = 0x0000_b007.
 
         // faulting: an address past the end of RAM makes memop_read return a
         // LoadAccessFault before any f-reg write. (create_cpu maps 8 MiB at
@@ -4810,7 +4985,8 @@ mod test_cpu {
         );
         assert_eq!(cpu.fs, 1, "a faulting FP load must NOT dirty mstatus.FS");
 
-        // success: an aligned in-range address completes the load -> FS goes Dirty.
+        // success: an aligned in-range address completes the load -> FS goes
+        // Dirty.
         let mut cpu = create_cpu();
         cpu.fs = 1;
         cpu.write_register(x(1), MEMORY_BASE + 0x40);

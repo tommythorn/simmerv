@@ -87,7 +87,9 @@ fn embed_moves_each_offset_exactly_once() {
     // boot_cpuid_phys.
     assert_eq!(
         [after[0], after[2], after[4], after[5], after[6], after[7]],
-        [before[0], before[2], before[4], before[5], before[6], before[7]],
+        [
+            before[0], before[2], before[4], before[5], before[6], before[7]
+        ],
         "fields that describe nothing about the edit must not move"
     );
     assert_eq!(after[1], 2950, "totalsize");
@@ -145,7 +147,10 @@ fn initrd_lands_below_the_tree_and_is_advertised() {
     let mut emu = emulator(512);
     let placement = emu.setup_initrd(INITRD).unwrap();
 
-    assert_eq!(placement.dtb_base, 0x9fff_f000, "top of 512 MiB, one page in");
+    assert_eq!(
+        placement.dtb_base, 0x9fff_f000,
+        "top of 512 MiB, one page in"
+    );
     assert_eq!(placement.end - placement.start, INITRD.len() as u64);
     assert!(placement.end <= placement.dtb_base);
     assert_eq!(placement.start % 4096, 0, "start is page aligned");
@@ -216,7 +221,8 @@ fn an_initrd_may_not_land_on_a_loaded_image() {
 #[test]
 fn an_initrd_too_large_for_ram_is_refused() {
     let mut emu = emulator(64);
-    let err = emu.setup_initrd(&vec![0u8; 128 * 1024 * 1024])
+    let err = emu
+        .setup_initrd(&vec![0u8; 128 * 1024 * 1024])
         .unwrap_err()
         .to_string();
     assert!(err.contains("does not fit in RAM"), "got: {err}");
@@ -247,7 +253,9 @@ fn the_initrd_survives_an_rva23_tree_swap() {
     );
     let from_ram = read_tree(&mut emu, placement.dtb_base, effective.len());
     assert_eq!(from_ram, effective);
-    let err = fdt::analyze_initrd_slot(&effective).unwrap_err().to_string();
+    let err = fdt::analyze_initrd_slot(&effective)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("already defines"), "got: {err}");
 }
 
@@ -261,6 +269,9 @@ fn a_pinned_initrd_address_is_honoured() {
     assert_eq!(read_tree(&mut emu, placement.start, INITRD.len()), INITRD);
 
     // Pinned too high, and there is no room left for the tree above it.
-    let err = emu.setup_initrd_at(INITRD, 0x9fff_f800).unwrap_err().to_string();
+    let err = emu
+        .setup_initrd_at(INITRD, 0x9fff_f800)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("overlaps the device tree"), "got: {err}");
 }

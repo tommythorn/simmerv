@@ -115,6 +115,11 @@ mod vmnet {
     use super::NetworkBackend;
     use std::io;
 
+    /// The opaque handle the C shim hands back.  Uninhabited on purpose: it
+    /// exists only to give `*mut VmnetHandleOpaque` a distinct type, and having
+    /// no variants is what stops Rust from ever constructing or dereferencing
+    /// one.
+    #[allow(clippy::empty_enums)]
     enum VmnetHandleOpaque {}
 
     unsafe extern "C" {

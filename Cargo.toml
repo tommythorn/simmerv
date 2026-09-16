@@ -5,7 +5,6 @@ edition = "2024"
 description = "RISC-V emulator written in Rust"
 authors = ["Takahiro <hogehoge@gachapin.jp>", "Tommy Thorn <tommy-github2@thorn.ws>"]
 license = "MIT"
-homepage = "https://github.com/tommythorn/simmerv"
 repository = "https://github.com/tommythorn/simmerv"
 exclude = [
   "linux/*",
@@ -23,10 +22,25 @@ pedantic = { level = "warn", priority = -2 }
 nursery = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
-unreadable-literal = "allow"
+unreadable_literal = "allow"
 
 [features]
 paranoid-tlb = []
+# Records the distribution of *executed* uop-cache block lengths (see
+# `BbCache::dyn_len`).  Off by default: the counter is a bump in the
+# block-executor hot loop and costs ~1.8% on an Ubuntu boot (220.8 vs 224.9
+# Mc/s, interleaved).  It is a diagnostic, not a statistic worth that.
+bb-hist = []
+# Records the uop-cache *reference stream* -- one `(key, len)` per block
+# execution -- into a file, so cache organisations can be swept offline instead
+# of at one emulator run per point.  Off by default and inert unless
+# `SIMMERV_TRACE` names an output path; see `src/uop_trace.rs`.  Armed by a
+# cycle window, because the full Geekbench suite is ~44 G references and only
+# the ~1 G of Clang are interesting.  The stream also carries workload-boundary
+# marks (`Cpu::trace_mark`), so one whole-suite capture can be replayed into a
+# per-subtest table instead of a single aggregate in which Clang is 93% of the
+# misses and 1.4% of the cycles.
+bb-trace = []
 
 [badges]
 travis-ci = { repository = "tommythorn/simmerv" }

@@ -72,7 +72,8 @@ impl Speedometer {
                 let dmiss = d(stats.dtlb_misses, self.prev_stats.dtlb_misses);
                 lines.push(format!("miss iTLB {imiss:6.0}/Mi  dTLB {dmiss:6.0}/Mi"));
 
-                // Hit rate over this window = (4 KiB + 2 MiB hits) / (hits + walks).
+                // Hit rate over this window = (4 KiB + 2 MiB hits) / (hits +
+                // walks).
                 let dc = |cur: u64, prev: u64| cur - prev;
                 let i_hits = dc(stats.itlb_hits, self.prev_stats.itlb_hits)
                     + dc(stats.itlb2m_hits, self.prev_stats.itlb2m_hits);
@@ -102,6 +103,67 @@ impl Speedometer {
                     "flush full {flush_full:4.0}/Mi  asid {flush_asid:4.0}/Mi  \
                      vpage {flush_vpage:4.0}/Mi  vp+asid {flush_vpage_asid:4.0}/Mi"
                 ));
+
+                // Fence instructions retired, by operand class.  `flush_full`
+                // above also counts SATP writes, FENCE.I and state restore, so
+                // it is not the fence rate.  SFENCE.VMA and SINVAL.VMA share an
+                // operand encoding and a dispatch arm but are booked separately
+                // -- see `Mmu::record_fence` -- so they get a row each from one
+                // formatter, the four classes being the same for both.
+                let fence_row = |label: &str, cur: [u64; 4], prev: [u64; 4]| {
+                    let v = |i: usize| (cur[i] - prev[i]) as f64 / mi;
+                    format!(
+                        "{label}  full {:4.0}/Mi  asid {:4.0}/Mi  \
+                         vpage {:4.0}/Mi  vp+asid {:4.0}/Mi",
+                        v(0),
+                        v(1),
+                        v(2),
+                        v(3),
+                    )
+                };
+                let sfence_cur = [
+                    stats.sfence_full,
+                    stats.sfence_asid,
+                    stats.sfence_vpage,
+                    stats.sfence_vpage_asid,
+                ];
+                let sfence_prev = [
+                    self.prev_stats.sfence_full,
+                    self.prev_stats.sfence_asid,
+                    self.prev_stats.sfence_vpage,
+                    self.prev_stats.sfence_vpage_asid,
+                ];
+                lines.push(fence_row("sfence.vma", sfence_cur, sfence_prev));
+
+                // SINVAL.VMA is only ever emitted as part of the Zisvinval
+                // batch, so its row -- and the two bookends that bracket the
+                // batch -- stay off the display until the guest actually uses
+                // Svinval at all, which is the common case.
+                let sinval_cur = [
+                    stats.sinval_full,
+                    stats.sinval_asid,
+                    stats.sinval_vpage,
+                    stats.sinval_vpage_asid,
+                ];
+                let sinval_prev = [
+                    self.prev_stats.sinval_full,
+                    self.prev_stats.sinval_asid,
+                    self.prev_stats.sinval_vpage,
+                    self.prev_stats.sinval_vpage_asid,
+                ];
+                let sinval_total: u64 = sinval_cur
+                    .iter()
+                    .zip(sinval_prev)
+                    .map(|(cur, prev)| cur - prev)
+                    .sum();
+                let w_inval = dc(stats.sfence_w_inval, self.prev_stats.sfence_w_inval);
+                let inval_ir = dc(stats.sfence_inval_ir, self.prev_stats.sfence_inval_ir);
+                if sinval_total > 0 || w_inval > 0 || inval_ir > 0 {
+                    lines.push(format!(
+                        "{}  w.inval {w_inval:4.0}/Mi  inval.ir {inval_ir:4.0}/Mi",
+                        fence_row("sinval.vma", sinval_cur, sinval_prev),
+                    ));
+                }
 
                 let block_hits = d(cache.block_hits, self.prev_cache.block_hits);
                 let untaken_br = d(cache.untaken_branches, self.prev_cache.untaken_branches);
@@ -156,7 +218,8 @@ impl Speedometer {
                     )?;
                     new_widths.push(total);
                 } else {
-                    // Previous update had a line here but now it's gone — blank it
+                    // Previous update had a line here but now it's gone — blank
+                    // it
                     let prev_w = prev[row];
                     let col = width.saturating_sub(prev_w) + 1;
                     write!(
