@@ -14,6 +14,14 @@ here](https://tommythorn.github.io/simmerv/)
 
 ![Installing and running Ubuntu](screenshots/simmerv.gif)
 
+## Quick start: boot Ubuntu in three steps
+
+```sh
+wget https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-riscv64.img.xz
+unxz ubuntu-26.04-preinstalled-server-riscv64.img.xz
+cargo r -rq -- -m 8192 --rva23 linux/fw_payload.elf -f ubuntu-26.04-preinstalled-server-riscv64.img
+```
+
 ## Features
 
 - Emulates RISC-V `RV64GC_Zba_Zbb_Zbc_Zbs_Zicond_Zfhmin_Svinval_Svade_Svpbmt_Sstc_Zicbom_Zicbop_Zicboz_Zihpm` (RVA22) processor and peripheral devices
