@@ -57,6 +57,7 @@ mod test {
         assert_eq!(s.rf[4], 84);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic = "attempt create an illegal bounded value"]
     fn will_fail() {
