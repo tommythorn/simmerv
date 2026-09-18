@@ -11,3 +11,10 @@ tests/vector/out/
 wasm/web/simmerv_wasm.js
 wasm/web/simmerv_wasm_bg.wasm
 wasm/pkg/
+
+# Benchmark disk built by tools/mk-bench-disk.py, and its download cache.
+# Both are reproducible from the pins in that script -- the Rust version, the
+# Ubuntu suite and the source revision -- so committing 2 GiB of them would add
+# nothing the script does not already state, and would do it to every clone.
+bench-disk.img
+.bench-cache/
