@@ -188,6 +188,56 @@ def deb_closure(pkgs, provides, roots):
     return order
 
 
+def ar_members(path):
+    """Yield (name, bytes) for each member of a (BSD/GNU) `ar` archive, which
+    is what a .deb is on the outside."""
+    data = path.read_bytes()
+    assert data[:8] == b"!<arch>\n", f"{path}: not an ar archive"
+    off = 8
+    while off + 60 <= len(data):
+        hdr = data[off:off + 60]
+        name = hdr[:16].decode().strip().rstrip("/")
+        size = int(hdr[48:58])
+        off += 60
+        yield name, data[off:off + size]
+        off += size + (size & 1)
+
+
+def decompress(name, blob):
+    ext = name.rsplit(".", 1)[-1]
+    if ext in ("gz", "xz", "bz2", "tar"):
+        return blob  # tarfile handles these itself
+    if ext == "zst":
+        try:  # Python >= 3.14
+            from compression import zstd
+            return zstd.decompress(blob)
+        except ImportError:
+            pass
+        try:  # pip install zstandard
+            import zstandard
+            return zstandard.ZstdDecompressor().decompressobj().decompress(blob)
+        except ImportError:
+            pass
+        if shutil.which("zstd"):
+            return subprocess.run(["zstd", "-dc"], input=blob, check=True,
+                                  stdout=subprocess.PIPE).stdout
+        sys.exit("need Python 3.14, the `zstandard` module, or a `zstd` binary to "
+                 "unpack .deb files")
+    sys.exit(f"unknown .deb data member compression: {name}")
+
+
+def extract_deb(deb, sysroot):
+    """`dpkg-deb -x`, without needing dpkg on the host (it is not on macOS)."""
+    import io
+    for name, blob in ar_members(deb):
+        if not name.startswith("data.tar"):
+            continue
+        with tarfile.open(fileobj=io.BytesIO(decompress(name, blob)), mode="r:*") as tar:
+            tar.extractall(sysroot, filter="fully_trusted")
+        return
+    sys.exit(f"{deb}: no data.tar member")
+
+
 def install_debs(cache, sysroot):
     pkgs, provides = deb_index(cache)
     names = deb_closure(pkgs, provides, DEB_ROOTS)
@@ -196,7 +246,7 @@ def install_debs(cache, sysroot):
         f = pkgs[name]
         deb = fetch(f"{UBUNTU_MIRROR}/{f['Filename']}", cache / Path(f["Filename"]).name,
                     f.get("SHA256"))
-        subprocess.run(["dpkg-deb", "-x", str(deb), str(sysroot)], check=True)
+        extract_deb(deb, sysroot)
 
     # `cc` is a dpkg *alternatives* symlink, so it lives in no .deb -- but it is
     # the linker rustc invokes by default. Create it ourselves.
@@ -401,6 +451,9 @@ def build_image(staging, out, slack_mb):
     if out.exists():
         out.unlink()
     mke2fs = shutil.which("mke2fs") or "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs"
+    if not os.access(mke2fs, os.X_OK):
+        sys.exit("mke2fs not found: install e2fsprogs (brew install e2fsprogs / "
+                 "apt install e2fsprogs)")
     subprocess.run([mke2fs, "-q", "-t", "ext4", "-d", str(staging),
                     "-L", "simmerv-bench", "-O", "^has_journal",
                     str(out), f"{size_mb}m"], check=True)
