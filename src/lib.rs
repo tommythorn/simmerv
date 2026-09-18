@@ -264,6 +264,12 @@ pub struct Emulator {
     /// FILE,0xADDR`), which also suppresses the memory-size patch, matching
     /// `setup_dtb_at`.
     dtb_fixed_addr: Option<u64>,
+    /// Stop once this many instructions have been executed, from
+    /// `--max-insns`. `None` runs until the guest or the operator stops it.
+    max_insns: Option<u64>,
+    /// Kernel command line to force into `/chosen/bootargs`, from `--append`.
+    /// `None` leaves whatever the tree itself says.
+    bootargs: Option<String>,
 
     /// The tree as actually placed -- patched, with the ramdisk properties
     /// embedded if one was placed.  This is what `--dumpdtb` prints and what
@@ -349,6 +355,8 @@ impl Emulator {
 
             dtb_source: include_bytes!("./device/dtb.dtb").to_vec(),
             dtb_fixed_addr: None,
+            max_insns: None,
+            bootargs: None,
             dtb_effective: Vec::new(),
             initrd: None,
             image_extent: None,
@@ -475,10 +483,7 @@ impl Emulator {
                 self.tick(600); // 600 is an arbitrary number
             }
             self.maybe_write_requested_snapshot();
-            if self.handle_htif()
-                || self.exit_flag.load(Ordering::Relaxed)
-                || self.poweroff_flag.load(Ordering::Relaxed)
-            {
+            if self.should_stop() {
                 break;
             }
             if self.reset_flag.swap(false, Ordering::Relaxed) {
@@ -498,10 +503,7 @@ impl Emulator {
         loop {
             self.tick(6);
             self.maybe_write_requested_snapshot();
-            if self.handle_htif()
-                || self.exit_flag.load(Ordering::Relaxed)
-                || self.poweroff_flag.load(Ordering::Relaxed)
-            {
+            if self.should_stop() {
                 break;
             }
             if self.reset_flag.swap(false, Ordering::Relaxed) {
@@ -730,10 +732,7 @@ impl Emulator {
                 println!("--can't fetch from {insn_addr:016x}--");
             }
 
-            if self.handle_htif()
-                || self.exit_flag.load(Ordering::Relaxed)
-                || self.poweroff_flag.load(Ordering::Relaxed)
-            {
+            if self.should_stop() {
                 break;
             }
             if self.reset_flag.swap(false, Ordering::Relaxed) {
@@ -741,6 +740,39 @@ impl Emulator {
             }
         }
     }
+
+    /// Whether the run loop should stop: the guest asked to (HTIF or the
+    /// syscon poweroff), the operator asked to (Ctrl-C `x`), or the instruction
+    /// budget from `--max-insns` is spent.
+    ///
+    /// Factored out because all three run loops have to agree: a budget honored
+    /// in only one of them would silently not apply under `-t` or `-S`, and the
+    /// condition was already copied three times before the budget existed.
+    fn should_stop(&mut self) -> bool {
+        if let Some(limit) = self.max_insns
+            && self.insns_retired() >= limit
+        {
+            return true;
+        }
+        self.handle_htif()
+            || self.exit_flag.load(Ordering::Relaxed)
+            || self.poweroff_flag.load(Ordering::Relaxed)
+    }
+
+    /// Instructions executed since reset.
+    ///
+    /// `seqno` numbers instructions in program order, so it is the retired
+    /// count -- not `cycle`, which the speedometer uses and which overstates
+    /// the count whenever the guest sits in `wfi`. That difference is the whole
+    /// point of measuring with this rather than with elapsed guest time: a
+    /// budget in instructions is the same amount of work on every host, while
+    /// the same wall-clock window is not.
+    #[must_use]
+    pub const fn insns_retired(&self) -> u64 { self.cpu.seqno as u64 }
+
+    /// Stop after `n` instructions. See [`Self::insns_retired`] for why the
+    /// budget is counted in instructions.
+    pub const fn set_max_insns(&mut self, n: u64) { self.max_insns = Some(n); }
 
     fn handle_htif(&mut self) -> bool {
         // The insanity: https://github.com/riscv-software-src/riscv-isa-sim/issues/364#issuecomment-607657754
@@ -1140,6 +1172,21 @@ impl Emulator {
         }
     }
 
+    /// Force the guest kernel command line, replacing whatever `/chosen`
+    /// declares.
+    ///
+    /// Takes effect on the tree in force, so it must be called after any `-d`
+    /// tree has been loaded; the tree is rebuilt and rewritten immediately.
+    ///
+    /// # Errors
+    /// If the tree has no `/chosen` node, if `args` contains a NUL, or if the
+    /// rebuilt tree no longer fits where it has to go.
+    pub fn set_bootargs(&mut self, args: &str) -> anyhow::Result<()> {
+        self.bootargs = Some(args.to_owned());
+        self.place_device_tree()?;
+        Ok(())
+    }
+
     /// Build and write out the device tree currently in force.
     ///
     /// The single place a tree reaches RAM.  Earlier this logic was copied
@@ -1154,6 +1201,9 @@ impl Emulator {
         let mut dtb = self.dtb_source.clone();
         if self.dtb_fixed_addr.is_none() {
             patch_dtb_memory(&mut dtb, self.memory_bytes)?;
+        }
+        if let Some(ref args) = self.bootargs {
+            dtb = fdt::analyze_bootargs_slot(&dtb)?.embed(&dtb, args)?;
         }
         if let Some((start, end)) = self.initrd {
             dtb = fdt::analyze_initrd_slot(&dtb)?.embed(&dtb, start, end)?;

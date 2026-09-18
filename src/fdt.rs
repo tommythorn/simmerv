@@ -36,6 +36,8 @@ use anyhow::bail;
 pub const INITRD_START: &str = "linux,initrd-start";
 /// One past the ramdisk's last byte.
 pub const INITRD_END: &str = "linux,initrd-end";
+/// The kernel command line, as read by `early_init_dt_scan_chosen`.
+pub const BOOTARGS: &str = "bootargs";
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_BEGIN_NODE: u32 = 1;
@@ -437,5 +439,196 @@ pub fn analyze_initrd_slot(dtb: &[u8]) -> Result<InitrdSlot> {
         size_dt_struct,
         start_nameoff,
         end_nameoff,
+    })
+}
+
+
+/// What one walk of a device tree tells us about setting `/chosen/bootargs`.
+///
+/// The ramdisk properties and this one differ in one deliberate way: a tree
+/// that already pins a ramdisk address is *refused* (see
+/// [`analyze_initrd_slot`]), because two sources disagreeing about where the
+/// ramdisk lives is a silent corruption. A command line is not like that. The
+/// caller passing `--append` is stating the command line it wants, so an
+/// existing `bootargs` is replaced rather than refused -- overriding it is the
+/// entire point of the flag.
+#[derive(Debug, Clone)]
+pub struct BootargsSlot {
+    /// File offset of the `FDT_END_NODE` token that closes `/chosen`, where a
+    /// brand-new property goes.
+    chosen_end_node: usize,
+    /// `[start, end)` of the existing `bootargs` property record, if the tree
+    /// has one. The replacement is spliced over exactly this range, so the new
+    /// command line lands where the old one was rather than after it.
+    existing: Option<(usize, usize)>,
+    /// `nameoff` of `"bootargs"` if the strings block already interns it.
+    nameoff: Option<usize>,
+    off_dt_strings: usize,
+    size_dt_strings: usize,
+    size_dt_struct: usize,
+}
+
+impl BootargsSlot {
+    /// Whether the tree already carried a command line.
+    #[must_use]
+    pub const fn had_bootargs(&self) -> bool { self.existing.is_some() }
+
+    /// The blob with `/chosen/bootargs` set to `args`.
+    ///
+    /// # Errors
+    /// If `args` contains a NUL (device tree strings are NUL-terminated, so an
+    /// embedded one would truncate the command line the kernel sees), or if the
+    /// recorded offsets do not describe a coherent blob.
+    #[allow(clippy::cast_possible_truncation)] // FDT fields are 32-bit by definition
+    pub fn embed(&self, dtb: &[u8], args: &str) -> Result<Vec<u8>> {
+        if args.as_bytes().contains(&0) {
+            bail!("kernel command line contains a NUL byte; it would be silently truncated");
+        }
+
+        // A string property's value includes its terminator, and every record
+        // is padded to a 4-byte boundary.
+        let value_len = args.len() + 1;
+        let padded = (value_len + 3) & !3;
+
+        let mut strings_added = 0;
+        let mut appended = Vec::new();
+        let nameoff = self.nameoff.unwrap_or_else(|| {
+            let off = self.size_dt_strings;
+            strings_added = BOOTARGS.len() + 1;
+            appended.extend_from_slice(BOOTARGS.as_bytes());
+            appended.push(0);
+            off
+        });
+
+        let mut record = Vec::with_capacity(12 + padded);
+        record.extend_from_slice(&FDT_PROP.to_be_bytes());
+        record.extend_from_slice(&(value_len as u32).to_be_bytes());
+        record.extend_from_slice(&(nameoff as u32).to_be_bytes());
+        record.extend_from_slice(args.as_bytes());
+        record.resize(12 + padded, 0);
+
+        // Replacing an existing property shrinks or grows the structure block;
+        // inserting a new one only grows it. Rather than track a signed delta,
+        // every derived size is written as `x - replaced_len + record.len()`:
+        // `replaced_len` is a slice of the structure block, so it cannot exceed
+        // any of the quantities it is subtracted from, and doing the
+        // subtraction first keeps all of it in `usize`.
+        let (splice_at, replaced_len) = match self.existing {
+            Some((start, end)) => (start, end - start),
+            None => (self.chosen_end_node, 0),
+        };
+        if splice_at + replaced_len > dtb.len() || replaced_len > self.size_dt_struct {
+            bail!("internal error: bootargs property runs past the end of the tree");
+        }
+        let resize = |x: usize| x - replaced_len + record.len();
+
+        let mut out = Vec::with_capacity(dtb.len() + record.len());
+        out.extend_from_slice(&dtb[..splice_at]);
+        out.extend_from_slice(&record);
+        out.extend_from_slice(&dtb[splice_at + replaced_len..]);
+
+        // The new name goes at the *end* of the strings block so every existing
+        // `nameoff` keeps pointing at the same string.
+        let names_at = resize(self.off_dt_strings) + self.size_dt_strings;
+        if names_at > out.len() {
+            bail!("internal error: strings block ends past the end of the tree");
+        }
+        out.splice(names_at..names_at, appended);
+
+        out[4..8].copy_from_slice(&((resize(dtb.len()) + strings_added) as u32).to_be_bytes());
+        out[12..16].copy_from_slice(&(resize(self.off_dt_strings) as u32).to_be_bytes());
+        out[32..36].copy_from_slice(&((self.size_dt_strings + strings_added) as u32).to_be_bytes());
+        out[36..40].copy_from_slice(&(resize(self.size_dt_struct) as u32).to_be_bytes());
+        Ok(out)
+    }
+}
+
+/// Walk `dtb` far enough to set `/chosen/bootargs`.
+///
+/// # Errors
+/// If the blob is too short or lacks FDT magic, if its block offsets do not
+/// describe a tree whose structure block precedes its strings block, or if
+/// there is no `/chosen` node.
+pub fn analyze_bootargs_slot(dtb: &[u8]) -> Result<BootargsSlot> {
+    if dtb.len() < 40 {
+        bail!(
+            "device tree is {} bytes, too short for an FDT header",
+            dtb.len()
+        );
+    }
+    if read_u32(dtb, 0) != FDT_MAGIC {
+        bail!(
+            "device tree has bad magic {:#010x} (expected {FDT_MAGIC:#010x})",
+            read_u32(dtb, 0)
+        );
+    }
+
+    let (off_dt_struct, off_dt_strings, size_dt_strings, size_dt_struct) = validate_header(dtb)?;
+    let struct_end = off_dt_struct + size_dt_struct;
+    let strings = dtb
+        .get(off_dt_strings..off_dt_strings + size_dt_strings)
+        .unwrap_or(&[]);
+    let nameoff = find_string(strings, BOOTARGS);
+
+    let mut chosen_end_node = None;
+    let mut chosen_depth: Option<u32> = None;
+    let mut existing = None;
+    let mut depth: u32 = 0;
+    let mut pos = off_dt_struct;
+
+    while pos + 4 <= struct_end {
+        let token_at = pos;
+        let token = read_u32(dtb, pos);
+        pos += 4;
+        match token {
+            FDT_BEGIN_NODE => {
+                let Some(end) = cstr_end(dtb, pos) else {
+                    bail!("unterminated node name at {pos:#x}");
+                };
+                let name = dtb.get(pos..end).unwrap_or(&[]);
+                pos = (end + 1 + 3) & !3;
+                depth += 1;
+                if depth == 2 && name == b"chosen" {
+                    chosen_depth = Some(depth);
+                }
+            }
+            FDT_END_NODE => {
+                if chosen_depth == Some(depth) {
+                    chosen_end_node = Some(token_at);
+                    chosen_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            FDT_PROP => {
+                if pos + 8 > struct_end {
+                    bail!("truncated property header at {pos:#x}");
+                }
+                let len = read_u32(dtb, pos) as usize;
+                let nameoff = read_u32(dtb, pos + 4) as usize;
+                let value_at = pos + 8;
+                pos = value_at + ((len + 3) & !3);
+                let Some(name) = name_at(dtb, off_dt_strings + nameoff) else {
+                    bail!("property with out-of-range nameoff {nameoff} at {token_at:#x}");
+                };
+                if chosen_depth == Some(depth) && depth == 2 && name == BOOTARGS.as_bytes() {
+                    existing = Some((token_at, pos));
+                }
+            }
+            FDT_END => break,
+            _ => {} // FDT_NOP (4), and anything else, carries no structure
+        }
+    }
+
+    let Some(chosen_end_node) = chosen_end_node else {
+        bail!("device tree has no /chosen node; cannot set a kernel command line");
+    };
+
+    Ok(BootargsSlot {
+        chosen_end_node,
+        existing,
+        nameoff,
+        off_dt_strings,
+        size_dt_strings,
+        size_dt_struct,
     })
 }

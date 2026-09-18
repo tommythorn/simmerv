@@ -82,6 +82,20 @@ struct Args {
     #[argh(switch)]
     vmnet: bool,
 
+    /// stop after this many instructions and report the rate, e.g. "2G".
+    /// Accepts a plain count or a k/M/G suffix. A fixed budget is the same
+    /// amount of work on every host, which a fixed wall-clock window is not --
+    /// so this is the knob to use when comparing platforms
+    #[argh(option)]
+    max_insns: Option<String>,
+
+    /// kernel command line, replacing the device tree's own /chosen/bootargs.
+    /// Applied after any -d tree, so it overrides that tree too. Useful for
+    /// unattended runs: `--append "root=/dev/vda1 rw console=ttyS0
+    /// init=/bench-init.sh"` boots straight into a workload with no login
+    #[argh(option)]
+    append: Option<String>,
+
     /// take periodic snapshots: format "N:base_name" where N is tick interval
     #[argh(option, short = 'S')]
     snapshot_interval: Option<String>,
@@ -172,6 +186,26 @@ fn write_snap(emulator: &mut Emulator, path: &str) -> anyhow::Result<()> {
 }
 
 fn is_snapshot(data: &[u8]) -> bool { data.starts_with(simmerv::SNAPSHOT_MAGIC) }
+
+/// Parse an instruction count, with an optional `k`/`M`/`G` suffix.
+///
+/// Benchmark budgets are billions, and `--max-insns 2000000000` is a digit-
+/// counting exercise that silently becomes a different benchmark when miscounted.
+fn parse_insn_count(spec: &str) -> anyhow::Result<u64> {
+    let spec = spec.trim();
+    let (digits, scale) = match spec.as_bytes().last() {
+        Some(b'k' | b'K') => (&spec[..spec.len() - 1], 1_000),
+        Some(b'm' | b'M') => (&spec[..spec.len() - 1], 1_000_000),
+        Some(b'g' | b'G') => (&spec[..spec.len() - 1], 1_000_000_000),
+        _ => (spec, 1),
+    };
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid instruction count: {spec}"))?;
+    n.checked_mul(scale)
+        .ok_or_else(|| anyhow!("instruction count {spec} overflows a u64"))
+}
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() -> anyhow::Result<()> {
@@ -342,6 +376,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // After the -d block so it overrides a user-supplied tree, and before
+    // --dumpdtb so the dump shows the command line that would really be used.
+    if let Some(ref args) = args.append {
+        emulator
+            .set_bootargs(args)
+            .with_context(|| format!("--append {args:?}"))?;
+    }
+
     // The initrd goes below the tree, so this must follow the -d block: the
     // tree in force is whichever the user last chose.
     if let Some(initfs_arg) = args.initfs {
@@ -437,7 +479,12 @@ fn main() -> anyhow::Result<()> {
     // Destination for on-demand snapshots requested via Ctrl-C S.
     emulator.snapshot_path = auto_snapshot_path;
 
+    if let Some(ref spec) = args.max_insns {
+        emulator.set_max_insns(parse_insn_count(spec)?);
+    }
+
     // Run with optional periodic snapshots, or plain run.
+    let started = std::time::Instant::now();
     if let Some(spec) = args.snapshot_interval {
         // Format: "N:base_name"
         let mut parts = spec.splitn(2, ':');
@@ -449,6 +496,22 @@ fn main() -> anyhow::Result<()> {
         emulator.run_with_periodic_snapshots(interval, base);
     } else {
         emulator.run_program();
+    }
+    let elapsed = started.elapsed();
+
+    // stdout is reserved for the guest's own console output, so the summary
+    // goes to stderr and a run can still be piped somewhere without the report
+    // landing in the middle of it.
+    if args.max_insns.is_some() {
+        let insns = emulator.insns_retired();
+        let secs = elapsed.as_secs_f64();
+        #[allow(clippy::cast_precision_loss)] // a count this large is already approximate
+        let mips = if secs > 0.0 {
+            insns as f64 / secs / 1e6
+        } else {
+            f64::INFINITY
+        };
+        eprintln!("insns {insns} in {secs:.3} s = {mips:.1} MIPS");
     }
 
     // Write riscof signature: dump physical memory [begin_signature,
