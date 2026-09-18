@@ -377,32 +377,24 @@ registry, so the guest compiles entirely offline -- no networking, and so no
 root, on any platform:
 
 ```sh
-$ ./tools/mk-bench-disk.py                 # ~2 GiB, downloads cached in .bench-cache
-$ ./tools/drive.py --timeout 21600 -- \
-    ./target/release/simmerv-cli -m 8192 --rva23 --max-insns 2000G \
-    --append "root=/dev/vda1 rw console=ttyS0 init=/bin/sh bench.mode=full" \
-    linux/fw_payload.elf \
-    -f ubuntu-26.04-preinstalled-server-riscv64.img -f bench-disk.img <<'EOF'
-expect [#$] $
-send mount -t proc proc /proc; mkdir -p /mnt/bench; mount -t ext4 -o ro /dev/vdb /mnt/bench && echo DISK-OK
-expect DISK-OK
-send exec /mnt/bench/bench-init.sh
-expect BENCH-END rc=
-EOF
+$ ./run-bench.sh            # the full build, a couple of hours
+$ ./run-bench.sh --smoke    # a trivial crate instead, a few minutes
 ```
 
-The guest compiles `simmerv`'s lib and its dependencies and then powers itself
-off, so the run is unattended. The emulator reports on exit:
+It builds the emulator, builds the benchmark disk if it is missing, boots
+Ubuntu straight into the workload, and prints:
 
 ```
+BENCH-ELAPSED 4031.93 s (guest uptime clock)
 insns 1005524461313 in 8094.782 s = 124.2 MIPS
 ```
 
-`bench.mode=smoke` on the kernel command line substitutes a trivial crate,
-which takes seconds instead of a couple of hours and is enough to check the
-toolchain works. `--source worktree` builds uncommitted changes instead of
-`HEAD`, tagging the reported revision so the result cannot be mistaken for a
-committed one.
+The guest powers itself off when the workload finishes, so the run is
+unattended, and the exit status reflects whether the compile succeeded.
+`./run-bench.sh --help` lists the rest: `--image` to benchmark a different
+guest, `--mem`, `--rebuild`, and `--source worktree` to benchmark uncommitted
+changes rather than `HEAD` (the reported revision is tagged so a result cannot
+be mistaken for a committed one).
 
 Everything the disk carries is pinned -- the Rust version, the Ubuntu suite the
 `.deb`s come from, and the source revision -- because changing any of them
