@@ -8,10 +8,20 @@ static STORELOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 pub static STORELOG_ARMED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[must_use]
+#[inline]
 pub fn storelog_active() -> bool {
-    *STORELOG.get_or_init(|| std::env::var("SIMMERV_STORELOG").is_ok())
-        && STORELOG_ARMED.load(std::sync::atomic::Ordering::Relaxed)
+    // Armed first, on purpose.  Only a run under cosim ever arms this, so
+    // every other run short-circuits on one relaxed load and never touches
+    // the `OnceLock` -- which is an acquire load plus a branch, paid on every
+    // guest store otherwise.  Both terms are pure, so the order is free to
+    // choose.
+    STORELOG_ARMED.load(std::sync::atomic::Ordering::Relaxed)
+        && *STORELOG.get_or_init(|| std::env::var("SIMMERV_STORELOG").is_ok())
 }
+
+/// `Mmu::cosim_mem_kind` outside a cosim retirement.  Any value other than 0
+/// disables the memory-effect capture; see the field's own note.
+pub const COSIM_MEM_INACTIVE: u8 = 3;
 
 use crate::cpu;
 use crate::csr;
@@ -110,7 +120,15 @@ pub struct Mmu {
     /// store.)  These record the PA and kind of the data access performed
     /// by the retiring instruction so the harness can compare them.
     pub cosim_mem_pa: u64,
-    pub cosim_mem_kind: u8,  // 0 = none, 1 = load, 2 = store
+    /// 0 = a cosim retirement that accessed no memory, 1 = load, 2 = store,
+    /// [`COSIM_MEM_INACTIVE`] = no cosim retirement in progress.
+    ///
+    /// The 0 is load-bearing: the load and store paths record their PA only
+    /// when this is 0, and `step_retire` re-zeroes it before every
+    /// retirement.  Starting *inactive* rather than at 0 is what makes that
+    /// check false -- and therefore free -- in a run that is not under cosim,
+    /// where nothing ever re-zeroes it.
+    pub cosim_mem_kind: u8,
     pub cosim_mem_ram: bool, // access was RAM (readback is safe; MMIO readback has side effects)
 
     /// CLINT — always present, serviced every cycle outside the device queue.
@@ -305,7 +323,7 @@ impl Mmu {
             service_queue: BinaryHeap::new(),
             cosim_inert_devstore: false,
             cosim_mem_pa: 0,
-            cosim_mem_kind: 0,
+            cosim_mem_kind: COSIM_MEM_INACTIVE,
             cosim_mem_ram: false,
             cycle: 0,
             itlb: Tlb::new(),

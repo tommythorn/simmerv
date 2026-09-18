@@ -190,7 +190,8 @@ fn is_snapshot(data: &[u8]) -> bool { data.starts_with(simmerv::SNAPSHOT_MAGIC) 
 /// Parse an instruction count, with an optional `k`/`M`/`G` suffix.
 ///
 /// Benchmark budgets are billions, and `--max-insns 2000000000` is a digit-
-/// counting exercise that silently becomes a different benchmark when miscounted.
+/// counting exercise that silently becomes a different benchmark when
+/// miscounted.
 fn parse_insn_count(spec: &str) -> anyhow::Result<u64> {
     let spec = spec.trim();
     let (digits, scale) = match spec.as_bytes().last() {

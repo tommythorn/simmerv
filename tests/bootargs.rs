@@ -94,7 +94,10 @@ fn assert_coherent(dtb: &[u8]) {
 }
 
 fn set(dtb: &[u8], args: &str) -> Vec<u8> {
-    fdt::analyze_bootargs_slot(dtb).unwrap().embed(dtb, args).unwrap()
+    fdt::analyze_bootargs_slot(dtb)
+        .unwrap()
+        .embed(dtb, args)
+        .unwrap()
 }
 
 #[test]
@@ -113,7 +116,10 @@ fn replacing_with_a_shorter_line_keeps_the_blob_coherent() {
     let out = set(DTB, short);
     assert_eq!(bootargs_of(&out).as_deref(), Some(short));
     assert_coherent(&out);
-    assert!(out.len() < DTB.len(), "a shorter line should shrink the blob");
+    assert!(
+        out.len() < DTB.len(),
+        "a shorter line should shrink the blob"
+    );
 }
 
 #[test]

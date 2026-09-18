@@ -442,7 +442,6 @@ pub fn analyze_initrd_slot(dtb: &[u8]) -> Result<InitrdSlot> {
     })
 }
 
-
 /// What one walk of a device tree tells us about setting `/chosen/bootargs`.
 ///
 /// The ramdisk properties and this one differ in one deliberate way: a tree
