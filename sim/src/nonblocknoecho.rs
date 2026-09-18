@@ -5,7 +5,10 @@ use std::sync::atomic::Ordering;
 
 pub struct NonblockNoEcho {
     stdin: i32,
-    orig_termios: termios::Termios,
+    /// Saved terminal settings, restored on drop. `None` when stdin is not a
+    /// tty (piped or redirected, e.g. a scripted/CI run): there is no terminal
+    /// to put into raw mode, and none to restore.
+    orig_termios: Option<termios::Termios>,
     /// Guest-bound bytes already drained from the host fd (Ctrl-C / menu keys
     /// removed). Buffered here so nothing is stranded when the device's receive
     /// FIFO is momentarily full.
@@ -39,36 +42,49 @@ impl NonblockNoEcho {
         let stdin: i32 = std::io::stdin().as_raw_fd();
         assert_eq!(stdin, 0);
 
+        // A non-tty stdin (pipe, file, pty-less CI runner) has no termios to
+        // configure: `Termios::from_fd` would fail with ENOTTY. Raw mode is
+        // only about not echoing the operator's keystrokes and not letting the
+        // line discipline hold them until Enter, neither of which a pipe does
+        // anyway, so skip it and read the fd as-is.
+        let is_tty = unsafe { libc::isatty(stdin) == 1 };
+
         // Do NOT set O_NONBLOCK on stdin: on macOS stdin and stdout share the
         // same open file description (the controlling terminal), so setting
         // O_NONBLOCK would also make stdout non-blocking, causing println! to
         // panic with EAGAIN under tracing load.  Instead we use poll(2) with a
         // zero timeout to check readability before each read.
 
-        let orig_termios = Termios::from_fd(stdin).expect("Termio::from_fd(stdin)");
+        let orig_termios = if is_tty {
+            Some(Termios::from_fd(stdin).expect("Termio::from_fd(stdin)"))
+        } else {
+            None
+        };
 
-        let mut termios = orig_termios;
-        termios.c_lflag &= !(ECHO | ICANON); // no echo and canonical mode
-        if !ctrlc_breaks {
-            termios.c_lflag &= !ISIG; // Don't break on Ctrl-C
+        if let Some(orig_termios) = orig_termios {
+            let mut termios = orig_termios;
+            termios.c_lflag &= !(ECHO | ICANON); // no echo and canonical mode
+            if !ctrlc_breaks {
+                termios.c_lflag &= !ISIG; // Don't break on Ctrl-C
+            }
+
+            termios.c_iflag &= !(termios::IGNBRK
+                | termios::BRKINT
+                | termios::PARMRK
+                | termios::ISTRIP
+                | termios::INLCR
+                | termios::IGNCR
+                | termios::ISIG
+                | termios::ICRNL
+                | termios::IXON);
+            termios.c_oflag |= termios::OPOST;
+            termios.c_cflag &= !(termios::CSIZE | termios::PARENB);
+            termios.c_cflag |= termios::CS8;
+            termios.c_cc[termios::VMIN] = 1;
+            termios.c_cc[termios::VTIME] = 0;
+
+            tcsetattr(stdin, TCSANOW, &termios).unwrap();
         }
-
-        termios.c_iflag &= !(termios::IGNBRK
-            | termios::BRKINT
-            | termios::PARMRK
-            | termios::ISTRIP
-            | termios::INLCR
-            | termios::IGNCR
-            | termios::ISIG
-            | termios::ICRNL
-            | termios::IXON);
-        termios.c_oflag |= termios::OPOST;
-        termios.c_cflag &= !(termios::CSIZE | termios::PARENB);
-        termios.c_cflag |= termios::CS8;
-        termios.c_cc[termios::VMIN] = 1;
-        termios.c_cc[termios::VTIME] = 0;
-
-        tcsetattr(stdin, TCSANOW, &termios).unwrap();
 
         Self {
             stdin,
@@ -191,7 +207,10 @@ impl NonblockNoEcho {
 impl Drop for NonblockNoEcho {
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     fn drop(&mut self) {
-        // reset the stdin to original termios data
-        termios::tcsetattr(self.stdin, termios::TCSANOW, &self.orig_termios).unwrap();
+        // reset the stdin to original termios data (nothing to restore when
+        // stdin was never a terminal)
+        if let Some(orig_termios) = self.orig_termios {
+            termios::tcsetattr(self.stdin, termios::TCSANOW, &orig_termios).unwrap();
+        }
     }
 }
