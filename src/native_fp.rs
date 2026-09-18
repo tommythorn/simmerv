@@ -22,6 +22,7 @@ unsafe extern "C" {
 // [1] /usr/include/x86_64-linux-gnu/bits/fenv.h
 // [2] /Library/Developer/CommandLineTools/SDKs/MacOSX26.2.sdk/usr/include/fenv.
 // h:136 [3] https://docs.riscv.org/reference/isa/unpriv/f-st-ext.html
+// [4] /usr/include/riscv64-linux-gnu/bits/fenv.h (riscv64 values below)
 
 #[cfg(target_arch = "x86_64")]
 const FE_DIVBYZERO: c_int = 0x04;
@@ -44,6 +45,20 @@ const FE_INVALID: c_int = 0x01;
 const FE_OVERFLOW: c_int = 0x04;
 #[cfg(target_arch = "aarch64")]
 const FE_UNDERFLOW: c_int = 0x08;
+
+// On RISC-V the fenv values *are* the fflags bit positions, so the translation
+// in `fflags_raised` is the identity here. Spelled out anyway rather than
+// special-cased, so there is only one code path to get wrong.
+#[cfg(target_arch = "riscv64")]
+const FE_DIVBYZERO: c_int = 0x08;
+#[cfg(target_arch = "riscv64")]
+const FE_INEXACT: c_int = 0x01;
+#[cfg(target_arch = "riscv64")]
+const FE_INVALID: c_int = 0x10;
+#[cfg(target_arch = "riscv64")]
+const FE_OVERFLOW: c_int = 0x04;
+#[cfg(target_arch = "riscv64")]
+const FE_UNDERFLOW: c_int = 0x02;
 
 #[cfg(target_arch = "wasm32")]
 const FE_DIVBYZERO: c_int = 0x02;
