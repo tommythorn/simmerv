@@ -367,6 +367,84 @@ $ udhcpc -i eth0        # busybox; or: dhclient eth0
 (`-T`/`--tap` is Linux-only and `--vmnet` is macOS-only; each errors out on the
 other platform.)
 
+## How to benchmark
+
+The benchmark workload is a Rust compile: `rustc` is LLVM plus a large frontend
+on top, so it has the instruction footprint that a boot or a small kernel like
+coremark does not. `tools/mk-bench-disk.py` builds a disk carrying a pinned
+riscv64 Rust toolchain, a gcc link driver, this repo's source and a vendored
+registry, so the guest compiles entirely offline -- no networking, and so no
+root, on any platform:
+
+```sh
+$ ./tools/mk-bench-disk.py                 # ~2 GiB, downloads cached in .bench-cache
+$ ./tools/drive.py --timeout 21600 -- \
+    ./target/release/simmerv-cli -m 8192 --rva23 --max-insns 2000G \
+    --append "root=/dev/vda1 rw console=ttyS0 init=/bin/sh bench.mode=full" \
+    linux/fw_payload.elf \
+    -f ubuntu-26.04-preinstalled-server-riscv64.img -f bench-disk.img <<'EOF'
+expect [#$] $
+send mount -t proc proc /proc; mkdir -p /mnt/bench; mount -t ext4 -o ro /dev/vdb /mnt/bench && echo DISK-OK
+expect DISK-OK
+send exec /mnt/bench/bench-init.sh
+expect BENCH-END rc=
+EOF
+```
+
+The guest compiles `simmerv`'s lib and its dependencies and then powers itself
+off, so the run is unattended. The emulator reports on exit:
+
+```
+insns 1005524461313 in 8094.782 s = 124.2 MIPS
+```
+
+`bench.mode=smoke` on the kernel command line substitutes a trivial crate,
+which takes seconds instead of a couple of hours and is enough to check the
+toolchain works. `--source worktree` builds uncommitted changes instead of
+`HEAD`, tagging the reported revision so the result cannot be mistaken for a
+committed one.
+
+Everything the disk carries is pinned -- the Rust version, the Ubuntu suite the
+`.deb`s come from, and the source revision -- because changing any of them
+makes it a different benchmark. Record them with the result; the generated
+`bench.sh` states all three.
+
+### Comparing platforms: `--max-insns`
+
+`--max-insns N` stops after `N` instructions (a `k`/`M`/`G` suffix is accepted)
+and reports the rate. A fixed instruction budget is the same amount of work on
+every host, which a fixed wall-clock window is not, so it is the flag to use
+when comparing machines or builds:
+
+```sh
+$ cargo r -rq -- -n --max-insns 200M -m 2048 linux/fw_payload.elf -f linux/rootfs.img
+insns 200000124 in 0.799 s = 250.4 MIPS
+```
+
+It fixes the instruction *count*, not the instruction *stream*: a Linux boot
+still takes a slightly different path from run to run, because its timer
+interrupts follow the host clock. So this makes rates comparable across hosts;
+it does not by itself make a boot a valid A/B for an emulator change.
+
+### Running a guest unattended: `--append`
+
+`--append` replaces the device tree's `/chosen/bootargs`, which is what lets a
+run skip userspace entirely:
+
+```sh
+$ cargo r -rq -- --append "root=/dev/vda1 rw console=ttyS0 init=/bin/sh" \
+    -m 8192 --rva23 linux/fw_payload.elf -f ubuntu-26.04-preinstalled-server-riscv64.img
+```
+
+Booting Ubuntu 26.04 this way reaches a root shell in about 0.4 s of guest
+time. It also keeps systemd and cloud-init, whose ordering follows the host
+clock, out of whatever is being measured. Note that Ubuntu 26.04's riscv64 port
+is RVA23-baseline: without `--rva23` its `/bin/sh` takes an illegal-instruction
+trap and the kernel panics immediately.
+
+It is applied after `-d`, so it overrides a supplied tree, and before
+`--dumpdtb`, so the dump shows the command line that would really be used.
+
 ## How to run riscv-tests
 
 ```sh
