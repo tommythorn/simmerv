@@ -130,6 +130,7 @@ pub struct Mmu {
     /// where nothing ever re-zeroes it.
     pub cosim_mem_kind: u8,
     pub cosim_mem_ram: bool, // access was RAM (readback is safe; MMIO readback has side effects)
+    pub cosim_mem_size: u8,  // bytes of the access (1/2/4/8), for the cosim's store-data check
 
     /// CLINT — always present, serviced every cycle outside the device queue.
     clint: (Range<u64>, Clint),
@@ -325,6 +326,7 @@ impl Mmu {
             cosim_mem_pa: 0,
             cosim_mem_kind: COSIM_MEM_INACTIVE,
             cosim_mem_ram: false,
+            cosim_mem_size: 0,
             cycle: 0,
             itlb: Tlb::new(),
             dtlb: DTlb::new(),
@@ -1618,7 +1620,10 @@ impl Mmu {
             if is_napot && (j != 0 || ppn & 0xf != 0x8) {
                 warn!("** access to {va:08x} denied: unsupported NAPOT PTE {ppn:#x}");
                 break;
-            } else if !is_napot && ((1 << j) - 1) & ppn != 0 {
+            } else if !is_napot && ((1u64 << (pte_bits * j)) - 1) & ppn != 0 {
+                // A level-j leaf must have its low 9*j PPN bits clear (Sv39:
+                // 512 for a megapage, 2^18 for a gigapage); a
+                // misaligned superpage is a page fault.
                 warn!("** access to {va:08x} denied: misaligned superpage {i} / {ppn}");
                 break;
             }

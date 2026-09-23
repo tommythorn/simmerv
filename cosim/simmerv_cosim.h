@@ -33,7 +33,8 @@ typedef struct {
     // loads and stores; compare mem_rdback on RAM stores.
     uint8_t  mem_kind;    // 0 = none, 1 = load, 2 = store
     uint8_t  mem_ram;     // 1 = RAM (mem_rdback valid), 0 = MMIO
-    uint8_t  _pad2[6];
+    uint8_t  mem_size;    // bytes of the access (1/2/4/8); a RAM store is then byte-exact against mem_rdback
+    uint8_t  _pad2[5];
     uint64_t mem_pa;      // physical address of the access
     uint64_t mem_rdback;  // RAM store only: aligned 64-bit word AFTER the store
 } SimmervRetire;

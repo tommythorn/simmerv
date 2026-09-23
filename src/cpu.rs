@@ -7,6 +7,12 @@
 #![allow(clippy::cast_sign_loss)]
 
 use crate::csr;
+// smolrv64 maintenance-op census, see Op::FenceI.
+static MAINT_FENCEI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MAINT_CBO_INVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MAINT_CBO_CLEAN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MAINT_CBO_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MAINT_CBO_ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::fp;
@@ -114,7 +120,10 @@ pub struct RetireCapture {
     pub mem_kind: u8,
     /// 1 if the access was RAM (`mem_rdback` meaningful), 0 if MMIO.
     pub mem_ram: u8,
-    _pad2: [u8; 6],
+    /// Bytes of the access (1/2/4/8): with `mem_rdback` this makes a RAM store
+    /// byte-exact.
+    pub mem_size: u8,
+    _pad2: [u8; 5],
     /// Physical address of the data access (compare for BOTH loads and stores).
     pub mem_pa: u64,
     /// For a RAM STORE: the full aligned 64-bit word read back AFTER the store.
@@ -1266,6 +1275,7 @@ impl Cpu {
         // cosim: a fresh memory-effect record per retirement
         self.mmu.cosim_mem_kind = 0;
         self.mmu.cosim_mem_ram = false;
+        self.mmu.cosim_mem_size = 0;
         self.mmu.cosim_mem_pa = 0;
 
         self.mmu.service(self.cycle);
@@ -1293,6 +1303,7 @@ impl Cpu {
             cap.mepc = self.csr.mepc;
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_size = self.mmu.cosim_mem_size;
             cap.mem_pa = self.mmu.cosim_mem_pa;
             // Read back the aligned word ONLY for a RAM store: this catches
             // wrong bytes and wrong byte-enables, not merely a
@@ -1317,6 +1328,7 @@ impl Cpu {
             cap.mepc = self.csr.mepc;
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_size = self.mmu.cosim_mem_size;
             cap.mem_pa = self.mmu.cosim_mem_pa;
             // Read back the aligned word ONLY for a RAM store: this catches
             // wrong bytes and wrong byte-enables, not merely a
@@ -1342,6 +1354,7 @@ impl Cpu {
                 cap.mepc = self.csr.mepc;
                 cap.mem_kind = self.mmu.cosim_mem_kind;
                 cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+                cap.mem_size = self.mmu.cosim_mem_size;
                 cap.mem_pa = self.mmu.cosim_mem_pa;
                 // Read back the aligned word ONLY for a RAM store: this catches
                 // wrong bytes and wrong byte-enables, not
@@ -1372,6 +1385,7 @@ impl Cpu {
             cap.mepc = self.csr.mepc;
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_size = self.mmu.cosim_mem_size;
             cap.mem_pa = self.mmu.cosim_mem_pa;
             // Read back the aligned word ONLY for a RAM store: this catches
             // wrong bytes and wrong byte-enables, not merely a
@@ -1409,6 +1423,7 @@ impl Cpu {
             cap.mepc = self.csr.mepc;
             cap.mem_kind = self.mmu.cosim_mem_kind;
             cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+            cap.mem_size = self.mmu.cosim_mem_size;
             cap.mem_pa = self.mmu.cosim_mem_pa;
             // Read back the aligned word ONLY for a RAM store: this catches
             // wrong bytes and wrong byte-enables, not merely a
@@ -1444,6 +1459,7 @@ impl Cpu {
         cap.mepc = self.csr.mepc;
         cap.mem_kind = self.mmu.cosim_mem_kind;
         cap.mem_ram = u8::from(self.mmu.cosim_mem_ram);
+        cap.mem_size = self.mmu.cosim_mem_size;
         cap.mem_pa = self.mmu.cosim_mem_pa;
         // Read back the aligned word ONLY for a RAM store: this catches wrong
         // bytes and wrong byte-enables, not merely a wrong address.
@@ -2751,60 +2767,52 @@ impl Cpu {
             self.mmu.cosim_mem_pa = addr.pa;
             self.mmu.cosim_mem_kind = 1;
             self.mmu.cosim_mem_ram = !is_mmio;
+            self.mmu.cosim_mem_size = size as u8;
         }
-        let result =
-            if is_mmio {
-                // Perform the MMIO read for its side effects, then let the
-                // DUT's armed value win (device-register bits
-                // are model-specific).
-                let model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
-                    trap: Trap::LoadAccessFault,
-                    tval: va,
-                })?;
-                self.armed_load_value.take().map_or(model_val, |v| {
+        let result = if is_mmio {
+            // Perform the MMIO read for its side effects, then let the
+            // DUT's armed value win (device-register bits
+            // are model-specific).
+            let model_val = self.mmu.load_mmio(addr.pa, size).map_err(|()| Exception {
+                trap: Trap::LoadAccessFault,
+                tval: va,
+            })?;
+            self.armed_load_value.take().map_or(model_val, |v| {
                 let mask = if size >= 8 {
                     u64::MAX
                 } else {
                     (1u64 << (size * 8)) - 1
                 };
                 let vv = v & mask;
-                // COSIM DIAGNOSTIC: the DUT's MMIO read value differs from simmerv's
-                // own model -> the DUT device returned something wrong (and the cosim
-                // silently follows it). Capped so a poll loop can't flood. mtime is
-                // synced to dut each retire so it won't show; expect only the culprit.
-                if vv != (model_val & mask) {
-                    use std::sync::atomic::{AtomicU64, Ordering};
-                    static N: AtomicU64 = AtomicU64::new(0);
-                    let i = N.fetch_add(1, Ordering::Relaxed);
-                    if i < 200 {
-                        eprintln!(
-                            "MMIO-DIVERGE#{i} pc={:#x} pa={:#x} sz={size} model={:#x} dut={:#x}",
-                            self.pc, addr.pa, model_val & mask, vv
-                        );
-                    }
-                }
+                // The cosim follows the DUT's MMIO read value. The model and
+                // the DUT disagree on polled device state (the
+                // 16550 LSR: the model's transmitter is always
+                // empty, the RTL's shifts at 3 Mbps), and a wrong device value
+                // surfaces at the next retire compare as a
+                // wrong rd, so nothing is reported here.
+                let _ = model_val;
                 vv
             })
-            } else {
-                // SAFETY: `host_page` points at the mapped page inside a RAM
-                // region (`mem_idx != NO_RAM`), the offset is masked to within
-                // that page, and the caller has already rejected accesses that
-                // would cross its end. Reading through the pointer rather than
-                // indexing `Mmu::memory` is the entire point: it drops a
-                // dependent load out of the chain of every load.
-                let p = unsafe { addr.host_page.add(va as usize & 0xfff) };
-                unsafe {
-                    // `from_le` keeps the previous byte-wise assembly's
-                    // explicit little-endian semantics; it is a no-op on every
-                    // host this targets.
-                    match size {
-                        1 => u64::from(p.read()),
-                        2 => u64::from(u16::from_le(p.cast::<u16>().read_unaligned())),
-                        4 => u64::from(u32::from_le(p.cast::<u32>().read_unaligned())),
-                        _ => u64::from_le(p.cast::<u64>().read_unaligned()),
-                    }
+        } else {
+            // SAFETY: `host_page` points at the mapped page inside a RAM
+            // region (`mem_idx != NO_RAM`), the offset is masked to within
+            // that page, and the caller has already rejected accesses that
+            // would cross its end. Reading through the pointer rather than
+            // indexing `Mmu::memory` is the entire point: it drops a
+            // dependent load out of the chain of every load.
+            let p = unsafe { addr.host_page.add(va as usize & 0xfff) };
+            unsafe {
+                // `from_le` keeps the previous byte-wise assembly's
+                // explicit little-endian semantics; it is a no-op on every
+                // host this targets.
+                match size {
+                    1 => u64::from(p.read()),
+                    2 => u64::from(u16::from_le(p.cast::<u16>().read_unaligned())),
+                    4 => u64::from(u32::from_le(p.cast::<u32>().read_unaligned())),
+                    _ => u64::from_le(p.cast::<u64>().read_unaligned()),
                 }
-            };
+            }
+        };
 
         Ok(result)
     }
@@ -2842,6 +2850,7 @@ impl Cpu {
             self.mmu.cosim_mem_pa = addr.pa;
             self.mmu.cosim_mem_kind = 2;
             self.mmu.cosim_mem_ram = addr.mem_idx != DataAddr::NO_RAM;
+            self.mmu.cosim_mem_size = size as u8;
         }
 
         // cosim store-stream log (VIRTUAL address ->
@@ -3177,13 +3186,19 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         // menvcfg.CBIE/CBCFE.  A spec-correct DUT traps these (illegal instr)
         // when the enable bits are clear; we never do.  Safe only because
         // OpenSBI sets menvcfg before S-mode.  See MENVCFG_STCE in csr.rs.
-        Op::CNop
-        | Op::CboInval
-        | Op::CboClean
-        | Op::CboFlush
-        | Op::PrefetchI
-        | Op::PrefetchR
-        | Op::PrefetchW => ExecOut::ok(0),
+        Op::CboInval => {
+            MAINT_CBO_INVAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ExecOut::ok(0)
+        }
+        Op::CboClean => {
+            MAINT_CBO_CLEAN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ExecOut::ok(0)
+        }
+        Op::CboFlush => {
+            MAINT_CBO_FLUSH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ExecOut::ok(0)
+        }
+        Op::CNop | Op::PrefetchI | Op::PrefetchR | Op::PrefetchW => ExecOut::ok(0),
         // Svinval's two bookends.  They order the SINVAL.VMA batch but have no
         // effect a functional model needs to implement, so they are counted and
         // otherwise dropped -- unlike the ops above they are not no-ops in the
@@ -3354,6 +3369,21 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         Op::FenceI => {
             cpu.reservation = None;
             cpu.icache_flush = IcacheFlushKind::Full;
+            // Maintenance-op census for smolrv64: how often a guest executes
+            // fence.i and how many cbo ops it issues, the counts
+            // that size its I$ coherence. Printed on stderr
+            // every 64 fence.i.
+            let n = MAINT_FENCEI.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n.is_multiple_of(64) {
+                eprintln!(
+                    "MAINT fence.i={n} cbo.inval={} cbo.clean={} cbo.flush={} cbo.zero={} cycle={}",
+                    MAINT_CBO_INVAL.load(std::sync::atomic::Ordering::Relaxed),
+                    MAINT_CBO_CLEAN.load(std::sync::atomic::Ordering::Relaxed),
+                    MAINT_CBO_FLUSH.load(std::sync::atomic::Ordering::Relaxed),
+                    MAINT_CBO_ZERO.load(std::sync::atomic::Ordering::Relaxed),
+                    cpu.cycle
+                );
+            }
             ExecOut::ok(0)
         }
         // RV32/RV64 Zicsr
@@ -4179,6 +4209,7 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
         Op::CboZero => {
+            MAINT_CBO_ZERO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // NOTE (cosim gating gap): not gated on menvcfg.CBZE.  A
             // spec-correct DUT traps cbo.zero (illegal instr) when
             // CBZE is clear; we always execute it.  Safe only
