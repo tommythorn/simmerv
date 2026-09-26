@@ -660,12 +660,16 @@ impl Cpu {
     #[must_use]
     pub fn read_register(&self, reg: Reg) -> u64 { self.rf[reg] }
 
-    /// CSR `csrno` as M-mode reads it with the FP unit on, or `None` where it
-    /// does not exist: the architectural checkpoint writer's view.
+    /// CSR `csrno` as M-mode reads it, or `None` where it does not exist: the
+    /// architectural checkpoint writer's view. The FP CSRs (fflags, frm, fcsr)
+    /// read as if the FP unit were on, since they hold state even while
+    /// `mstatus.FS` is Off; FS itself, in `mstatus`, reads as it is.
     pub fn read_csr_m(&mut self, csrno: u16) -> Option<u64> {
         let (prv, fs) = (self.mmu.prv, self.fs);
         self.mmu.prv = PrivMode::M;
-        self.fs = self.fs.max(1);
+        if matches!(csrno, 0x001..=0x003) {
+            self.fs = self.fs.max(1);
+        }
         let v = self.read_csr(csrno).ok();
         (self.mmu.prv, self.fs) = (prv, fs);
         v
