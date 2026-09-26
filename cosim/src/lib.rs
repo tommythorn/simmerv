@@ -49,6 +49,36 @@ pub unsafe extern "C" fn simmerv_destroy(ctx: *mut SimmervCtx) {
     }
 }
 
+/// Restore the architectural checkpoint in directory `dir` (a NUL-terminated
+/// path) from its `sim.snap`, the snapshot the checkpoint writer takes
+/// (`simmerv-cli --ckpt-at`). mtime stays frozen at the checkpoint's value.
+/// Returns 0 on success, -1 on NULL arguments, an unreadable file or a
+/// snapshot that does not load.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_load_ckpt(
+    ctx: *mut SimmervCtx,
+    dir: *const std::ffi::c_char,
+) -> c_int {
+    let Some(ctx) = (unsafe { ctx.as_mut() }) else {
+        return -1;
+    };
+    if dir.is_null() {
+        return -1;
+    }
+    let dir = unsafe { std::ffi::CStr::from_ptr(dir) }.to_string_lossy();
+    let path = std::path::Path::new(dir.as_ref()).join("sim.snap");
+    let loaded = std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|d| ctx.emu.load_snapshot(&d).map_err(|e| e.to_string()));
+    match loaded {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("simmerv_load_ckpt: {}: {e}", path.display());
+            -1
+        }
+    }
+}
+
 /// Write a byte buffer into simmerv's physical memory at `phys_addr`.
 /// Used to mirror smolrv64's `$readmemh` initialization.
 /// Returns 0 on success, -1 on NULL ctx.

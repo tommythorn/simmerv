@@ -437,6 +437,10 @@ pub struct Cpu {
 
     // Supervisor and CSR
     pub cycle: u64,
+    /// `--insn-time K`: when non-zero, mtime = cycle / K at each batch boundary
+    /// (the CLINT frozen), so a run and its timer interrupts are the same
+    /// on every host.
+    pub insn_time: u64,
     csr: csr::CsrFile,
     reservation: Option<u64>,
 
@@ -577,6 +581,7 @@ impl Cpu {
             csr: CsrFile::new(),
             mmu,
             reservation: None,
+            insn_time: 0,
             icache_flush: IcacheFlushKind::None,
             hpm_bb: crate::uop_cache::UopCacheStats::default(),
             hpm_last: [0; csr::HPM_LAST + 1],
@@ -654,6 +659,39 @@ impl Cpu {
     /// * `reg` Register number. Must be 0-31
     #[must_use]
     pub fn read_register(&self, reg: Reg) -> u64 { self.rf[reg] }
+
+    /// CSR `csrno` as M-mode reads it with the FP unit on, or `None` where it
+    /// does not exist: the architectural checkpoint writer's view.
+    pub fn read_csr_m(&mut self, csrno: u16) -> Option<u64> {
+        let (prv, fs) = (self.mmu.prv, self.fs);
+        self.mmu.prv = PrivMode::M;
+        self.fs = self.fs.max(1);
+        let v = self.read_csr(csrno).ok();
+        (self.mmu.prv, self.fs) = (prv, fs);
+        v
+    }
+
+    /// Leave in `mepc`, `mstatus.MPIE` and `mstatus.MPP` what an `mret` to the
+    /// current PC leaves (the PC, 1, U). Below M-mode the three are dead --
+    /// only M-mode reads them, and every way into M-mode is a trap that
+    /// writes them first -- so nothing observes the change; a checkpoint's
+    /// restore stub enters it with that `mret`.
+    ///
+    /// # Panics
+    /// In M-mode, where the three are live.
+    pub fn settle_mret_state(&mut self) {
+        assert!(
+            self.mmu.prv != PrivMode::M,
+            "M-mode reads mepc, MPP and MPIE"
+        );
+        self.csr.mepc = self.pc;
+        self.mmu.mstatus = self.mmu.mstatus & !csr::MSTATUS_MPP | csr::MSTATUS_MPIE;
+    }
+
+    /// No LR reservation open and not waiting in `wfi`: the hart state a
+    /// checkpoint can capture.
+    #[must_use]
+    pub const fn hart_quiescent(&self) -> bool { self.reservation.is_none() && !self.wfi }
 
     #[must_use]
     pub const fn debug_mie(&self) -> u64 { self.csr.mie }
@@ -792,6 +830,9 @@ impl Cpu {
                     return true;
                 }
             }
+        }
+        if let Some(t) = self.cycle.checked_div(self.insn_time) {
+            self.mmu.write_mtime_csr(t);
         }
         self.mmu.service(self.cycle);
         // Sstc: drive STIP from stimecmp when menvcfg.STCE is set
@@ -2408,6 +2449,7 @@ impl Cpu {
     ///   [1 B] fflags
     ///   [1 B] fs
     ///   [8 B] cycle
+    ///   [8 B] seqno
     ///   [1 B] wfi
     ///   [1 B] reservation flag (0=None, 1=Some) + [8 B] value
     ///   [20×8 B] CSR fields (fixed order, see `read_state`)
@@ -2426,6 +2468,7 @@ impl Cpu {
             w.u8(self.fflags);
             w.u8(self.fs);
             w.u64(self.cycle);
+            w.u64(self.seqno as u64);
             w.bool(self.wfi);
             match self.reservation {
                 None => {
@@ -2521,6 +2564,7 @@ impl Cpu {
         self.fflags = r.u8()?;
         self.fs = r.u8()?;
         self.cycle = r.u64()?;
+        self.seqno = usize::try_from(r.u64()?).map_err(|_| ())?;
         self.wfi = r.bool()?;
         self.reservation = if r.u8()? == 0 {
             let _ = r.u64()?;

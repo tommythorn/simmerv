@@ -1,3 +1,4 @@
+mod ckpt;
 mod dummy_terminal;
 mod nonblocknoecho;
 mod popup_terminal;
@@ -95,6 +96,19 @@ struct Args {
     /// init=/bench-init.sh"` boots straight into a workload with no login
     #[argh(option)]
     append: Option<String>,
+
+    /// write architectural checkpoints (see sim/src/ckpt.rs): format
+    /// "N[,N...]:dir". At each instruction count N the run advances to the next
+    /// point a restore stub can reproduce exactly and writes
+    /// dir/N.ckpt/; the run ends after the last one
+    #[argh(option)]
+    ckpt_at: Option<String>,
+
+    /// deterministic time: freeze the CLINT and set mtime = cycle / K at every
+    /// batch boundary, so a run and its timer interrupts are the same on every
+    /// host
+    #[argh(option)]
+    insn_time: Option<u64>,
 
     /// take periodic snapshots: format "N:base_name" where N is tick interval
     #[argh(option, short = 'S')]
@@ -207,6 +221,10 @@ fn parse_insn_count(spec: &str) -> anyhow::Result<u64> {
     n.checked_mul(scale)
         .ok_or_else(|| anyhow!("instruction count {spec} overflows a u64"))
 }
+
+/// How far past a requested checkpoint the run may go looking for a restorable
+/// point.
+const CKPT_SEARCH: u64 = 100_000_000;
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() -> anyhow::Result<()> {
@@ -484,9 +502,58 @@ fn main() -> anyhow::Result<()> {
         emulator.set_max_insns(parse_insn_count(spec)?);
     }
 
-    // Run with optional periodic snapshots, or plain run.
+    if let Some(k) = args.insn_time {
+        if k == 0 {
+            bail!("--insn-time must be positive");
+        }
+        emulator.cpu.mmu.freeze_clint(0);
+        emulator.cpu.insn_time = k;
+    }
+
+    // Run with checkpoints, optional periodic snapshots, or plain run.
     let started = std::time::Instant::now();
-    if let Some(spec) = args.snapshot_interval {
+    if let Some(ref spec) = args.ckpt_at {
+        let (points, dir) = spec
+            .split_once(':')
+            .ok_or_else(|| anyhow!("--ckpt-at wants N[,N...]:dir, got {spec:?}"))?;
+        let mut points = points
+            .split(',')
+            .map(parse_insn_count)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        points.sort_unstable();
+        let cmdline = std::env::args().collect::<Vec<_>>().join(" ");
+        for n in points {
+            emulator.set_max_insns(n);
+            emulator.run_program();
+            if emulator.insns_retired() < n {
+                bail!(
+                    "the guest stopped at {} instructions, before checkpoint {n}",
+                    emulator.insns_retired()
+                );
+            }
+            // The run loop's own batch, so the batches stay those of a straight
+            // run.
+            while !ckpt::quiescent(&mut emulator) {
+                if emulator.insns_retired() >= n + CKPT_SEARCH {
+                    bail!("no restorable point within {CKPT_SEARCH} instructions of {n}");
+                }
+                emulator.tick(600);
+            }
+            let path = std::path::Path::new(dir).join(format!("{n}.ckpt"));
+            let provenance = format!(
+                "simmerv {} at {} instructions: {cmdline}",
+                env!("CARGO_PKG_VERSION"),
+                emulator.insns_retired()
+            );
+            ckpt::write(&mut emulator, &path, &provenance)
+                .with_context(|| path.display().to_string())?;
+            eprintln!(
+                "checkpoint → {} [instret={}]",
+                path.display(),
+                emulator.insns_retired()
+            );
+        }
+    } else if let Some(spec) = args.snapshot_interval {
         // Format: "N:base_name"
         let mut parts = spec.splitn(2, ':');
         let interval_str = parts.next().unwrap_or("0");

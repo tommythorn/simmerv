@@ -182,7 +182,7 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
 /// Anything that writes, validates, or sniffs a snapshot must use this rather
 /// than spelling the bytes out -- three hand-written copies is exactly how the
 /// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
-pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC11";
+pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC12";
 
 /// Where [`Emulator::setup_initrd`] put the ramdisk and the tree it edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
