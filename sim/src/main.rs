@@ -104,6 +104,12 @@ struct Args {
     #[argh(option)]
     ckpt_at: Option<String>,
 
+    /// print "[instret N]" to stderr every N instructions (a plain count or a
+    /// k/M/G suffix), after flushing the console, so the guest's output can be
+    /// placed in the instruction stream -- e.g. to choose --ckpt-at points
+    #[argh(option)]
+    mark_every: Option<String>,
+
     /// deterministic time: freeze the CLINT and set mtime = cycle / K at every
     /// batch boundary, so a run and its timer interrupts are the same on every
     /// host
@@ -512,7 +518,23 @@ fn main() -> anyhow::Result<()> {
 
     // Run with checkpoints, optional periodic snapshots, or plain run.
     let started = std::time::Instant::now();
-    if let Some(ref spec) = args.ckpt_at {
+    if let Some(ref spec) = args.mark_every {
+        let every = parse_insn_count(spec)?;
+        if every == 0 {
+            bail!("--mark-every must be positive");
+        }
+        let mut next = every;
+        loop {
+            emulator.set_max_insns(next);
+            emulator.run_program();
+            io::stdout().flush()?;
+            if emulator.insns_retired() < next {
+                break;
+            }
+            eprintln!("[instret {}]", emulator.insns_retired());
+            next += every;
+        }
+    } else if let Some(ref spec) = args.ckpt_at {
         let (points, dir) = spec
             .split_once(':')
             .ok_or_else(|| anyhow!("--ckpt-at wants N[,N...]:dir, got {spec:?}"))?;
