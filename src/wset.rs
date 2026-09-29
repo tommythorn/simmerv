@@ -30,8 +30,9 @@
 //! Reports are cumulative, so a window is the difference of its two. Between
 //! windows the hook only counts down.
 //!
-//! `SIMMERV_WSET_LITE` keeps only the split cache, the plain 2-way caches and
-//! the 16-entry TLB.
+//! `SIMMERV_WSET_LITE` keeps only the split and skewed caches, the plain 2-way
+//! caches and the TLB models beside them; `SIMMERV_WSET_NRU` swaps the cache
+//! models for a comparison of placements in the skewed caches.
 //!
 //! Translation facts come from a side-effect-free Sv39 walk of the live page
 //! tables, cached per `(satp, 4 KiB page)` and invalidated by every
@@ -53,6 +54,7 @@ use crate::mmu::Mmu;
 use fnv::FnvHashMap;
 use skew::DmTlbs;
 use skew::Pipt;
+use skew::Place;
 use skew::Virt;
 use skew::Xtlb;
 use split::Policy;
@@ -512,6 +514,9 @@ const CLS_NAME: [&str; 5] = [
     "irregular",
 ];
 
+/// Placements compared under `SIMMERV_WSET_NRU`.
+const NRU: [Place; 4] = [Place::Lru, Place::NruW0, Place::NruW1, Place::NruOlder];
+
 /// Returned by [`Wset::insn`] when the recorder is finished.
 pub const DROP: u64 = u64::MAX;
 
@@ -625,6 +630,8 @@ impl Wset {
         let dir = PathBuf::from(std::env::var_os("SIMMERV_WSET")?);
         std::fs::create_dir_all(&dir).ok()?;
         let lite = std::env::var_os("SIMMERV_WSET_LITE").is_some();
+        // The placement comparison instead of the default set of cache models.
+        let nru = std::env::var_os("SIMMERV_WSET_NRU").is_some();
         let abs = env_count("SIMMERV_WSET_BASE", 0);
         let sample = std::env::var_os("SIMMERV_WSET_PERIOD").map(|_| Sample {
             period: env_count("SIMMERV_WSET_PERIOD", 0).max(1),
@@ -785,33 +792,45 @@ impl Wset {
             fa_imiss: Curve::new(),
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
-            split: [
-                (Policy::P1, 0),
-                (Policy::P4, 0),
-                (Policy::P1, 2),
-                (Policy::P4, 2),
-            ]
-            .iter()
-            .map(|&(p, d)| Split::new(p, d, false, d == 0))
-            .collect(),
+            split: if nru {
+                vec![]
+            } else {
+                [
+                    (Policy::P1, 0),
+                    (Policy::P4, 0),
+                    (Policy::P1, 2),
+                    (Policy::P4, 2),
+                ]
+                .iter()
+                .map(|&(p, d)| Split::new(p, d, false, d == 0))
+                .collect()
+            },
             virt: {
                 let mut v = vec![];
-                for ptag1 in [false, true] {
-                    for reuse in [false, true] {
-                        for dentries in [1024, 2048] {
-                            v.push(Virt::new(ptag1, reuse, dentries, 0));
+                if nru {
+                    v.extend(NRU.iter().map(|&p| Virt::new(false, p, 2048, 0)));
+                } else {
+                    for ptag1 in [false, true] {
+                        for place in [Place::Lru, Place::Reuse] {
+                            for dentries in [1024, 2048] {
+                                v.push(Virt::new(ptag1, place, dentries, 0));
+                            }
                         }
                     }
-                }
-                for ptag1 in [false, true] {
-                    for reuse in [false, true] {
-                        v.push(Virt::new(ptag1, reuse, 2048, 2));
+                    for ptag1 in [false, true] {
+                        for place in [Place::Lru, Place::Reuse] {
+                            v.push(Virt::new(ptag1, place, 2048, 2));
+                        }
                     }
                 }
                 v
             },
             dm_all: DmTlbs::new(),
-            pipt: vec![Pipt::new(0), Pipt::new(2)],
+            pipt: if nru {
+                NRU.iter().map(|&p| Pipt::new(0, p)).collect()
+            } else {
+                vec![Pipt::new(0, Place::Lru), Pipt::new(2, Place::Lru)]
+            },
             xt: vec![
                 Xtlb::new(16, 1, true),
                 Xtlb::new(32, 32, false),

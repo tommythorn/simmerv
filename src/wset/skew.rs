@@ -21,9 +21,7 @@
 //! by an xor-fold of the physical line; every access is translated first
 //! (see [`Xtlb`]), and a physical line has exactly two possible slots.
 //!
-//! Both place a new line in the less recently used of its two candidate
-//! slots; [`Virt`] also has a variant that fills way 0 unless the way-0
-//! candidate has been hit since it was last considered.
+//! Placement between a new line's two candidate slots is one of [`Place`].
 
 use super::F_PF;
 use super::NO_LINE;
@@ -36,6 +34,53 @@ use std::fmt::Write as _;
 const SETS: usize = 1024;
 const ROWS: usize = 64;
 const F_REUSE: u8 = 16;
+/// Not-recently-used state: set when a line is filled or hit.
+const F_USED: u8 = 32;
+
+/// Which of its two candidate slots a new line fills.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Place {
+    /// The less recently used of the two.
+    Lru,
+    /// Way 0, unless its line has been hit since it was last considered.
+    Reuse,
+    /// The one whose used bit is clear, way 0 if both are; if both are set,
+    /// clear both and fill way 0.
+    NruW0,
+    /// As `NruW0`, but fill way 1 when both used bits are set.
+    NruW1,
+    /// As `NruW0`, but fill the earlier-filled one when both are set.
+    NruOlder,
+}
+
+/// Whether a new line goes to way-0 candidate `a` rather than way-1
+/// candidate `b` (`Place::Reuse` is decided by the caller).
+fn choose(a: &mut Slot, b: &mut Slot, place: Place) -> bool {
+    if a.pa == NO_LINE {
+        return true;
+    }
+    if b.pa == NO_LINE {
+        return false;
+    }
+    match place {
+        Place::Lru | Place::Reuse => a.stamp <= b.stamp,
+        _ => {
+            if a.flags & F_USED == 0 {
+                return true;
+            }
+            if b.flags & F_USED == 0 {
+                return false;
+            }
+            a.flags &= !F_USED;
+            b.flags &= !F_USED;
+            match place {
+                Place::NruW1 => false,
+                Place::NruOlder => a.filled <= b.filled,
+                _ => true,
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Slot {
@@ -43,6 +88,8 @@ struct Slot {
     va: u64,
     epoch: u32,
     stamp: u64,
+    /// When the line was filled.
+    filled: u64,
     flags: u8,
 }
 
@@ -51,6 +98,7 @@ const EMPTY: Slot = Slot {
     va: NO_LINE,
     epoch: 0,
     stamp: 0,
+    filled: 0,
     flags: 0,
 };
 
@@ -118,7 +166,7 @@ struct Pf {
 pub struct Virt {
     pub name: String,
     pub degree: i64,
-    reuse: bool,
+    place: Place,
     ptag1: bool,
     /// Direct-mapped TLBs on this cache's way-0 misses.
     dm: DmTlbs,
@@ -150,11 +198,15 @@ pub struct Virt {
 }
 
 impl Virt {
-    pub fn new(ptag1: bool, reuse: bool, dentries: usize, degree: i64) -> Self {
+    pub fn new(ptag1: bool, place: Place, dentries: usize, degree: i64) -> Self {
         let mut name = format!(
             "{}-{}-D{dentries}",
             if ptag1 { "Bp" } else { "B" },
-            if reuse { "reuse" } else { "LRU" }
+            match place {
+                Place::Lru => "LRU".to_string(),
+                Place::Reuse => "reuse".to_string(),
+                p => format!("{p:?}"),
+            }
         );
         if degree > 0 {
             let _ = write!(name, "-RPT64d{degree}");
@@ -162,7 +214,7 @@ impl Virt {
         Self {
             name,
             degree,
-            reuse,
+            place,
             ptag1,
             dm: DmTlbs::new(),
             spec: 0,
@@ -276,17 +328,17 @@ impl Virt {
             va: vl,
             epoch: self.epoch,
             stamp: self.clk,
-            flags,
+            filled: self.clk,
+            flags: flags | F_USED,
         };
-        let to_w0 = if self.reuse {
+        let to_w0 = if self.place == Place::Reuse {
             let reused = self.w0[i].pa != NO_LINE && self.w0[i].flags & F_REUSE != 0;
             if reused {
                 self.w0[i].flags &= !F_REUSE;
             }
             !reused
         } else {
-            self.w0[i].pa == NO_LINE
-                || (self.w1[j].pa != NO_LINE && self.w0[i].stamp <= self.w1[j].stamp)
+            choose(&mut self.w0[i], &mut self.w1[j], self.place)
         };
         if to_w0 {
             self.w0[i] = new;
@@ -340,7 +392,8 @@ impl Virt {
             va: NO_LINE,
             epoch: 0,
             stamp: self.clk,
-            flags: 0,
+            filled: self.clk,
+            flags: F_USED,
         };
         self.d_insert(pl, j);
     }
@@ -359,7 +412,7 @@ impl Virt {
         if self.live(&self.w0[i], vl) {
             self.hit0 += 1;
             let f = self.use_line(self.w0[i].flags);
-            self.w0[i].flags = f | F_REUSE;
+            self.w0[i].flags = f | F_REUSE | F_USED;
             self.w0[i].stamp = self.clk;
             return;
         }
@@ -367,7 +420,7 @@ impl Virt {
         if !self.ptag1 && self.live(&self.w1[j], vl) {
             self.hit1 += 1;
             let f = self.use_line(self.w1[j].flags);
-            self.w1[j].flags = f;
+            self.w1[j].flags = f | F_USED;
             self.w1[j].stamp = self.clk;
             return;
         }
@@ -385,7 +438,7 @@ impl Virt {
                 va: vl,
                 epoch: self.epoch,
                 stamp: self.clk,
-                flags: f,
+                flags: f | F_USED,
                 ..self.w1[j]
             };
             return;
@@ -397,6 +450,7 @@ impl Virt {
             va: vl,
             epoch,
             stamp: clk,
+            flags: s.flags | F_USED,
             ..s
         };
         match self.find(pl) {
@@ -493,6 +547,7 @@ impl Virt {
 pub struct Pipt {
     pub name: String,
     pub degree: i64,
+    place: Place,
     pub tlb: Xtlb,
     w0: Vec<Slot>,
     w1: Vec<Slot>,
@@ -506,14 +561,18 @@ pub struct Pipt {
 }
 
 impl Pipt {
-    pub fn new(degree: i64) -> Self {
+    pub fn new(degree: i64, place: Place) -> Self {
+        let mut name = "PIPT-skew".to_string();
+        if place != Place::Lru {
+            let _ = write!(name, "-{place:?}");
+        }
+        if degree > 0 {
+            let _ = write!(name, "-RPT64d{degree}");
+        }
         Self {
-            name: if degree > 0 {
-                format!("PIPT-skew-RPT64d{degree}")
-            } else {
-                "PIPT-skew".to_string()
-            },
+            name,
             degree,
+            place,
             tlb: Xtlb::new(16, 1, true),
             w0: vec![EMPTY; SETS],
             w1: vec![EMPTY; SETS],
@@ -543,11 +602,10 @@ impl Pipt {
             va: NO_LINE,
             epoch: 0,
             stamp: self.clk,
-            flags,
+            filled: self.clk,
+            flags: flags | F_USED,
         };
-        if self.w0[i].pa == NO_LINE
-            || (self.w1[j].pa != NO_LINE && self.w0[i].stamp <= self.w1[j].stamp)
-        {
+        if choose(&mut self.w0[i], &mut self.w1[j], self.place) {
             self.w0[i] = new;
         } else {
             self.w1[j] = new;
@@ -566,6 +624,7 @@ impl Pipt {
             };
             if s.pa == pl {
                 s.stamp = self.clk;
+                s.flags |= F_USED;
                 if s.flags & F_PF != 0 {
                     s.flags &= !F_PF;
                     self.pf.useful += 1;
