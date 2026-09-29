@@ -18,3 +18,4 @@ zstd = "0.13.3"
 
 [features]
 paranoid-tlb = ["simmerv/paranoid-tlb"]
+wset = ["simmerv/wset"]

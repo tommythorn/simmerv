@@ -84,6 +84,7 @@ const SUPERPAGE_MASK: u64 = (1 << SUPERPAGE_SHIFT) - 1;
 ///
 /// It also manages virtual-physical address translation and memory protection.
 /// It could also be called Bus.
+#[cfg_attr(feature = "wset", allow(clippy::struct_excessive_bools))]
 pub struct Mmu {
     // CPU state that lives here
     pub prv: PrivMode,
@@ -201,6 +202,13 @@ pub struct Mmu {
     /// ASID-shaped is moot.
     pub satp_asid_nonzero: u64,
     pub asid_seen: [u64; 16],
+
+    /// The `wset` recorder, created at the first instruction when
+    /// `SIMMERV_WSET` asks for one.
+    #[cfg(feature = "wset")]
+    pub wset: Option<Box<crate::wset::Wset>>,
+    #[cfg(feature = "wset")]
+    wset_init: bool,
 }
 
 /// Result of a data address translation.
@@ -349,6 +357,10 @@ impl Mmu {
             sfence_inval_ir: 0,
             satp_asid_nonzero: 0,
             asid_seen: [0; 16],
+            #[cfg(feature = "wset")]
+            wset: None,
+            #[cfg(feature = "wset")]
+            wset_init: false,
         }
     }
 
@@ -1363,6 +1375,30 @@ impl Mmu {
         access_type: MemoryAccessType,
         side_effect_free: bool,
     ) -> Result<DataAddr, Exception> {
+        #[cfg(feature = "wset")]
+        if !side_effect_free && self.wset.is_some() {
+            let r = self.translate_data_address_inner(address, access_type, false);
+            if let Ok(d) = &r {
+                self.wset_data(address, d.pa, access_type == MemoryAccessType::Write);
+            }
+            return r;
+        }
+        self.translate_data_address_inner(address, access_type, side_effect_free)
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::missing_panics_doc,
+        clippy::too_many_lines,
+        clippy::inline_always
+    )]
+    #[inline(always)]
+    fn translate_data_address_inner(
+        &mut self,
+        address: u64,
+        access_type: MemoryAccessType,
+        side_effect_free: bool,
+    ) -> Result<DataAddr, Exception> {
         let effective_prv = if self.mstatus & MSTATUS_MPRV != 0 {
             priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
         } else {
@@ -1500,6 +1536,97 @@ impl Mmu {
             mem_idx: DataAddr::NO_RAM,
             page_byte_offset: 0,
         })
+    }
+
+    /// Effective privilege of a data access, and whether it is translated.
+    #[cfg(feature = "wset")]
+    fn wset_data_prv(&self) -> (usize, bool) {
+        let prv = if self.mstatus & MSTATUS_MPRV != 0 {
+            priv_mode_from((self.mstatus >> MSTATUS_MPP_SHIFT) & 3)
+        } else {
+            self.prv
+        };
+        Self::wset_prv(prv, self.satp)
+    }
+
+    #[cfg(feature = "wset")]
+    const fn wset_prv(prv: PrivMode, satp: u64) -> (usize, bool) {
+        let bare = (satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64;
+        match prv {
+            PrivMode::U => (0, !bare),
+            PrivMode::S => (1, !bare),
+            PrivMode::M => (2, false),
+        }
+    }
+
+    #[cfg(feature = "wset")]
+    fn wset_data(&mut self, va: u64, pa: u64, write: bool) {
+        if let Some(mut w) = self.wset.take() {
+            let (prv, translated) = self.wset_data_prv();
+            w.data(self, va, pa, write, prv, translated);
+            self.wset = Some(w);
+        }
+    }
+
+    /// The `wset` recorder's per-instruction hook.
+    #[cfg(feature = "wset")]
+    pub fn wset_insn(&mut self, pc: u64) {
+        if !self.wset_init {
+            self.wset_init = true;
+            self.wset = crate::wset::Wset::from_env();
+        }
+        if let Some(mut w) = self.wset.take() {
+            let (prv, translated) = Self::wset_prv(self.prv, self.satp);
+            if w.insn(self, pc, prv, translated) {
+                self.wset = Some(w);
+            }
+        }
+    }
+
+    /// The `wset` recorder's hook for `SFENCE.VMA` (`fence`) and `satp`
+    /// writes; nothing happens unless `changed`.
+    #[cfg(feature = "wset")]
+    pub fn wset_flush(&mut self, changed: bool, fence: bool) {
+        if changed && let Some(w) = &mut self.wset {
+            w.flush(fence);
+        }
+    }
+
+    /// A side-effect-free Sv39 walk for the `wset` recorder: the leaf size,
+    /// the PTEs read and the 4 KiB page's physical address.
+    #[cfg(feature = "wset")]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn wset_walk(&mut self, va: u64) -> Option<crate::wset::Xlat> {
+        if (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK != SatpMode::Sv39 as u64 {
+            return None;
+        }
+        let mut base = ((self.satp >> SATP_PPN_SHIFT) & SATP_PPN_MASK) << PG_SHIFT;
+        let mut x = crate::wset::Xlat::default();
+        for i in 0..3 {
+            let shift = PG_SHIFT + 9 * (2 - i);
+            let a = base + (((va >> shift) & 0x1ff) << 3);
+            x.pte[i] = a;
+            x.nlev = i as u8 + 1;
+            let pte = self.load_phys_u64(a);
+            if pte & PTE_V_MASK == 0 {
+                return None;
+            }
+            let ppn = (pte >> 10) & ((1u64 << 44) - 1);
+            if (pte >> 1).trailing_zeros() >= 3 {
+                base = ppn << PG_SHIFT;
+                continue;
+            }
+            if pte & PTE_N_MASK != 0 {
+                x.shift = 16;
+                x.pa = ((ppn & !0xf) | ((va >> PG_SHIFT) & 0xf)) << PG_SHIFT;
+            } else {
+                x.shift = shift as u8;
+                let mask = (1u64 << shift) - 1;
+                x.pa = ((ppn << PG_SHIFT) & !mask) | (va & mask & !0xfff);
+            }
+            return Some(x);
+        }
+        None
     }
 
     #[allow(

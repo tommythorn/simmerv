@@ -41,6 +41,10 @@ bb-hist = []
 # per-subtest table instead of a single aggregate in which Clang is 93% of the
 # misses and 1.4% of the cycles.
 bb-trace = []
+# Working-set, TLB-reach and prefetch statistics for a window of execution;
+# see `src/wset.rs`.  Off by default: it hooks every instruction and every
+# data access.  Inert unless `SIMMERV_WSET` names an output directory.
+wset = []
 
 [badges]
 travis-ci = { repository = "tommythorn/simmerv" }

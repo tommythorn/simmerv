@@ -22,6 +22,8 @@ pub mod uop_cache;
 #[cfg(feature = "bb-trace")]
 pub mod uop_trace;
 pub mod vector;
+#[cfg(feature = "wset")]
+pub mod wset;
 
 use crate::cpu::Cpu;
 use crate::device::syscon::Syscon;

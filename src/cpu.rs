@@ -1055,6 +1055,8 @@ impl Cpu {
                     self.pc = expected_next;
                 }
 
+                #[cfg(feature = "wset")]
+                self.mmu.wset_insn(cur_insn_addr);
                 let s1 = self.read_x(uop.rs1);
                 let s2 = self.read_x(uop.rs2);
                 let out = execute_fast(self, &uop, s1, s2, cur_insn_addr);
@@ -1196,6 +1198,8 @@ impl Cpu {
             let expected_next = cur_insn_addr + uop.get_insn_size();
             self.pc = expected_next;
 
+            #[cfg(feature = "wset")]
+            self.mmu.wset_insn(cur_insn_addr);
             let s1 = self.read_x(uop.rs1);
             let s2 = self.read_x(uop.rs2);
             let s3 = self.read_x(uop.rs3);
@@ -2139,6 +2143,8 @@ impl Cpu {
                 let old_satp = self.mmu.satp;
                 self.mmu.satp = value;
                 self.mmu.record_satp(value);
+                #[cfg(feature = "wset")]
+                self.mmu.wset_flush(old_satp != value, false);
                 // Both the TLBs and the uop cache are ASID-tagged -- entries
                 // carry the ASID and a lookup only matches its own -- so
                 // switching to a *different* ASID cannot alias and needs no
@@ -4138,6 +4144,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             // separately: see `Mmu::record_fence`.
             cpu.mmu
                 .record_fence(matches!(uop.op, Op::SinvalVma), rs1_val != 0, rs2_val != 0);
+            #[cfg(feature = "wset")]
+            cpu.mmu.wset_flush(true, true);
             #[allow(clippy::cast_possible_truncation)]
             match (rs1_val != 0, rs2_val != 0) {
                 (false, false) => cpu.mmu.flush_tlb(),
