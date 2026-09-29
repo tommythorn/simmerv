@@ -12,6 +12,11 @@
 //! selects, which is a move unless that is where it already is. The
 //! directory is inclusive: a full directory set evicts a way-1 line.
 //!
+//! With `ptag1`, way 1 is still indexed by the virtual line but tagged only by
+//! the physical line: when way 0 misses, way 1's line is returned
+//! speculatively and confirmed (or not) by the physical address from the
+//! miss-path TLB.
+//!
 //! [`Pipt`]: both ways physically tagged, way 0 indexed by PA[15:6] and way 1
 //! by an xor-fold of the physical line; every access is translated first
 //! (see [`Xtlb`]), and a physical line has exactly two possible slots.
@@ -51,6 +56,55 @@ const EMPTY: Slot = Slot {
 
 const fn fold(line: u64) -> u64 { line ^ line >> 10 ^ line >> 20 }
 
+/// Direct-mapped 4 KiB tables of 2048 and 4096 entries (indexed by the low
+/// VPN bits), each beside a 32-entry direct-mapped and a 64-entry fully
+/// associative 2 MiB table.
+pub struct DmTlbs {
+    t4: [Sa; 2],
+    t2: [Sa; 2],
+    lookups: u64,
+}
+
+impl DmTlbs {
+    pub fn new() -> Self {
+        Self {
+            t4: [Sa::new(2048, 1), Sa::new(4096, 1)],
+            t2: [Sa::new(32, 1), Sa::new(64, 64)],
+            lookups: 0,
+        }
+    }
+    pub fn flush(&mut self) {
+        for t in self.t4.iter_mut().chain(self.t2.iter_mut()) {
+            t.flush();
+        }
+    }
+    pub fn access(&mut self, x: &Xlat, va: u64) {
+        self.lookups += 1;
+        if x.shift == 21 {
+            let (k, i) = sized_key(va, 21);
+            for t in &mut self.t2 {
+                t.access(k, i, 0);
+            }
+        } else if x.shift != 30 {
+            let (k, i) = page_key(va);
+            for t in &mut self.t4 {
+                t.access(k, i, 0);
+            }
+        }
+    }
+    pub fn raw(&self, o: &mut String, name: &str) {
+        let _ = writeln!(
+            o,
+            "DMTLBRAW {name} lookups={} m4k2048={} m4k4096={} m2m32dm={} m2m64fa={}",
+            self.lookups,
+            self.t4[0].miss[0],
+            self.t4[1].miss[0],
+            self.t2[0].miss[0],
+            self.t2[1].miss[0]
+        );
+    }
+}
+
 /// Prefetch-effectiveness counters shared by the models.
 #[derive(Default)]
 struct Pf {
@@ -65,6 +119,12 @@ pub struct Virt {
     pub name: String,
     pub degree: i64,
     reuse: bool,
+    ptag1: bool,
+    /// Direct-mapped TLBs on this cache's way-0 misses.
+    dm: DmTlbs,
+    spec: u64,
+    misspec: u64,
+    misspec_miss: u64,
     w0: Vec<Slot>,
     w1: Vec<Slot>,
     /// Directory: `(physical line, way-1 slot, stamp)`, `dways` per set.
@@ -90,8 +150,12 @@ pub struct Virt {
 }
 
 impl Virt {
-    pub fn new(reuse: bool, dentries: usize, degree: i64) -> Self {
-        let mut name = format!("B-{}-D{dentries}", if reuse { "reuse" } else { "LRU" });
+    pub fn new(ptag1: bool, reuse: bool, dentries: usize, degree: i64) -> Self {
+        let mut name = format!(
+            "{}-{}-D{dentries}",
+            if ptag1 { "Bp" } else { "B" },
+            if reuse { "reuse" } else { "LRU" }
+        );
         if degree > 0 {
             let _ = write!(name, "-RPT64d{degree}");
         }
@@ -99,6 +163,11 @@ impl Virt {
             name,
             degree,
             reuse,
+            ptag1,
+            dm: DmTlbs::new(),
+            spec: 0,
+            misspec: 0,
+            misspec_miss: 0,
             w0: vec![EMPTY; SETS],
             w1: vec![EMPTY; SETS],
             d: vec![(NO_LINE, 0, 0); dentries],
@@ -134,6 +203,7 @@ impl Virt {
         self.epoch += 1;
         self.t4.flush();
         self.t2.flush();
+        self.dm.flush();
     }
 
     fn live(&self, s: &Slot, vl: u64) -> bool {
@@ -242,6 +312,7 @@ impl Virt {
             self.pf.lookups += 1;
         } else {
             self.lookups += 1;
+            self.dm.access(x, va);
         }
         if !hit {
             if prefetch {
@@ -292,17 +363,36 @@ impl Virt {
             self.w0[i].stamp = self.clk;
             return;
         }
-        if self.live(&self.w1[j], vl) {
+        let pl = pa >> 6;
+        if !self.ptag1 && self.live(&self.w1[j], vl) {
             self.hit1 += 1;
             let f = self.use_line(self.w1[j].flags);
             self.w1[j].flags = f;
             self.w1[j].stamp = self.clk;
             return;
         }
+        let spec = self.ptag1 && self.w1[j].pa != NO_LINE;
+        if spec {
+            self.spec += 1;
+        }
         if let Some(x) = x {
             self.translate(x, va, false);
         }
-        let pl = pa >> 6;
+        if self.ptag1 && self.w1[j].pa == pl {
+            self.hit1 += 1;
+            let f = self.use_line(self.w1[j].flags);
+            self.w1[j] = Slot {
+                va: vl,
+                epoch: self.epoch,
+                stamp: self.clk,
+                flags: f,
+                ..self.w1[j]
+            };
+            return;
+        }
+        if spec {
+            self.misspec += 1;
+        }
         let stamp = |s: Slot, epoch, clk| Slot {
             va: vl,
             epoch,
@@ -339,6 +429,9 @@ impl Virt {
             }
             None => {
                 self.dram += 1;
+                if spec {
+                    self.misspec_miss += 1;
+                }
                 self.place(vl, pl, 0);
             }
         }
@@ -349,7 +442,9 @@ impl Virt {
     pub fn prefetch(&mut self, t: u64, pl: u64, lookup: Option<&Xlat>) {
         self.clk += 1;
         let vl = t >> 6;
-        if self.live(&self.w0[Self::i0(vl)], vl) || self.live(&self.w1[Self::i1(vl)], vl) {
+        if self.live(&self.w0[Self::i0(vl)], vl)
+            || (!self.ptag1 && self.live(&self.w1[Self::i1(vl)], vl))
+        {
             return;
         }
         if let Some(x) = lookup {
@@ -365,8 +460,11 @@ impl Virt {
     pub fn raw(&self, o: &mut String) {
         let _ = writeln!(
             o,
-            "VIRTRAW {} hit0={} hit1={} dram={} by_pa={} restamp={} moves={} dlook={} forced={} lookups={} walks={} pte_reads={} pte_dram={} issued={} useful={} pf_lookups={} pf_walks={}",
+            "VIRTRAW {} spec={} misspec={} misspec_miss={} hit0={} hit1={} dram={} by_pa={} restamp={} moves={} dlook={} forced={} lookups={} walks={} pte_reads={} pte_dram={} issued={} useful={} pf_lookups={} pf_walks={}",
             self.name,
+            self.spec,
+            self.misspec,
+            self.misspec_miss,
             self.hit0,
             self.hit1,
             self.dram,
@@ -384,6 +482,7 @@ impl Virt {
             self.pf.lookups,
             self.pf.walks
         );
+        self.dm.raw(o, &self.name);
     }
 }
 

@@ -51,6 +51,7 @@ mod split;
 
 use crate::mmu::Mmu;
 use fnv::FnvHashMap;
+use skew::DmTlbs;
 use skew::Pipt;
 use skew::Virt;
 use skew::Xtlb;
@@ -597,6 +598,8 @@ pub struct Wset {
     virt: Vec<Virt>,
     pipt: Vec<Pipt>,
     xt: Vec<Xtlb>,
+    /// Direct-mapped TLBs read on every translated data access.
+    dm_all: DmTlbs,
 }
 
 fn env_count(name: &str, default: u64) -> u64 {
@@ -793,15 +796,21 @@ impl Wset {
             .collect(),
             virt: {
                 let mut v = vec![];
-                for degree in [0, 2] {
+                for ptag1 in [false, true] {
                     for reuse in [false, true] {
                         for dentries in [1024, 2048] {
-                            v.push(Virt::new(reuse, dentries, degree));
+                            v.push(Virt::new(ptag1, reuse, dentries, 0));
                         }
+                    }
+                }
+                for ptag1 in [false, true] {
+                    for reuse in [false, true] {
+                        v.push(Virt::new(ptag1, reuse, 2048, 2));
                     }
                 }
                 v
             },
+            dm_all: DmTlbs::new(),
             pipt: vec![Pipt::new(0), Pipt::new(2)],
             xt: vec![
                 Xtlb::new(16, 1, true),
@@ -854,6 +863,7 @@ impl Wset {
         for t in &mut self.xt {
             t.flush();
         }
+        self.dm_all.flush();
         for p in &mut self.pipt {
             p.tlb.flush();
         }
@@ -1272,6 +1282,7 @@ impl Wset {
         for t in &mut self.xt {
             t.access(x, va);
         }
+        self.dm_all.access(x, va);
         if self.lite {
             if !self.sa_rtl.access(pk, pidx, prv) {
                 self.walks[prv] += 1;
@@ -1373,6 +1384,7 @@ impl Wset {
         for t in &self.xt {
             t.raw(&mut o);
         }
+        self.dm_all.raw(&mut o, "every-access");
         let _ = writeln!(
             o,
             "insns {} (U {} S {} M {})",
