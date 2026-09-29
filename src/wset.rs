@@ -35,8 +35,13 @@
     clippy::needless_range_loop
 )]
 
+mod split;
+
 use crate::mmu::Mmu;
 use fnv::FnvHashMap;
+use split::Hash;
+use split::Policy;
+use split::Split;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -556,6 +561,8 @@ pub struct Wset {
     fa_imiss: Curve,
     fa_unified: Curve,
     sa_unified: Vec<Sa>,
+
+    split: Vec<Split>,
 }
 
 fn env_count(name: &str, default: u64) -> u64 {
@@ -719,6 +726,22 @@ impl Wset {
             fa_imiss: Curve::new(),
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
+            split: {
+                let mut v = vec![];
+                for hash in [Hash::Xor, Hash::Mul] {
+                    for policy in [Policy::P1, Policy::P2] {
+                        v.push(Split::new(policy, hash, 0, false, true));
+                    }
+                }
+                for policy in [Policy::P1, Policy::P2] {
+                    for degree in [2, 4] {
+                        for may_walk in [true, false] {
+                            v.push(Split::new(policy, Hash::Xor, degree, may_walk, false));
+                        }
+                    }
+                }
+                v
+            },
         };
         eprintln!(
             "wset: recording {len} instructions into {}",
@@ -756,6 +779,9 @@ impl Wset {
             t.l2.flush();
         }
         self.pwc.flush();
+        for s in &mut self.split {
+            s.flush();
+        }
     }
 
     fn xlat(&mut self, mmu: &mut Mmu, va: u64) -> Option<Xlat> {
@@ -924,6 +950,38 @@ impl Wset {
             {
                 for k in 1..=pf.degree {
                     self.prefetch(mmu, i, va, pa, stride.wrapping_mul(k), translated);
+                }
+            }
+        }
+
+        // The split virtual/physical cache, and its stride prefetches.
+        for s in &mut self.split {
+            s.demand(va, pa, xl.as_ref(), prv);
+        }
+        if let Some(stride) = rpt_out[1] {
+            let mut targets = [None; 4];
+            for k in 0..4 {
+                let t = va.wrapping_add(stride.wrapping_mul(k as i64 + 1) as u64);
+                if t >> 6 == va >> 6 {
+                    continue;
+                }
+                let cross = t >> 12 != va >> 12;
+                let x = match (translated, cross) {
+                    (false, _) => None,
+                    (true, false) => xl,
+                    (true, true) => match self.xlat(mmu, t) {
+                        Some(x) => Some(x),
+                        None => continue,
+                    },
+                };
+                if translated && x.is_none() {
+                    continue;
+                }
+                targets[k] = Some((t, cross, x));
+            }
+            for s in &mut self.split {
+                for &(t, cross, x) in targets.iter().take(s.degree as usize).flatten() {
+                    s.prefetch(t, x.as_ref(), cross);
                 }
             }
         }
@@ -1470,6 +1528,49 @@ impl Wset {
         );
         for t in &self.sa_unified {
             sa(&mut o, t);
+        }
+
+        let vm_all = self.vmiss[U] + self.vmiss[S] + self.vmiss[M];
+        let find = |name: &str| {
+            self.pfs
+                .iter()
+                .find(|p| p.name == name)
+                .map_or(0, |p| p.miss.iter().sum::<u64>())
+        };
+        let _ = writeln!(
+            o,
+            "\n## split cache: way 0 64 KiB direct-mapped virtual, way 1 64 KiB direct-mapped physical hashed, single copy"
+        );
+        let _ = writeln!(
+            o,
+            "baselines, demand misses per kinsn: VA-indexed 2-way straight {:.3} | PA 2-way straight {:.3} | PA 2-way hashed {:.3} | PA 2-way hashed + RPT64 d2 {:.3}",
+            pki(vm_all),
+            pki(find("none")),
+            pki(find("none, 128K 2-way hashed index")),
+            pki(find("RPT64 d2, 128K 2-way hashed index"))
+        );
+        let _ = writeln!(
+            o,
+            "per kinsn: {:<23} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7} {:>8} {:>8} {:>7}",
+            "model",
+            "way0hit",
+            "way1hit",
+            "synmove",
+            "DRAM",
+            "P2moves",
+            "PTErd",
+            "PTEdram",
+            "TLBlook",
+            "walks",
+            "1Gleaf"
+        );
+        for s in &self.split {
+            let base = self
+                .split
+                .iter()
+                .find(|b| b.degree == 0 && b.policy == s.policy && b.hash == s.hash)
+                .map(Split::dram_total);
+            s.report(&mut o, self.n, base);
         }
         o
     }
