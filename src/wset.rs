@@ -46,10 +46,14 @@
     clippy::needless_range_loop
 )]
 
+mod skew;
 mod split;
 
 use crate::mmu::Mmu;
 use fnv::FnvHashMap;
+use skew::Pipt;
+use skew::Virt;
+use skew::Xtlb;
 use split::Policy;
 use split::Split;
 use std::fmt::Write as _;
@@ -590,6 +594,9 @@ pub struct Wset {
     sa_unified: Vec<Sa>,
 
     split: Vec<Split>,
+    virt: Vec<Virt>,
+    pipt: Vec<Pipt>,
+    xt: Vec<Xtlb>,
 }
 
 fn env_count(name: &str, default: u64) -> u64 {
@@ -775,28 +782,32 @@ impl Wset {
             fa_imiss: Curve::new(),
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
-            split: {
-                let policies = [
-                    Policy::P1,
-                    Policy::P2,
-                    Policy::P3,
-                    Policy::P4,
-                    Policy::P5,
-                    Policy::P6,
-                    Policy::P6r,
-                ];
-                let mut v: Vec<Split> = policies
-                    .iter()
-                    .map(|&p| Split::new(p, 0, true, true))
-                    .collect();
-                v.extend(policies.iter().map(|&p| Split::new(p, 2, false, false)));
-                v.extend(
-                    [Policy::P5, Policy::P6, Policy::P6r]
-                        .iter()
-                        .map(|&p| Split::new(p, 2, true, false)),
-                );
+            split: [
+                (Policy::P1, 0),
+                (Policy::P4, 0),
+                (Policy::P1, 2),
+                (Policy::P4, 2),
+            ]
+            .iter()
+            .map(|&(p, d)| Split::new(p, d, false, d == 0))
+            .collect(),
+            virt: {
+                let mut v = vec![];
+                for degree in [0, 2] {
+                    for reuse in [false, true] {
+                        for dentries in [1024, 2048] {
+                            v.push(Virt::new(reuse, dentries, degree));
+                        }
+                    }
+                }
                 v
             },
+            pipt: vec![Pipt::new(0), Pipt::new(2)],
+            xt: vec![
+                Xtlb::new(16, 1, true),
+                Xtlb::new(32, 32, false),
+                Xtlb::new(64, 64, false),
+            ],
         };
         eprintln!(
             "wset: recording {len} instructions into {}",
@@ -836,6 +847,15 @@ impl Wset {
         self.pwc.flush();
         for s in &mut self.split {
             s.flush();
+        }
+        for v in &mut self.virt {
+            v.flush();
+        }
+        for t in &mut self.xt {
+            t.flush();
+        }
+        for p in &mut self.pipt {
+            p.tlb.flush();
         }
     }
 
@@ -1053,6 +1073,12 @@ impl Wset {
         for s in &mut self.split {
             s.demand(va, pa, xl.as_ref(), prv, strided);
         }
+        for v in &mut self.virt {
+            v.demand(va, pa, xl.as_ref());
+        }
+        for p in &mut self.pipt {
+            p.demand(pline);
+        }
         if let Some(stride) = rpt_out[1] {
             // A target in the trigger's page takes the trigger's translation;
             // one in another page is translated through the TLB.
@@ -1078,6 +1104,16 @@ impl Wset {
                 }
                 for &(t, pl, x) in targets.iter().take(s.degree as usize).flatten() {
                     s.prefetch(t, pl, x.as_ref());
+                }
+            }
+            for v in &mut self.virt {
+                for &(t, pl, x) in targets.iter().take(v.degree as usize).flatten() {
+                    v.prefetch(t, pl, x.as_ref());
+                }
+            }
+            for p in &mut self.pipt {
+                for &(t, pl, x) in targets.iter().take(p.degree as usize).flatten() {
+                    p.prefetch(t, pl, x.as_ref());
                 }
             }
         }
@@ -1229,6 +1265,13 @@ impl Wset {
     fn tlbs(&mut self, x: &Xlat, va: u64, prv: usize) {
         let (sk, sidx) = sized_key(va, x.shift);
         let (pk, pidx) = page_key(va);
+        // Translation before a physically indexed cache.
+        for p in &mut self.pipt {
+            p.translate(x, va);
+        }
+        for t in &mut self.xt {
+            t.access(x, va);
+        }
         if self.lite {
             if !self.sa_rtl.access(pk, pidx, prv) {
                 self.walks[prv] += 1;
@@ -1321,6 +1364,15 @@ impl Wset {
             self.walks[U] + self.walks[S],
             self.acc.iter().flatten().sum::<u64>()
         );
+        for v in &self.virt {
+            v.raw(&mut o);
+        }
+        for p in &self.pipt {
+            p.raw(&mut o);
+        }
+        for t in &self.xt {
+            t.raw(&mut o);
+        }
         let _ = writeln!(
             o,
             "insns {} (U {} S {} M {})",

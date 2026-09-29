@@ -60,6 +60,8 @@ const EMPTY: Slot = Slot {
     flags: 0,
 };
 
+/// Every policy stays selectable; a run instantiates the ones it compares.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Policy {
     P1,
