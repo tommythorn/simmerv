@@ -20,10 +20,16 @@
 //!   and swaps on every way-1 hit;
 //! * `P3` fills and demotes like `P2` but never promotes: a way-1 hit stays;
 //! * `P4` is `P3` plus a reuse bit per way-1 line: the second way-1 hit swaps
-//!   as in `P2`.
+//!   as in `P2`;
+//! * `P5` never moves a line: a way-0 hit sets the line's reuse bit, and a new
+//!   line fills way 0 unless the way-0 candidate's reuse bit is set, in which
+//!   case the bit is cleared and the new line fills way 1;
+//! * `P6` never moves a line: a load or store whose PC the stride table holds
+//!   with a steady stride over 64 bytes fills way 1, anything else way 0;
+//! * `P6r` is `P6` with `P5`'s rule for the fills that are not strided.
 //!
-//! Under `P2`-`P4` a prefetched line fills way 1 directly. A prefetch in the
-//! trigger's 4 KiB page reuses the trigger's translation; only a
+//! In every policy but `P1` a prefetched line fills way 1 directly. A prefetch
+//! in the trigger's 4 KiB page reuses the trigger's translation; only a
 //! page-crossing prefetch looks up the TLB.
 
 use super::F_PF;
@@ -60,9 +66,18 @@ pub enum Policy {
     P2,
     P3,
     P4,
+    P5,
+    P6,
+    P6r,
 }
 
-/// Set on a way-1 line by its first way-1 hit (`P4`).
+impl Policy {
+    /// Whether a way-0 victim moves to way 1 rather than leaving the cache.
+    const fn demotes(self) -> bool { matches!(self, Self::P2 | Self::P3 | Self::P4) }
+}
+
+/// A reuse bit: on a way-1 line, set by its first way-1 hit (`P4`); on a
+/// way-0 line, set by a way-0 hit (`P5`, `P6r`).
 const F_REUSE: u8 = 16;
 
 /// What a translation lookup table serves.
@@ -90,6 +105,8 @@ pub struct Split {
     /// Whether a prefetch whose translation misses the TLB walks (else it is
     /// dropped).
     pub may_walk: bool,
+    /// Prefetch only strides over 64 bytes.
+    pub nonunit_only: bool,
     w0: Vec<Slot>,
     w1: Vec<Slot>,
     clk: u64,
@@ -119,17 +136,14 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn new(policy: Policy, degree: i64, may_walk: bool, observe: bool) -> Self {
+    pub fn new(policy: Policy, degree: i64, nonunit_only: bool, observe: bool) -> Self {
+        let may_walk = true;
         let mut name = format!("{policy:?}");
         if degree > 0 {
             let _ = write!(
                 name,
                 " RPT64 d{degree} {}",
-                if may_walk {
-                    "may-walk"
-                } else {
-                    "drop-on-TLB-miss"
-                }
+                if nonunit_only { "non-unit" } else { "may-walk" }
             );
         }
         let mut obs = vec![];
@@ -161,6 +175,7 @@ impl Split {
             policy,
             degree,
             may_walk,
+            nonunit_only,
             w0: vec![EMPTY; SETS],
             w1: vec![EMPTY; SETS],
             clk: 0,
@@ -228,7 +243,7 @@ impl Split {
     fn displace(&mut self, i: usize) {
         let o = self.w0[i];
         self.w0[i] = EMPTY;
-        if self.policy != Policy::P1 {
+        if self.policy.demotes() {
             self.demote(o);
         } else {
             self.evict(o);
@@ -255,7 +270,9 @@ impl Split {
             .map(|j| (0, j))
     }
 
-    fn fill(&mut self, vl: u64, pl: u64, flags: u8) {
+    /// Place a line fetched from memory. `strided`: the access's PC has a
+    /// steady stride over 64 bytes.
+    fn fill(&mut self, vl: u64, pl: u64, flags: u8, strided: bool) {
         let prefetch = flags & F_PF != 0;
         let i = Self::i0(vl);
         let new = Slot {
@@ -266,10 +283,17 @@ impl Split {
             flags,
         };
         let h = Self::h(pl);
+        let reused = self.w0[i].pa != NO_LINE && self.w0[i].flags & F_REUSE != 0;
         let to_w0 = match self.policy {
             Policy::P1 => self.w0[i].pa == NO_LINE || self.w0[i].stamp <= self.w1[h].stamp,
-            _ => !prefetch,
+            Policy::P2 | Policy::P3 | Policy::P4 => !prefetch,
+            Policy::P5 => !prefetch && !reused,
+            Policy::P6 => !prefetch && !strided,
+            Policy::P6r => !prefetch && !strided && !reused,
         };
+        if !prefetch && reused && matches!(self.policy, Policy::P5 | Policy::P6r) {
+            self.w0[i].flags &= !F_REUSE;
+        }
         if to_w0 {
             self.displace(i);
             self.w0[i] = new;
@@ -367,7 +391,7 @@ impl Split {
     }
 
     /// A demand access; `x` is its translation (`None` when untranslated).
-    pub fn demand(&mut self, va: u64, pa: u64, x: Option<&Xlat>, prv: usize) {
+    pub fn demand(&mut self, va: u64, pa: u64, x: Option<&Xlat>, prv: usize, strided: bool) {
         self.clk += 1;
         let clk = self.clk;
         let vl = va >> 6;
@@ -377,7 +401,7 @@ impl Split {
             self.hit0[prv] += 1;
             let mut f = s.flags;
             self.use_line(&mut f);
-            self.w0[i].flags = f;
+            self.w0[i].flags = f | F_REUSE;
             self.w0[i].stamp = clk;
             return;
         }
@@ -392,7 +416,7 @@ impl Split {
                 self.use_line(&mut line.flags);
                 line.stamp = clk;
                 let promote = match self.policy {
-                    Policy::P1 | Policy::P3 => false,
+                    Policy::P1 | Policy::P3 | Policy::P5 | Policy::P6 | Policy::P6r => false,
                     Policy::P2 => true,
                     Policy::P4 => line.flags & F_REUSE != 0,
                 };
@@ -428,7 +452,7 @@ impl Split {
             }
             None => {
                 self.dram[prv] += 1;
-                self.fill(vl, pl, 0);
+                self.fill(vl, pl, 0, strided);
             }
         }
     }
@@ -455,7 +479,7 @@ impl Split {
         if lookup.is_some() {
             self.issued_cross += 1;
         }
-        self.fill(vl, pl, F_PF);
+        self.fill(vl, pl, F_PF, false);
     }
 
     /// Demand DRAM misses, for coverage.

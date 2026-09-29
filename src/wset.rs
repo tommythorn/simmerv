@@ -776,12 +776,25 @@ impl Wset {
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
             split: {
-                let policies = [Policy::P1, Policy::P2, Policy::P3, Policy::P4];
+                let policies = [
+                    Policy::P1,
+                    Policy::P2,
+                    Policy::P3,
+                    Policy::P4,
+                    Policy::P5,
+                    Policy::P6,
+                    Policy::P6r,
+                ];
                 let mut v: Vec<Split> = policies
                     .iter()
                     .map(|&p| Split::new(p, 0, true, true))
                     .collect();
-                v.extend(policies.iter().map(|&p| Split::new(p, 2, true, false)));
+                v.extend(policies.iter().map(|&p| Split::new(p, 2, false, false)));
+                v.extend(
+                    [Policy::P5, Policy::P6, Policy::P6r]
+                        .iter()
+                        .map(|&p| Split::new(p, 2, true, false)),
+                );
                 v
             },
         };
@@ -1036,8 +1049,9 @@ impl Wset {
         }
 
         // The split virtual/physical cache, and its stride prefetches.
+        let strided = rpt_out[1].is_some_and(|d| d.unsigned_abs() > 64);
         for s in &mut self.split {
-            s.demand(va, pa, xl.as_ref(), prv);
+            s.demand(va, pa, xl.as_ref(), prv, strided);
         }
         if let Some(stride) = rpt_out[1] {
             // A target in the trigger's page takes the trigger's translation;
@@ -1057,7 +1071,11 @@ impl Wset {
                         .map(|x| (t, (x.pa | (t & 0xfff)) >> 6, Some(x)))
                 };
             }
+            let unit = stride.unsigned_abs() <= 64;
             for s in &mut self.split {
+                if unit && s.nonunit_only {
+                    continue;
+                }
                 for &(t, pl, x) in targets.iter().take(s.degree as usize).flatten() {
                     s.prefetch(t, pl, x.as_ref());
                 }
