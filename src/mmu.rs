@@ -209,6 +209,9 @@ pub struct Mmu {
     pub wset: Option<Box<crate::wset::Wset>>,
     #[cfg(feature = "wset")]
     wset_init: bool,
+    /// Instructions the recorder sits out before its next window.
+    #[cfg(feature = "wset")]
+    wset_idle: u64,
 }
 
 /// Result of a data address translation.
@@ -361,6 +364,8 @@ impl Mmu {
             wset: None,
             #[cfg(feature = "wset")]
             wset_init: false,
+            #[cfg(feature = "wset")]
+            wset_idle: 0,
         }
     }
 
@@ -1376,7 +1381,7 @@ impl Mmu {
         side_effect_free: bool,
     ) -> Result<DataAddr, Exception> {
         #[cfg(feature = "wset")]
-        if !side_effect_free && self.wset.is_some() {
+        if !side_effect_free && self.wset_idle == 0 && self.wset.is_some() {
             let r = self.translate_data_address_inner(address, access_type, false);
             if let Ok(d) = &r {
                 self.wset_data(address, d.pa, access_type == MemoryAccessType::Write);
@@ -1571,13 +1576,19 @@ impl Mmu {
     /// The `wset` recorder's per-instruction hook.
     #[cfg(feature = "wset")]
     pub fn wset_insn(&mut self, pc: u64) {
+        if self.wset_idle != 0 {
+            self.wset_idle -= 1;
+            return;
+        }
         if !self.wset_init {
             self.wset_init = true;
             self.wset = crate::wset::Wset::from_env();
         }
         if let Some(mut w) = self.wset.take() {
             let (prv, translated) = Self::wset_prv(self.prv, self.satp);
-            if w.insn(self, pc, prv, translated) {
+            let idle = w.insn(self, pc, prv, translated);
+            if idle != crate::wset::DROP {
+                self.wset_idle = idle.saturating_sub(1);
                 self.wset = Some(w);
             }
         }

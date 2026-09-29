@@ -13,9 +13,18 @@
 //! Only when both fail is it a memory miss. Physical-only accesses (page-walk
 //! reads) look in the same two places and fill way 1.
 //!
-//! Fill policies: `P1` puts a new line in the less recently used of its two
-//! candidate slots; `P2` fills way 0 and demotes the way-0 victim to its
-//! hashed slot in way 1, and swaps on a way-1 hit.
+//! Fill policies:
+//! * `P1` puts a new line in the less recently used of its two candidate slots
+//!   and never moves a line;
+//! * `P2` fills way 0, demotes the way-0 victim to its hashed slot in way 1,
+//!   and swaps on every way-1 hit;
+//! * `P3` fills and demotes like `P2` but never promotes: a way-1 hit stays;
+//! * `P4` is `P3` plus a reuse bit per way-1 line: the second way-1 hit swaps
+//!   as in `P2`.
+//!
+//! Under `P2`-`P4` a prefetched line fills way 1 directly. A prefetch in the
+//! trigger's 4 KiB page reuses the trigger's translation; only a
+//! page-crossing prefetch looks up the TLB.
 
 use super::F_PF;
 use super::NO_LINE;
@@ -45,19 +54,16 @@ const EMPTY: Slot = Slot {
     flags: 0,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Hash {
-    /// `line ^ line >> 10 ^ line >> 20`.
-    Xor,
-    /// Fibonacci multiplicative hash, top 10 bits.
-    Mul,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Policy {
     P1,
     P2,
+    P3,
+    P4,
 }
+
+/// Set on a way-1 line by its first way-1 hit (`P4`).
+const F_REUSE: u8 = 16;
 
 /// What a translation lookup table serves.
 #[derive(Clone, Copy)]
@@ -79,7 +85,6 @@ struct Obs {
 pub struct Split {
     pub name: String,
     pub policy: Policy,
-    pub hash: Hash,
     /// Stride prefetch degree (0 = none).
     pub degree: i64,
     /// Whether a prefetch whose translation misses the TLB walks (else it is
@@ -114,12 +119,8 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn new(policy: Policy, hash: Hash, degree: i64, may_walk: bool, observe: bool) -> Self {
-        let mut name = format!(
-            "{}{}",
-            if policy == Policy::P1 { "P1" } else { "P2" },
-            if hash == Hash::Xor { " xor" } else { " mul" }
-        );
+    pub fn new(policy: Policy, degree: i64, may_walk: bool, observe: bool) -> Self {
+        let mut name = format!("{policy:?}");
         if degree > 0 {
             let _ = write!(
                 name,
@@ -158,7 +159,6 @@ impl Split {
         Self {
             name,
             policy,
-            hash,
             degree,
             may_walk,
             w0: vec![EMPTY; SETS],
@@ -189,13 +189,7 @@ impl Split {
         }
     }
 
-    fn h(&self, line: u64) -> usize {
-        let v = match self.hash {
-            Hash::Xor => line ^ line >> 10 ^ line >> 20,
-            Hash::Mul => line.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 54,
-        };
-        v as usize & (SETS - 1)
-    }
+    const fn h(line: u64) -> usize { (line ^ line >> 10 ^ line >> 20) as usize & (SETS - 1) }
 
     const fn i0(vline: u64) -> usize { vline as usize & (SETS - 1) }
 
@@ -220,10 +214,13 @@ impl Split {
         if s.pa == NO_LINE {
             return;
         }
-        let h = self.h(s.pa);
+        let h = Self::h(s.pa);
         let old = self.w1[h];
         self.evict(old);
-        self.w1[h] = s;
+        self.w1[h] = Slot {
+            flags: s.flags & !F_REUSE,
+            ..s
+        };
         self.moves += 1;
     }
 
@@ -231,7 +228,7 @@ impl Split {
     fn displace(&mut self, i: usize) {
         let o = self.w0[i];
         self.w0[i] = EMPTY;
-        if self.policy == Policy::P2 {
+        if self.policy != Policy::P1 {
             self.demote(o);
         } else {
             self.evict(o);
@@ -247,7 +244,7 @@ impl Split {
 
     /// Where the physical line `pl` is, if anywhere: `(way, slot)`.
     fn find(&self, pl: u64) -> Option<(u8, usize)> {
-        let h = self.h(pl);
+        let h = Self::h(pl);
         if self.w1[h].pa == pl {
             return Some((1, h));
         }
@@ -259,6 +256,7 @@ impl Split {
     }
 
     fn fill(&mut self, vl: u64, pl: u64, flags: u8) {
+        let prefetch = flags & F_PF != 0;
         let i = Self::i0(vl);
         let new = Slot {
             pa: pl,
@@ -267,10 +265,10 @@ impl Split {
             stamp: self.clk,
             flags,
         };
-        let h = self.h(pl);
+        let h = Self::h(pl);
         let to_w0 = match self.policy {
-            Policy::P2 => true,
             Policy::P1 => self.w0[i].pa == NO_LINE || self.w0[i].stamp <= self.w1[h].stamp,
+            _ => !prefetch,
         };
         if to_w0 {
             self.displace(i);
@@ -297,7 +295,7 @@ impl Split {
             return;
         }
         self.pte_dram += 1;
-        let h = self.h(pl);
+        let h = Self::h(pl);
         let old = self.w1[h];
         self.evict(old);
         self.w1[h] = Slot {
@@ -393,7 +391,14 @@ impl Split {
                 let mut line = self.w1[h];
                 self.use_line(&mut line.flags);
                 line.stamp = clk;
-                if self.policy == Policy::P2 {
+                let promote = match self.policy {
+                    Policy::P1 | Policy::P3 => false,
+                    Policy::P2 => true,
+                    Policy::P4 => line.flags & F_REUSE != 0,
+                };
+                line.flags |= F_REUSE;
+                if promote {
+                    line.flags &= !F_REUSE;
                     self.w1[h] = EMPTY;
                     self.moves += 1;
                     self.displace(i);
@@ -428,28 +433,26 @@ impl Split {
         }
     }
 
-    /// A stride prefetch of virtual address `t`; `x` is its translation.
-    pub fn prefetch(&mut self, t: u64, x: Option<&Xlat>, cross: bool) {
+    /// A stride prefetch of virtual address `t` whose physical line is `pl`.
+    /// `lookup` is its translation when it crosses into another page, which
+    /// then goes through the TLB.
+    pub fn prefetch(&mut self, t: u64, pl: u64, lookup: Option<&Xlat>) {
         self.clk += 1;
         let vl = t >> 6;
         let s = self.w0[Self::i0(vl)];
         if s.pa != NO_LINE && s.epoch == self.epoch && s.va == vl {
             return;
         }
-        let pl = match x {
-            Some(x) => {
-                if !self.translate(x, t, true) {
-                    return;
-                }
-                (x.pa | (t & 0xfff)) >> 6
-            }
-            None => vl,
-        };
+        if let Some(x) = lookup
+            && !self.translate(x, t, true)
+        {
+            return;
+        }
         if self.find(pl).is_some() {
             return;
         }
         self.issued += 1;
-        if cross {
+        if lookup.is_some() {
             self.issued_cross += 1;
         }
         self.fill(vl, pl, F_PF);
@@ -496,7 +499,7 @@ impl Split {
         }
         let _ = writeln!(
             o,
-            "{:<34} counts: way0 U {} S {} M {} | way1 U {} S {} M {} | DRAM U {} S {} M {} | synonym moves {} | P2 moves {} | PTE reads {} hit {} DRAM {}",
+            "{:<34} counts: way0 U {} S {} M {} | way1 U {} S {} M {} | DRAM U {} S {} M {} | synonym moves {} | moves {} | PTE reads {} hit {} DRAM {}",
             "",
             self.hit0[0],
             self.hit0[1],
@@ -512,6 +515,26 @@ impl Split {
             self.pte_reads,
             self.pte_hit,
             self.pte_dram
+        );
+        let _ = writeln!(
+            o,
+            "SPLITRAW {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            self.name.replace(' ', "_"),
+            sum(&self.hit0),
+            sum(&self.hit1),
+            self.syn,
+            self.dram_total(),
+            self.moves,
+            self.lookups,
+            self.walks,
+            self.pte_reads,
+            self.pte_dram,
+            self.issued,
+            self.issued_cross,
+            self.useful,
+            self.pf_lookups,
+            self.pf_walks,
+            self.pf_dropped
         );
         for ob in &self.obs {
             let what = match ob.kind {

@@ -22,6 +22,17 @@
 //! first instruction executed. Each snapshot is a text report in the output
 //! directory; measuring stops at `SIMMERV_WSET_LEN`.
 //!
+//! Sampling instead of one window: `SIMMERV_WSET_PERIOD` (with
+//! `SIMMERV_WSET_START`, `SIMMERV_WSET_WARM`, `SIMMERV_WSET_MEASURE` and
+//! `SIMMERV_WSET_STOP`, all instruction counts from the first instruction plus
+//! `SIMMERV_WSET_BASE`) runs the models only in windows starting every period:
+//! a warm-up, a report `w-<N>`, the measured stretch, and a report `m-<N>`.
+//! Reports are cumulative, so a window is the difference of its two. Between
+//! windows the hook only counts down.
+//!
+//! `SIMMERV_WSET_LITE` keeps only the split cache, the plain 2-way caches and
+//! the 16-entry TLB.
+//!
 //! Translation facts come from a side-effect-free Sv39 walk of the live page
 //! tables, cached per `(satp, 4 KiB page)` and invalidated by every
 //! `SFENCE.VMA` and `satp` write. The TLB models have no ASIDs: they are
@@ -39,7 +50,6 @@ mod split;
 
 use crate::mmu::Mmu;
 use fnv::FnvHashMap;
-use split::Hash;
 use split::Policy;
 use split::Split;
 use std::fmt::Write as _;
@@ -497,8 +507,25 @@ const CLS_NAME: [&str; 5] = [
     "irregular",
 ];
 
+/// Returned by [`Wset::insn`] when the recorder is finished.
+pub const DROP: u64 = u64::MAX;
+
+#[derive(Clone, Copy)]
+struct Sample {
+    period: u64,
+    warm: u64,
+    measure: u64,
+    stop: u64,
+    start_at: u64,
+}
+
 pub struct Wset {
     dir: PathBuf,
+    lite: bool,
+    sample: Option<Sample>,
+    /// Instructions since the first, plus `SIMMERV_WSET_BASE`.
+    abs: u64,
+    active: bool,
     len: u64,
     first: u64,
     every: u64,
@@ -587,9 +614,24 @@ impl Wset {
     pub fn from_env() -> Option<Box<Self>> {
         let dir = PathBuf::from(std::env::var_os("SIMMERV_WSET")?);
         std::fs::create_dir_all(&dir).ok()?;
-        let len = env_count("SIMMERV_WSET_LEN", 8_000_000_000);
-        let first = env_count("SIMMERV_WSET_FIRST", 50_000_000);
-        let every = env_count("SIMMERV_WSET_EVERY", 1_000_000_000);
+        let lite = std::env::var_os("SIMMERV_WSET_LITE").is_some();
+        let abs = env_count("SIMMERV_WSET_BASE", 0);
+        let sample = std::env::var_os("SIMMERV_WSET_PERIOD").map(|_| Sample {
+            period: env_count("SIMMERV_WSET_PERIOD", 0).max(1),
+            warm: env_count("SIMMERV_WSET_WARM", 50_000_000),
+            measure: env_count("SIMMERV_WSET_MEASURE", 500_000_000),
+            stop: env_count("SIMMERV_WSET_STOP", u64::MAX),
+            start_at: env_count("SIMMERV_WSET_START", 0),
+        });
+        let (len, first, every) = if sample.is_some() {
+            (u64::MAX, u64::MAX, u64::MAX)
+        } else {
+            (
+                env_count("SIMMERV_WSET_LEN", 8_000_000_000),
+                env_count("SIMMERV_WSET_FIRST", 50_000_000),
+                env_count("SIMMERV_WSET_EVERY", 1_000_000_000),
+            )
+        };
         let pfs = vec![
             Pf::new("none", false, None, 0, false),
             Pf::new("next-line (tagged)", true, None, 0, false),
@@ -655,6 +697,9 @@ impl Wset {
                 )
             });
         }
+        if lite {
+            pfs.truncate(1);
+        }
         let mut two = vec![];
         for &(e, w) in &L2 {
             two.push(Two {
@@ -672,6 +717,10 @@ impl Wset {
         }
         let w = Self {
             dir,
+            lite,
+            sample,
+            abs,
+            active: true,
             len,
             first,
             every,
@@ -727,19 +776,12 @@ impl Wset {
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
             split: {
-                let mut v = vec![];
-                for hash in [Hash::Xor, Hash::Mul] {
-                    for policy in [Policy::P1, Policy::P2] {
-                        v.push(Split::new(policy, hash, 0, false, true));
-                    }
-                }
-                for policy in [Policy::P1, Policy::P2] {
-                    for degree in [2, 4] {
-                        for may_walk in [true, false] {
-                            v.push(Split::new(policy, Hash::Xor, degree, may_walk, false));
-                        }
-                    }
-                }
+                let policies = [Policy::P1, Policy::P2, Policy::P3, Policy::P4];
+                let mut v: Vec<Split> = policies
+                    .iter()
+                    .map(|&p| Split::new(p, 0, true, true))
+                    .collect();
+                v.extend(policies.iter().map(|&p| Split::new(p, 2, true, false)));
                 v
             },
         };
@@ -812,24 +854,60 @@ impl Wset {
         w
     }
 
-    /// One instruction about to execute at `pc`. Returns false once the
-    /// window is over and the recorder can be dropped.
-    pub fn insn(&mut self, mmu: &mut Mmu, pc: u64, prv: usize, translated: bool) -> bool {
-        if self.n >= self.next_event && !self.event() {
-            return false;
+    /// Sampling: the transitions between idle, warm-up and measurement.
+    /// Returns the instructions to stay idle for, or [`DROP`].
+    fn sample_step(&mut self) -> Option<u64> {
+        let s = self.sample?;
+        let abs = self.abs;
+        if abs < s.start_at {
+            self.active = false;
+            self.abs = s.start_at;
+            return Some(s.start_at - abs);
         }
+        self.active = true;
+        if abs == s.start_at + s.warm {
+            self.dump(&format!("w-{abs:013}"));
+        }
+        if abs < s.start_at + s.warm + s.measure {
+            return None;
+        }
+        self.dump(&format!("m-{abs:013}"));
+        let next = s.start_at + s.period;
+        if next >= s.stop {
+            eprintln!("wset: sampling done at {abs}");
+            return Some(DROP);
+        }
+        self.sample = Some(Sample {
+            start_at: next,
+            ..s
+        });
+        self.active = false;
+        self.abs = next;
+        Some(next - abs)
+    }
+
+    /// One instruction about to execute at `pc`. Returns 0 to go on, a number
+    /// of instructions to stay idle for, or [`DROP`] once the recorder is done.
+    pub fn insn(&mut self, mmu: &mut Mmu, pc: u64, prv: usize, translated: bool) -> u64 {
+        if let Some(idle) = self.sample_step() {
+            return idle;
+        }
+        if self.n >= self.next_event && !self.event() {
+            return DROP;
+        }
+        self.abs += 1;
         self.n += 1;
         self.insns[prv] += 1;
         self.pc = pc;
         self.new_insn = true;
         let line = (pc >> 6) | ((prv as u64) << 60);
-        if line == self.last_iline {
-            return true;
+        if self.lite || line == self.last_iline {
+            return 0;
         }
         self.last_iline = line;
         self.iacc[prv] += 1;
         if self.icache.lookup(line).is_some() {
-            return true;
+            return 0;
         }
         self.icache.fill(line, 0);
         self.imiss[prv] += 1;
@@ -844,7 +922,7 @@ impl Wset {
             let w = self.windows();
             self.ws_imiss_page.touch(k, &w);
         }
-        true
+        0
     }
 
     fn event(&mut self) -> bool {
@@ -879,6 +957,9 @@ impl Wset {
         prv: usize,
         translated: bool,
     ) {
+        if !self.active {
+            return;
+        }
         let vline = va >> 6;
         if !self.new_insn && vline == self.last_line {
             self.dup += 1;
@@ -959,29 +1040,26 @@ impl Wset {
             s.demand(va, pa, xl.as_ref(), prv);
         }
         if let Some(stride) = rpt_out[1] {
+            // A target in the trigger's page takes the trigger's translation;
+            // one in another page is translated through the TLB.
             let mut targets = [None; 4];
             for k in 0..4 {
                 let t = va.wrapping_add(stride.wrapping_mul(k as i64 + 1) as u64);
                 if t >> 6 == va >> 6 {
                     continue;
                 }
-                let cross = t >> 12 != va >> 12;
-                let x = match (translated, cross) {
-                    (false, _) => None,
-                    (true, false) => xl,
-                    (true, true) => match self.xlat(mmu, t) {
-                        Some(x) => Some(x),
-                        None => continue,
-                    },
+                targets[k] = if !translated {
+                    Some((t, t >> 6, None))
+                } else if t >> 12 == va >> 12 {
+                    Some((t, ((pa & !0xfff) | (t & 0xfff)) >> 6, None))
+                } else {
+                    self.xlat(mmu, t)
+                        .map(|x| (t, (x.pa | (t & 0xfff)) >> 6, Some(x)))
                 };
-                if translated && x.is_none() {
-                    continue;
-                }
-                targets[k] = Some((t, cross, x));
             }
             for s in &mut self.split {
-                for &(t, cross, x) in targets.iter().take(s.degree as usize).flatten() {
-                    s.prefetch(t, x.as_ref(), cross);
+                for &(t, pl, x) in targets.iter().take(s.degree as usize).flatten() {
+                    s.prefetch(t, pl, x.as_ref());
                 }
             }
         }
@@ -1013,6 +1091,10 @@ impl Wset {
                     }
                 }
             }
+        }
+
+        if self.lite {
+            return;
         }
 
         // Per-PC deltas.
@@ -1129,6 +1211,22 @@ impl Wset {
     fn tlbs(&mut self, x: &Xlat, va: u64, prv: usize) {
         let (sk, sidx) = sized_key(va, x.shift);
         let (pk, pidx) = page_key(va);
+        if self.lite {
+            if !self.sa_rtl.access(pk, pidx, prv) {
+                self.walks[prv] += 1;
+                self.walk_refs += u64::from(x.nlev);
+                for j in 0..x.nlev as usize {
+                    let line = x.pte[j] >> 6;
+                    for pf in &mut self.pfs {
+                        if pf.cache.lookup(line).is_none() {
+                            pf.pte_miss += 1;
+                            pf.fill(line, 0);
+                        }
+                    }
+                }
+            }
+            return;
+        }
         self.fa_sized.access(sk, prv);
         self.fa_page.access(pk, prv);
         for t in &mut self.sa_all {
@@ -1195,6 +1293,16 @@ impl Wset {
         let n = self.n.max(1);
         let pki = |v: u64| v as f64 * 1000.0 / n as f64;
         let _ = writeln!(o, "# wset report {tag}");
+        let _ = writeln!(
+            o,
+            "RAW n {} abs {} straight_pa_dram {} straight_va_dram {} walks16 {} accesses {}",
+            self.n,
+            self.abs,
+            self.pfs[0].miss.iter().sum::<u64>(),
+            self.vmiss.iter().sum::<u64>(),
+            self.walks[U] + self.walks[S],
+            self.acc.iter().flatten().sum::<u64>()
+        );
         let _ = writeln!(
             o,
             "insns {} (U {} S {} M {})",
@@ -1557,7 +1665,7 @@ impl Wset {
             "way1hit",
             "synmove",
             "DRAM",
-            "P2moves",
+            "moves",
             "PTErd",
             "PTEdram",
             "TLBlook",
@@ -1568,7 +1676,7 @@ impl Wset {
             let base = self
                 .split
                 .iter()
-                .find(|b| b.degree == 0 && b.policy == s.policy && b.hash == s.hash)
+                .find(|b| b.degree == 0 && b.policy == s.policy)
                 .map(Split::dram_total);
             s.report(&mut o, self.n, base);
         }
