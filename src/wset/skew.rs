@@ -26,6 +26,7 @@
 use super::Cache;
 use super::F_PF;
 use super::NO_LINE;
+use super::Repl;
 use super::Sa;
 use super::Xlat;
 use super::page_key;
@@ -105,36 +106,110 @@ const EMPTY: Slot = Slot {
 
 const fn fold(line: u64) -> u64 { line ^ line >> 10 ^ line >> 20 }
 
-/// Physical second-level caches (bytes, ways) behind a first-level model.
-const L2SZ: [(usize, usize); 3] = [(512 << 10, 8), (1 << 20, 16), (2 << 20, 16)];
+/// Physical second-level caches (bytes, ways, hashed index) behind a
+/// first-level model, unless `SIMMERV_WSET_L2` lists others as
+/// `<KiB>k<ways>[h]`, comma-separated (`h`: the index is xor-folded).
+const L2SZ: [(usize, usize, bool); 3] = [
+    (512 << 10, 8, false),
+    (1 << 20, 16, false),
+    (2 << 20, 16, false),
+];
 
-/// Second-level caches of every size in [`L2SZ`], each seeing every line the
-/// first level fetches from below it; a miss in one goes to DRAM.
+/// A dirty line: written since it was filled.
+const F_DIRTY: u8 = 64;
+
+fn l2_sizes() -> Vec<(usize, usize, bool)> {
+    let Some(v) = std::env::var_os("SIMMERV_WSET_L2") else {
+        return L2SZ.to_vec();
+    };
+    v.to_string_lossy()
+        .split(',')
+        .filter_map(|e| {
+            let (kib, rest) = e.split_once('k')?;
+            let hashed = rest.ends_with('h');
+            let ways = rest.trim_end_matches('h').parse().ok()?;
+            Some((kib.parse::<usize>().ok()? << 10, ways, hashed))
+        })
+        .collect()
+}
+
+/// Second-level caches of every size in [`l2_sizes`], each seeing every line
+/// the first level fetches from below it and every dirty line it evicts.
+/// Counted per cache: DRAM reads for data and for instruction fetches, and
+/// DRAM writes (dirty second-level victims).
 struct L2s {
+    sz: Vec<(usize, usize, bool)>,
     c: Vec<Cache>,
     miss: Vec<u64>,
+    imiss: Vec<u64>,
+    wr: Vec<u64>,
 }
 
 impl L2s {
     fn new() -> Self {
+        let sz = l2_sizes();
         Self {
-            c: L2SZ.iter().map(|&(b, w)| Cache::new(b, w)).collect(),
-            miss: vec![0; L2SZ.len()],
+            c: sz
+                .iter()
+                .map(|&(b, w, hashed)| Cache {
+                    hashed,
+                    ..Cache::new(b, w)
+                })
+                .collect(),
+            miss: vec![0; sz.len()],
+            imiss: vec![0; sz.len()],
+            wr: vec![0; sz.len()],
+            sz,
         }
     }
 
-    fn fetch(&mut self, pl: u64) {
-        for (k, c) in self.c.iter_mut().enumerate() {
-            if c.lookup(pl).is_none() {
-                self.miss[k] += 1;
-                c.fill(pl, 0);
+    fn read(&mut self, pl: u64, insn: bool) {
+        for k in 0..self.c.len() {
+            if self.c[k].lookup(pl).is_none() {
+                if insn {
+                    self.imiss[k] += 1;
+                } else {
+                    self.miss[k] += 1;
+                }
+                if let Some((_, f)) = self.c[k].fill_victim(pl, 0)
+                    && f & F_DIRTY != 0
+                {
+                    self.wr[k] += 1;
+                }
+            }
+        }
+    }
+
+    fn fetch(&mut self, pl: u64) { self.read(pl, false); }
+
+    /// A line fetched by the instruction cache.
+    pub fn ifetch(&mut self, pl: u64) { self.read(pl, true); }
+
+    /// A dirty line evicted from the first level: a whole-line write, which
+    /// allocates without a read.
+    fn writeback(&mut self, pl: u64) {
+        for k in 0..self.c.len() {
+            match self.c[k].lookup(pl) {
+                Some(i) => self.c[k].flag[i] |= F_DIRTY,
+                None => {
+                    if let Some((_, f)) = self.c[k].fill_victim(pl, F_DIRTY)
+                        && f & F_DIRTY != 0
+                    {
+                        self.wr[k] += 1;
+                    }
+                }
             }
         }
     }
 
     fn raw(&self, o: &mut String) {
-        for (&(b, w), m) in L2SZ.iter().zip(&self.miss) {
-            let _ = write!(o, " l2_{}k{w}w={m}", b >> 10);
+        for (k, &(b, w, h)) in self.sz.iter().enumerate() {
+            let n = format!("l2_{}k{w}w{}", b >> 10, if h { "h" } else { "" });
+            let _ = write!(
+                o,
+                " {n}={} {n}_i={} {n}_wr={}",
+                self.miss[k], self.imiss[k], self.wr[k]
+            );
         }
     }
 }
@@ -691,11 +766,19 @@ pub struct Pipt {
 }
 
 impl Pipt {
-    /// An alias-free VIPT cache of `kib` KiB: `kib / 4` ways of 64 sets.
-    pub fn vipt(kib: usize) -> Self {
+    /// An alias-free VIPT cache of `kib` KiB: `kib / 4` ways of 64 sets,
+    /// replaced by `repl`.
+    pub(crate) fn vipt(kib: usize, repl: Repl) -> Self {
+        let mut name = format!("VIPT-{kib}K-{}w", kib / 4);
+        if repl != Repl::Lru {
+            let _ = write!(name, "-{repl:?}");
+        }
         Self {
-            name: format!("VIPT-{kib}K-{}w", kib / 4),
-            sa: Some(Cache::new(kib << 10, kib / 4)),
+            name,
+            sa: Some(Cache {
+                repl,
+                ..Cache::new(kib << 10, kib / 4)
+            }),
             ..Self::new(0, Place::Lru)
         }
     }
@@ -741,7 +824,11 @@ impl Pipt {
 
     fn fill(&mut self, pl: u64, flags: u8) {
         if let Some(c) = &mut self.sa {
-            c.fill(pl, flags);
+            if let Some((v, f)) = c.fill_victim(pl, flags)
+                && f & F_DIRTY != 0
+            {
+                self.l2.writeback(v);
+            }
             return;
         }
         let (i, j) = Self::slots(pl);
@@ -753,23 +840,32 @@ impl Pipt {
             filled: self.clk,
             flags: flags | F_USED,
         };
-        if choose(&mut self.w0[i], &mut self.w1[j], self.place) {
-            self.w0[i] = new;
+        let slot = if choose(&mut self.w0[i], &mut self.w1[j], self.place) {
+            &mut self.w0[i]
         } else {
-            self.w1[j] = new;
+            &mut self.w1[j]
+        };
+        let old = std::mem::replace(slot, new);
+        if old.pa != NO_LINE && old.flags & F_DIRTY != 0 {
+            self.l2.writeback(old.pa);
         }
     }
 
-    /// A read or write of physical line `pl`.
-    pub fn demand(&mut self, pl: u64) {
+    /// A line the instruction cache fetches from below it.
+    pub fn ifetch(&mut self, pl: u64) { self.l2.ifetch(pl); }
+
+    /// A read or write of physical line `pl`; a write leaves the line dirty.
+    pub fn demand(&mut self, pl: u64, write: bool) {
         self.clk += 1;
+        let dirty = if write { F_DIRTY } else { 0 };
         if let Some(c) = &mut self.sa {
-            if c.lookup(pl).is_some() {
+            if let Some(i) = c.lookup(pl) {
+                c.flag[i] |= dirty;
                 self.hit0 += 1;
             } else {
                 self.dram += 1;
                 self.l2.fetch(pl);
-                c.fill(pl, 0);
+                self.fill(pl, dirty);
             }
             return;
         }
@@ -782,7 +878,7 @@ impl Pipt {
             };
             if s.pa == pl {
                 s.stamp = self.clk;
-                s.flags |= F_USED;
+                s.flags |= F_USED | dirty;
                 if s.flags & F_PF != 0 {
                     s.flags &= !F_PF;
                     self.pf.useful += 1;
@@ -797,7 +893,7 @@ impl Pipt {
         }
         self.dram += 1;
         self.l2.fetch(pl);
-        self.fill(pl, 0);
+        self.fill(pl, dirty);
     }
 
     pub fn pte(&mut self, pl: u64) {

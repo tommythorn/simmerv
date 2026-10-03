@@ -37,7 +37,12 @@
 //! not-recently-used placement (plain 2-way, the reverse directory with forced
 //! evictions or with slot-placed entries, physical skew) and alias-free
 //! set-associative caches of page-sized ways (32, 64 and 128 KiB), each with
-//! physical second-level caches behind it.
+//! physical second-level caches behind it. `SIMMERV_WSET_VIPT` compares the
+//! page-sized-way caches under LRU, tree pseudo-LRU and not-recently-used
+//! replacement against the physical skew, with the 128 KiB 2-way instruction
+//! cache's misses and the data caches' dirty evictions also reaching the
+//! second level; `SIMMERV_WSET_L2` names the second-level caches (see
+//! `skew::l2_sizes`).
 //!
 //! Translation facts come from a side-effect-free Sv39 walk of the live page
 //! tables, cached per `(satp, 4 KiB page)` and invalidated by every
@@ -286,16 +291,33 @@ const F_NONUNIT: u8 = 4;
 const F_W: u8 = 8;
 const NO_LINE: u64 = u64::MAX;
 
-/// Set-associative LRU cache of line numbers, with per-line flags.
+/// Replacement among a set's ways.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Repl {
+    /// True least-recently-used.
+    Lru,
+    /// A binary tree of `ways - 1` bits per set, each pointing away from the
+    /// half last used.
+    Plru,
+    /// One used bit per line; when every bit of a set would be set, all but
+    /// the line just used are cleared. The victim is the lowest unused way.
+    Nru,
+}
+
+/// Set-associative cache of line numbers, with per-line flags.
 struct Cache {
     sets: usize,
     ways: usize,
     /// Index by the line number XOR-folded with the bits above the index,
     /// instead of by its low bits.
     hashed: bool,
+    repl: Repl,
     tag: Vec<u64>,
     age: Vec<u64>,
     flag: Vec<u8>,
+    /// Per set: the tree bits (`Plru`, bit `n` for tree node `n`, root 1) or
+    /// the used bits (`Nru`, bit `w` for way `w`).
+    bits: Vec<u64>,
     clk: u64,
 }
 
@@ -306,9 +328,11 @@ impl Cache {
             sets: lines / ways,
             ways,
             hashed: false,
+            repl: Repl::Lru,
             tag: vec![NO_LINE; lines],
             age: vec![0; lines],
             flag: vec![0; lines],
+            bits: vec![0; lines / ways],
             clk: 0,
         }
     }
@@ -321,12 +345,44 @@ impl Cache {
         };
         (i as usize & (self.sets - 1)) * self.ways
     }
+    /// Record a use of slot `i`.
+    fn touch(&mut self, i: usize) {
+        self.age[i] = self.clk;
+        let (set, way) = (i / self.ways, i % self.ways);
+        match self.repl {
+            Repl::Lru => {}
+            Repl::Plru => {
+                let levels = self.ways.trailing_zeros();
+                let mut node = 1;
+                for l in (0..levels).rev() {
+                    let d = (way >> l) & 1;
+                    if d == 0 {
+                        self.bits[set] |= 1 << node;
+                    } else {
+                        self.bits[set] &= !(1 << node);
+                    }
+                    node = 2 * node + d;
+                }
+            }
+            Repl::Nru => {
+                let full = if self.ways == 64 {
+                    u64::MAX
+                } else {
+                    (1 << self.ways) - 1
+                };
+                self.bits[set] |= 1 << way;
+                if self.bits[set] == full {
+                    self.bits[set] = 1 << way;
+                }
+            }
+        }
+    }
     fn lookup(&mut self, line: u64) -> Option<usize> {
         self.clk += 1;
         let base = self.set(line);
         for i in base..base + self.ways {
             if self.tag[i] == line {
-                self.age[i] = self.clk;
+                self.touch(i);
                 return Some(i);
             }
         }
@@ -336,24 +392,35 @@ impl Cache {
         let base = self.set(line);
         self.tag[base..base + self.ways].contains(&line)
     }
-    /// Insert as most recent; returns the evicted line's flags, if any.
+    /// Insert as most recently used; returns the evicted line's flags, if any.
     fn fill(&mut self, line: u64, flags: u8) -> Option<u8> {
+        self.fill_victim(line, flags).map(|(_, f)| f)
+    }
+    /// As [`Cache::fill`], returning the evicted line with its flags.
+    fn fill_victim(&mut self, line: u64, flags: u8) -> Option<(u64, u8)> {
         self.clk += 1;
         let base = self.set(line);
-        let mut victim = base;
-        for i in base..base + self.ways {
-            if self.tag[i] == NO_LINE {
-                victim = i;
-                break;
-            }
-            if self.age[i] < self.age[victim] {
-                victim = i;
-            }
-        }
-        let old = (self.tag[victim] != NO_LINE).then_some(self.flag[victim]);
+        let victim = match (base..base + self.ways).find(|&i| self.tag[i] == NO_LINE) {
+            Some(i) => i,
+            None => match self.repl {
+                Repl::Lru => (base..base + self.ways)
+                    .min_by_key(|&i| self.age[i])
+                    .unwrap_or(base),
+                Repl::Plru => {
+                    let b = self.bits[base / self.ways];
+                    let mut node = 1;
+                    for _ in 0..self.ways.trailing_zeros() {
+                        node = 2 * node + ((b >> node) & 1) as usize;
+                    }
+                    base + node - self.ways
+                }
+                Repl::Nru => base + self.bits[base / self.ways].trailing_ones() as usize,
+            },
+        };
+        let old = (self.tag[victim] != NO_LINE).then_some((self.tag[victim], self.flag[victim]));
         self.tag[victim] = line;
-        self.age[victim] = self.clk;
         self.flag[victim] = flags;
+        self.touch(victim);
         old
     }
 }
@@ -537,6 +604,9 @@ struct Sample {
 pub struct Wset {
     dir: PathBuf,
     lite: bool,
+    /// Instruction-cache misses go to the second-level caches behind the
+    /// physically tagged data-cache models.
+    ifeed: bool,
     sample: Option<Sample>,
     /// Instructions since the first, plus `SIMMERV_WSET_BASE`.
     abs: u64,
@@ -638,6 +708,7 @@ impl Wset {
         // The placement comparison instead of the default set of cache models.
         let nru = std::env::var_os("SIMMERV_WSET_NRU").is_some();
         let opts = std::env::var_os("SIMMERV_WSET_OPTS").is_some();
+        let vipt = std::env::var_os("SIMMERV_WSET_VIPT").is_some();
         let abs = env_count("SIMMERV_WSET_BASE", 0);
         let sample = std::env::var_os("SIMMERV_WSET_PERIOD").map(|_| Sample {
             period: env_count("SIMMERV_WSET_PERIOD", 0).max(1),
@@ -741,6 +812,7 @@ impl Wset {
         let w = Self {
             dir,
             lite,
+            ifeed: vipt,
             sample,
             abs,
             active: true,
@@ -798,7 +870,7 @@ impl Wset {
             fa_imiss: Curve::new(),
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
-            split: if nru || opts {
+            split: if nru || opts || vipt {
                 vec![]
             } else {
                 [
@@ -821,7 +893,7 @@ impl Wset {
                     v.push(Virt::new(false, p, 4096, 0).dslot());
                 } else if nru {
                     v.extend(NRU.iter().map(|&p| Virt::new(false, p, 2048, 0)));
-                } else {
+                } else if !vipt {
                     for ptag1 in [false, true] {
                         for place in [Place::Lru, Place::Reuse] {
                             for dentries in [1024, 2048] {
@@ -841,9 +913,18 @@ impl Wset {
             pipt: if opts {
                 vec![
                     Pipt::new(0, Place::NruW1),
-                    Pipt::vipt(32),
-                    Pipt::vipt(64),
-                    Pipt::vipt(128),
+                    Pipt::vipt(32, Repl::Lru),
+                    Pipt::vipt(64, Repl::Lru),
+                    Pipt::vipt(128, Repl::Lru),
+                ]
+            } else if vipt {
+                vec![
+                    Pipt::new(0, Place::NruW1),
+                    Pipt::vipt(64, Repl::Lru),
+                    Pipt::vipt(64, Repl::Plru),
+                    Pipt::vipt(128, Repl::Lru),
+                    Pipt::vipt(128, Repl::Plru),
+                    Pipt::vipt(128, Repl::Nru),
                 ]
             } else if nru {
                 NRU.iter().map(|&p| Pipt::new(0, p)).collect()
@@ -982,7 +1063,7 @@ impl Wset {
         self.pc = pc;
         self.new_insn = true;
         let line = (pc >> 6) | ((prv as u64) << 60);
-        if self.lite || line == self.last_iline {
+        if (self.lite && !self.ifeed) || line == self.last_iline {
             return 0;
         }
         self.last_iline = line;
@@ -992,6 +1073,21 @@ impl Wset {
         }
         self.icache.fill(line, 0);
         self.imiss[prv] += 1;
+        if self.ifeed && self.active {
+            let pl = if translated {
+                self.xlat(mmu, pc).map(|x| (x.pa | (pc & 0xfff)) >> 6)
+            } else {
+                Some(pc >> 6)
+            };
+            if let Some(pl) = pl {
+                for p in &mut self.pipt {
+                    p.ifetch(pl);
+                }
+            }
+        }
+        if self.lite {
+            return 0;
+        }
         if translated && let Some(x) = self.xlat(mmu, pc) {
             let (k, idx) = sized_key(pc, x.shift);
             let p = prv.min(S);
@@ -1125,7 +1221,7 @@ impl Wset {
             v.demand(va, pa, xl.as_ref());
         }
         for p in &mut self.pipt {
-            p.demand(pline);
+            p.demand(pline, write);
         }
         if let Some(stride) = rpt_out[1] {
             // A target in the trigger's page takes the trigger's translation;
@@ -1801,5 +1897,43 @@ impl Wset {
             s.report(&mut o, self.n, base);
         }
         o
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cache;
+    use super::NO_LINE;
+    use super::Repl;
+
+    /// Fill a one-set cache of `ways` ways with lines 0.., use `used` in
+    /// order, then return the way the next fill evicts.
+    fn victim(repl: Repl, ways: usize, used: &[u64]) -> u64 {
+        let mut c = Cache {
+            repl,
+            ..Cache::new(ways * 64, ways)
+        };
+        for l in 0..ways as u64 {
+            assert!(c.fill_victim(l, 0).is_none());
+        }
+        for &l in used {
+            assert!(c.lookup(l).is_some());
+        }
+        c.fill_victim(NO_LINE - 1, 0).map(|(l, _)| l).unwrap()
+    }
+
+    #[test]
+    fn replacement() {
+        assert_eq!(victim(Repl::Lru, 4, &[0, 2, 1, 3]), 0);
+        assert_eq!(victim(Repl::Lru, 4, &[3, 2, 1, 0]), 3);
+        // The tree points away from the last use at every level.
+        assert_eq!(victim(Repl::Plru, 4, &[0, 1, 2, 3]), 0);
+        assert_eq!(victim(Repl::Plru, 4, &[3]), 0);
+        assert_eq!(victim(Repl::Plru, 4, &[0, 2]), 1);
+        assert_eq!(victim(Repl::Plru, 32, &[]), 0);
+        // Filling every way set every used bit, so the last fill (3) cleared
+        // the rest; the victim is the lowest way not used since.
+        assert_eq!(victim(Repl::Nru, 4, &[]), 0);
+        assert_eq!(victim(Repl::Nru, 4, &[0, 1]), 2);
     }
 }
