@@ -23,6 +23,7 @@
 //!
 //! Placement between a new line's two candidate slots is one of [`Place`].
 
+use super::Cache;
 use super::F_PF;
 use super::NO_LINE;
 use super::Sa;
@@ -103,6 +104,40 @@ const EMPTY: Slot = Slot {
 };
 
 const fn fold(line: u64) -> u64 { line ^ line >> 10 ^ line >> 20 }
+
+/// Physical second-level caches (bytes, ways) behind a first-level model.
+const L2SZ: [(usize, usize); 3] = [(512 << 10, 8), (1 << 20, 16), (2 << 20, 16)];
+
+/// Second-level caches of every size in [`L2SZ`], each seeing every line the
+/// first level fetches from below it; a miss in one goes to DRAM.
+struct L2s {
+    c: Vec<Cache>,
+    miss: Vec<u64>,
+}
+
+impl L2s {
+    fn new() -> Self {
+        Self {
+            c: L2SZ.iter().map(|&(b, w)| Cache::new(b, w)).collect(),
+            miss: vec![0; L2SZ.len()],
+        }
+    }
+
+    fn fetch(&mut self, pl: u64) {
+        for (k, c) in self.c.iter_mut().enumerate() {
+            if c.lookup(pl).is_none() {
+                self.miss[k] += 1;
+                c.fill(pl, 0);
+            }
+        }
+    }
+
+    fn raw(&self, o: &mut String) {
+        for (&(b, w), m) in L2SZ.iter().zip(&self.miss) {
+            let _ = write!(o, " l2_{}k{w}w={m}", b >> 10);
+        }
+    }
+}
 
 /// Direct-mapped 4 KiB tables of 2048 and 4096 entries (indexed by the low
 /// VPN bits), each beside a 32-entry direct-mapped and a 64-entry fully
@@ -195,6 +230,16 @@ pub struct Virt {
     pte_reads: u64,
     pte_dram: u64,
     pf: Pf,
+    /// Way 1 indexed like way 0 (a plain 2-way cache); its lines are found
+    /// by physical line at way 1's 16 colours of the row, as way 0's are.
+    straight: bool,
+    /// A directory entry's way within its set is the low bits of its way-1
+    /// slot, so it is written without a search; a new way-1 line whose entry
+    /// is taken goes to way 0 instead (no forced evictions).
+    dslot: bool,
+    /// Way-1 fills that went to way 0 because their directory entry was taken.
+    dfall: u64,
+    l2: L2s,
 }
 
 impl Virt {
@@ -241,11 +286,35 @@ impl Virt {
             pte_reads: 0,
             pte_dram: 0,
             pf: Pf::default(),
+            straight: false,
+            dslot: false,
+            dfall: 0,
+            l2: L2s::new(),
         }
     }
 
+    /// Way 1 indexed like way 0: a plain 2-way cache.
+    pub fn straight(mut self) -> Self {
+        self.straight = true;
+        self.name = format!("straight-{:?}", self.place);
+        self
+    }
+
+    /// Directory entries placed by their way-1 slot, no forced evictions.
+    pub fn dslot(mut self) -> Self {
+        self.dslot = true;
+        self.name.push_str("-slot");
+        self
+    }
+
     const fn i0(vl: u64) -> usize { vl as usize & (SETS - 1) }
-    const fn i1(vl: u64) -> usize { fold(vl) as usize & (SETS - 1) }
+    fn i1(&self, vl: u64) -> usize {
+        if self.straight {
+            Self::i0(vl)
+        } else {
+            fold(vl) as usize & (SETS - 1)
+        }
+    }
     fn dset(&self, pl: u64) -> usize {
         let sets = self.d.len() / self.dways;
         (fold(pl) as usize & (sets - 1)) * self.dways
@@ -263,6 +332,9 @@ impl Virt {
     }
 
     fn d_remove(&mut self, pl: u64) {
+        if self.straight {
+            return;
+        }
         let b = self.dset(pl);
         for e in &mut self.d[b..b + self.dways] {
             if e.0 == pl {
@@ -280,10 +352,29 @@ impl Virt {
         self.w1[j] = EMPTY;
     }
 
+    /// Whether a new way-1 line `pl` at slot `j` must go to way 0 instead: its
+    /// directory entry is taken by another line than the one `j` holds now.
+    fn d_taken(&self, pl: u64, j: usize) -> bool {
+        if !self.dslot {
+            return false;
+        }
+        let e = self.d[self.dset(pl) + (j & (self.dways - 1))];
+        e.0 != NO_LINE && e.0 != self.w1[j].pa
+    }
+
     /// Enter way-1 slot `j`, now holding `pl`, in the directory; a full set
     /// evicts the way-1 line of its least recently entered member.
     fn d_insert(&mut self, pl: u64, j: usize) {
+        if self.straight {
+            return;
+        }
         let b = self.dset(pl);
+        if self.dslot {
+            let k = b + (j & (self.dways - 1));
+            assert!(self.d[k].0 == NO_LINE, "wset: directory slot taken");
+            self.d[k] = (pl, j, self.clk);
+            return;
+        }
         let mut v = b;
         for k in b..b + self.dways {
             if self.d[k].0 == NO_LINE {
@@ -314,6 +405,12 @@ impl Virt {
         {
             return Some((0, j));
         }
+        if self.straight {
+            return (0..16)
+                .map(|c| c * ROWS + row)
+                .find(|&j| self.w1[j].pa == pl)
+                .map(|j| (1, j));
+        }
         let b = self.dset(pl);
         self.d[b..b + self.dways]
             .iter()
@@ -322,7 +419,7 @@ impl Virt {
     }
 
     fn place(&mut self, vl: u64, pl: u64, flags: u8) {
-        let (i, j) = (Self::i0(vl), Self::i1(vl));
+        let (i, j) = (Self::i0(vl), self.i1(vl));
         let new = Slot {
             pa: pl,
             va: vl,
@@ -341,6 +438,9 @@ impl Virt {
             choose(&mut self.w0[i], &mut self.w1[j], self.place)
         };
         if to_w0 {
+            self.w0[i] = new;
+        } else if self.d_taken(pl, j) {
+            self.dfall += 1;
             self.w0[i] = new;
         } else {
             self.evict1(j);
@@ -385,7 +485,22 @@ impl Virt {
             return;
         }
         self.pte_dram += 1;
+        self.l2.fetch(pl);
         let j = fold(pl) as usize & (SETS - 1);
+        let line = Slot {
+            pa: pl,
+            va: NO_LINE,
+            epoch: 0,
+            stamp: self.clk,
+            filled: self.clk,
+            flags: F_USED,
+        };
+        if self.straight || self.d_taken(pl, j) {
+            // by PA in its own colour: way 0 at the PA's set
+            self.dfall += u64::from(!self.straight);
+            self.w0[Self::i0(pl)] = line;
+            return;
+        }
         self.evict1(j);
         self.w1[j] = Slot {
             pa: pl,
@@ -408,7 +523,7 @@ impl Virt {
     pub fn demand(&mut self, va: u64, pa: u64, x: Option<&Xlat>) {
         self.clk += 1;
         let vl = va >> 6;
-        let (i, j) = (Self::i0(vl), Self::i1(vl));
+        let (i, j) = (Self::i0(vl), self.i1(vl));
         if self.live(&self.w0[i], vl) {
             self.hit0 += 1;
             let f = self.use_line(self.w0[i].flags);
@@ -476,13 +591,19 @@ impl Virt {
                 } else {
                     self.moves += 1;
                     self.evict1(k);
-                    self.evict1(j);
-                    self.w1[j] = stamp(line, self.epoch, self.clk);
-                    self.d_insert(pl, j);
+                    if self.d_taken(pl, j) {
+                        self.dfall += 1;
+                        self.w0[i] = stamp(line, self.epoch, self.clk);
+                    } else {
+                        self.evict1(j);
+                        self.w1[j] = stamp(line, self.epoch, self.clk);
+                        self.d_insert(pl, j);
+                    }
                 }
             }
             None => {
                 self.dram += 1;
+                self.l2.fetch(pl);
                 if spec {
                     self.misspec_miss += 1;
                 }
@@ -497,7 +618,7 @@ impl Virt {
         self.clk += 1;
         let vl = t >> 6;
         if self.live(&self.w0[Self::i0(vl)], vl)
-            || (!self.ptag1 && self.live(&self.w1[Self::i1(vl)], vl))
+            || (!self.ptag1 && self.live(&self.w1[self.i1(vl)], vl))
         {
             return;
         }
@@ -508,13 +629,14 @@ impl Virt {
             return;
         }
         self.pf.issued += 1;
+        self.l2.fetch(pl);
         self.place(vl, pl, F_PF);
     }
 
     pub fn raw(&self, o: &mut String) {
         let _ = writeln!(
             o,
-            "VIRTRAW {} spec={} misspec={} misspec_miss={} hit0={} hit1={} dram={} by_pa={} restamp={} moves={} dlook={} forced={} lookups={} walks={} pte_reads={} pte_dram={} issued={} useful={} pf_lookups={} pf_walks={}",
+            "VIRTRAW {} spec={} misspec={} misspec_miss={} hit0={} hit1={} dram={} by_pa={} restamp={} moves={} dlook={} forced={} lookups={} walks={} pte_reads={} pte_dram={} issued={} useful={} pf_lookups={} pf_walks={} dfall={}",
             self.name,
             self.spec,
             self.misspec,
@@ -534,8 +656,12 @@ impl Virt {
             self.pf.issued,
             self.pf.useful,
             self.pf.lookups,
-            self.pf.walks
+            self.pf.walks,
+            self.dfall
         );
+        o.pop();
+        self.l2.raw(o);
+        o.push('\n');
         self.dm.raw(o, &self.name);
     }
 }
@@ -558,9 +684,22 @@ pub struct Pipt {
     pte_reads: u64,
     pte_dram: u64,
     pf: Pf,
+    l2: L2s,
+    /// In place of the two skewed ways: a set-associative LRU cache of
+    /// page-sized ways (64 sets), alias-free under a virtual index.
+    sa: Option<Cache>,
 }
 
 impl Pipt {
+    /// An alias-free VIPT cache of `kib` KiB: `kib / 4` ways of 64 sets.
+    pub fn vipt(kib: usize) -> Self {
+        Self {
+            name: format!("VIPT-{kib}K-{}w", kib / 4),
+            sa: Some(Cache::new(kib << 10, kib / 4)),
+            ..Self::new(0, Place::Lru)
+        }
+    }
+
     pub fn new(degree: i64, place: Place) -> Self {
         let mut name = "PIPT-skew".to_string();
         if place != Place::Lru {
@@ -583,6 +722,8 @@ impl Pipt {
             pte_reads: 0,
             pte_dram: 0,
             pf: Pf::default(),
+            l2: L2s::new(),
+            sa: None,
         }
     }
 
@@ -591,11 +732,18 @@ impl Pipt {
     }
 
     fn present(&self, pl: u64) -> bool {
+        if let Some(c) = &self.sa {
+            return c.contains(pl);
+        }
         let (i, j) = Self::slots(pl);
         self.w0[i].pa == pl || self.w1[j].pa == pl
     }
 
     fn fill(&mut self, pl: u64, flags: u8) {
+        if let Some(c) = &mut self.sa {
+            c.fill(pl, flags);
+            return;
+        }
         let (i, j) = Self::slots(pl);
         let new = Slot {
             pa: pl,
@@ -615,6 +763,16 @@ impl Pipt {
     /// A read or write of physical line `pl`.
     pub fn demand(&mut self, pl: u64) {
         self.clk += 1;
+        if let Some(c) = &mut self.sa {
+            if c.lookup(pl).is_some() {
+                self.hit0 += 1;
+            } else {
+                self.dram += 1;
+                self.l2.fetch(pl);
+                c.fill(pl, 0);
+            }
+            return;
+        }
         let (i, j) = Self::slots(pl);
         for (way, k) in [(0, i), (1, j)] {
             let s = if way == 0 {
@@ -638,6 +796,7 @@ impl Pipt {
             }
         }
         self.dram += 1;
+        self.l2.fetch(pl);
         self.fill(pl, 0);
     }
 
@@ -646,6 +805,7 @@ impl Pipt {
         self.pte_reads += 1;
         if !self.present(pl) {
             self.pte_dram += 1;
+            self.l2.fetch(pl);
             self.fill(pl, 0);
         }
     }
@@ -677,6 +837,7 @@ impl Pipt {
             return;
         }
         self.pf.issued += 1;
+        self.l2.fetch(pl);
         self.fill(pl, F_PF);
     }
 
@@ -697,6 +858,9 @@ impl Pipt {
             self.pf.lookups,
             self.pf.walks
         );
+        o.pop();
+        self.l2.raw(o);
+        o.push('\n');
     }
 }
 

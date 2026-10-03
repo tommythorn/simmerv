@@ -32,7 +32,12 @@
 //!
 //! `SIMMERV_WSET_LITE` keeps only the split and skewed caches, the plain 2-way
 //! caches and the TLB models beside them; `SIMMERV_WSET_NRU` swaps the cache
-//! models for a comparison of placements in the skewed caches.
+//! models for a comparison of placements in the skewed caches, and
+//! `SIMMERV_WSET_OPTS` for a comparison of way-1 organisations under one
+//! not-recently-used placement (plain 2-way, the reverse directory with forced
+//! evictions or with slot-placed entries, physical skew) and alias-free
+//! set-associative caches of page-sized ways (32, 64 and 128 KiB), each with
+//! physical second-level caches behind it.
 //!
 //! Translation facts come from a side-effect-free Sv39 walk of the live page
 //! tables, cached per `(satp, 4 KiB page)` and invalidated by every
@@ -632,6 +637,7 @@ impl Wset {
         let lite = std::env::var_os("SIMMERV_WSET_LITE").is_some();
         // The placement comparison instead of the default set of cache models.
         let nru = std::env::var_os("SIMMERV_WSET_NRU").is_some();
+        let opts = std::env::var_os("SIMMERV_WSET_OPTS").is_some();
         let abs = env_count("SIMMERV_WSET_BASE", 0);
         let sample = std::env::var_os("SIMMERV_WSET_PERIOD").map(|_| Sample {
             period: env_count("SIMMERV_WSET_PERIOD", 0).max(1),
@@ -792,7 +798,7 @@ impl Wset {
             fa_imiss: Curve::new(),
             fa_unified: Curve::new(),
             sa_unified: SA_MISS.iter().map(|&(e, w)| Sa::new(e, w)).collect(),
-            split: if nru {
+            split: if nru || opts {
                 vec![]
             } else {
                 [
@@ -807,7 +813,13 @@ impl Wset {
             },
             virt: {
                 let mut v = vec![];
-                if nru {
+                if opts {
+                    let p = Place::NruW1;
+                    v.push(Virt::new(false, p, 2048, 0).straight());
+                    v.push(Virt::new(false, p, 2048, 0));
+                    v.push(Virt::new(false, p, 2048, 0).dslot());
+                    v.push(Virt::new(false, p, 4096, 0).dslot());
+                } else if nru {
                     v.extend(NRU.iter().map(|&p| Virt::new(false, p, 2048, 0)));
                 } else {
                     for ptag1 in [false, true] {
@@ -826,7 +838,14 @@ impl Wset {
                 v
             },
             dm_all: DmTlbs::new(),
-            pipt: if nru {
+            pipt: if opts {
+                vec![
+                    Pipt::new(0, Place::NruW1),
+                    Pipt::vipt(32),
+                    Pipt::vipt(64),
+                    Pipt::vipt(128),
+                ]
+            } else if nru {
                 NRU.iter().map(|&p| Pipt::new(0, p)).collect()
             } else {
                 vec![Pipt::new(0, Place::Lru), Pipt::new(2, Place::Lru)]
