@@ -7,12 +7,6 @@
 #![allow(clippy::cast_sign_loss)]
 
 use crate::csr;
-// smolrv64 maintenance-op census, see Op::FenceI.
-static MAINT_FENCEI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static MAINT_CBO_INVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static MAINT_CBO_CLEAN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static MAINT_CBO_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static MAINT_CBO_ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use crate::device::Pack;
 use crate::device::Unpack;
 use crate::fp;
@@ -3234,19 +3228,13 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         // menvcfg.CBIE/CBCFE.  A spec-correct DUT traps these (illegal instr)
         // when the enable bits are clear; we never do.  Safe only because
         // OpenSBI sets menvcfg before S-mode.  See MENVCFG_STCE in csr.rs.
-        Op::CboInval => {
-            MAINT_CBO_INVAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            ExecOut::ok(0)
-        }
-        Op::CboClean => {
-            MAINT_CBO_CLEAN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            ExecOut::ok(0)
-        }
-        Op::CboFlush => {
-            MAINT_CBO_FLUSH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            ExecOut::ok(0)
-        }
-        Op::CNop | Op::PrefetchI | Op::PrefetchR | Op::PrefetchW => ExecOut::ok(0),
+        Op::CNop
+        | Op::CboInval
+        | Op::CboClean
+        | Op::CboFlush
+        | Op::PrefetchI
+        | Op::PrefetchR
+        | Op::PrefetchW => ExecOut::ok(0),
         // Svinval's two bookends.  They order the SINVAL.VMA batch but have no
         // effect a functional model needs to implement, so they are counted and
         // otherwise dropped -- unlike the ops above they are not no-ops in the
@@ -3417,21 +3405,6 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         Op::FenceI => {
             cpu.reservation = None;
             cpu.icache_flush = IcacheFlushKind::Full;
-            // Maintenance-op census for smolrv64: how often a guest executes
-            // fence.i and how many cbo ops it issues, the counts
-            // that size its I$ coherence. Printed on stderr
-            // every 64 fence.i.
-            let n = MAINT_FENCEI.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n.is_multiple_of(64) {
-                eprintln!(
-                    "MAINT fence.i={n} cbo.inval={} cbo.clean={} cbo.flush={} cbo.zero={} cycle={}",
-                    MAINT_CBO_INVAL.load(std::sync::atomic::Ordering::Relaxed),
-                    MAINT_CBO_CLEAN.load(std::sync::atomic::Ordering::Relaxed),
-                    MAINT_CBO_FLUSH.load(std::sync::atomic::Ordering::Relaxed),
-                    MAINT_CBO_ZERO.load(std::sync::atomic::Ordering::Relaxed),
-                    cpu.cycle
-                );
-            }
             ExecOut::ok(0)
         }
         // RV32/RV64 Zicsr
@@ -4257,7 +4230,6 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         }
         // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
         Op::CboZero => {
-            MAINT_CBO_ZERO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // NOTE (cosim gating gap): not gated on menvcfg.CBZE.  A
             // spec-correct DUT traps cbo.zero (illegal instr) when
             // CBZE is clear; we always execute it.  Safe only
