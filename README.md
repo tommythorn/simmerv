@@ -405,12 +405,37 @@ $ sudo ./target/release/simmerv-cli --vmnet linux/fw_payload.bin,0x80000000 -f l
 ```
 
 The guest receives an address on vmnet's subnet (typically `192.168.x.x`) with
-NAT to the host's network. If your guest image doesn't bring the link up
-automatically, run a DHCP client inside it:
+NAT to the host's network. Ubuntu 26.04 does this by itself at boot: its
+netplan (`/etc/netplan/50-cloud-init.yaml`) turns on DHCP for every `en*` and
+`eth*` interface through systemd-networkd, so no DHCP client package is needed.
+
+**DHCP needs `CONFIG_PACKET=y` in the guest kernel.** Every DHCP client sends
+its first request on an `AF_PACKET` socket, and the guest cannot load Ubuntu's
+`af_packet.ko`, built for Ubuntu's own kernel, into ours. Without it networkd
+logs `Failed to start LLDP client: Address family not supported by protocol`
+and never gets an address. The `linux/fw_payload.elf` shipped here has it built
+in; a kernel of your own needs it too, or the static setup below.
+
+If the link did not come up, check `networkctl` and ask again with whichever
+client the image has (`ip link` shows the interface name):
 
 ```sh
 # in the guest
-$ udhcpc -i eth0        # busybox; or: dhclient eth0
+$ sudo networkctl reconfigure eth0   # Ubuntu: networkd's built-in DHCP
+$ sudo dhcpcd eth0                   # Ubuntu 26.04 also ships dhcpcd
+$ udhcpc -i eth0                     # busybox images (linux/rootfs.img)
+```
+
+Ubuntu 26.04 has neither `dhclient` nor `udhcpc`. With no DHCP at all, set the
+address by hand on vmnet's subnet, typically `192.168.64.0/24` with the host
+and DNS at `.1`:
+
+```sh
+# in the guest
+$ sudo ip link set eth0 up
+$ sudo ip addr add 192.168.64.50/24 dev eth0
+$ sudo ip route add default via 192.168.64.1
+$ echo nameserver 192.168.64.1 | sudo tee /etc/resolv.conf
 ```
 
 (`-T`/`--tap` is Linux-only and `--vmnet` is macOS-only; each errors out on the
