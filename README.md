@@ -30,6 +30,9 @@ cargo r -rq -- -m 8192 --rva23 linux/fw_payload.elf -f ubuntu-26.04-preinstalled
   (RVV 1.0, `ELEN`=64, `VLEN`=128 or 256 via `--vlen`) plus Zcb, Zimop,
   Zcmop, Zfa, Zawrs, Zacas, Zabha, Zvbb, Zvkt and Zihintntl.  Boots the RVA23
   port of Ubuntu 26.04.
+- Optional graphics console, enabled with `--graphics WxH`: a
+  `simple-framebuffer` shown in an SDL window (or inline in iTerm2), plus a
+  virtio keyboard
 - Targets native and WASM
 - Snapshots
 - Speedometer
@@ -280,6 +283,52 @@ refuses by name — but neither is how you should boot a ramdisk.
 kernel runs the initramfs's `/init` when there is one, and `root=` is never
 consulted. Booting the demo geometry with the stock tree and `-i` reaches a
 login prompt, which is the check that this holds.
+
+## How to run Linux with a graphics console (`--graphics`)
+
+```sh
+cargo r -r -- --graphics 1280x1024 --rva23 \
+    --append "fbcon=font:SUN12x22 console=ttyS0 console=tty0 earlycon=sbi root=/dev/vda1 rw ignore_loglevel random.trust_bootloader=on" \
+    linux/fw_payload.elf -f ubuntu-26.04-preinstalled-server-riscv64.img
+```
+
+`--graphics WxH` adds two devices, both declared in the device tree the guest
+is handed, so no hand-written `.dtb` is needed:
+
+- **A framebuffer.** `W*H*2` bytes of RGB565, rounded up to a power of two and
+  carved from the top of RAM at an address aligned to that size (1280x1024
+  takes 4 MiB at `0xffc00000` with the default 2 GiB). It stays ordinary RAM in
+  the guest's linear map, kept from the page allocator by a `/memreserve/`
+  entry, and the emulator reads it back 30 times a second. Linux's `simplefb`
+  binds it; it warns `cannot reserve video memory`, which is expected for a
+  framebuffer inside System RAM and harmless.
+- **A keyboard.** A virtio-input device at `0x10004000` (IRQ 4).
+
+The kernel needs `CONFIG_FB_SIMPLE`, `CONFIG_FRAMEBUFFER_CONSOLE` and
+`CONFIG_VIRTIO_INPUT`; the `linux/fw_payload.elf` shipped here (7.3.0-rc5) has
+them all, plus the console fonts `fbcon=font:` can pick (`SUN12x22`,
+`TER16x32`, `VGA8x16`, ...). The default 8x16 font is small at 1280x1024.
+
+**Where the console goes.** Kernel messages go to every `console=` given; the
+*last* one becomes `/dev/console`, where init and its shell run. So:
+
+- `console=ttyS0 console=tty0` (above): everything on the graphics console,
+  which you type into; the serial terminal still shows the kernel log.
+- `console=tty0 console=ttyS0`: kernel log on both, shell on serial.
+
+`--append` replaces the whole command line, so repeat the default tree's
+arguments (`root=`, `earlycon`, ...) as above.
+
+**Where it is shown.** In an SDL window when one can be opened: SDL2 is loaded
+at run time (`libSDL2-2.0.so.0`, or Homebrew's `libSDL2-2.0.0.dylib`), so
+building needs no SDL at all. Keys typed into the window go to the guest's
+keyboard; closing it exits. Without a window system (SSH, a headless box), the
+frames are drawn inline in the terminal at 1 Hz with iTerm2's image protocol,
+redrawn from the top-left and only when the screen changed. There the terminal
+is the keyboard: keystrokes go to the graphics console, translated back into
+key presses (US layout, arrows, function keys, Ctrl and Alt), and **Ctrl-C k**
+switches them between the graphics console and serial. Set `SDL_VIDEODRIVER`
+to force a particular SDL driver.
 
 ## How to set up networking (VirtIO-net)
 

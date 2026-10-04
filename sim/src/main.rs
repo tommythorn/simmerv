@@ -1,7 +1,9 @@
 mod ckpt;
+mod display;
 mod dummy_terminal;
 mod nonblocknoecho;
 mod popup_terminal;
+mod term_keys;
 
 use crate::dummy_terminal::DummyTerminal;
 use crate::popup_terminal::PopupTerminal;
@@ -54,6 +56,12 @@ struct Args {
     /// pipe it to dtc: `simmerv --dumpdtb -i fs.cpio | dtc -I dtb -O dts`
     #[argh(switch)]
     dumpdtb: bool,
+
+    /// add a WxH RGB565 framebuffer (e.g. "800x600") at the top of RAM, shown
+    /// in an SDL window at 30 Hz, or failing that in iTerm2 at 1 Hz. The guest
+    /// sees a "simple-framebuffer" node
+    #[argh(option)]
+    graphics: Option<String>,
 
     /// no popup terminal
     #[argh(switch, short = 'n')]
@@ -175,6 +183,7 @@ enum TerminalType {
     DummyTerminal,
 }
 
+#[allow(clippy::too_many_arguments)] // one per shared flag
 fn get_terminal(
     terminal_type: &TerminalType,
     ctrlc_breaks: bool,
@@ -183,6 +192,7 @@ fn get_terminal(
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
     tracing_flag: Arc<AtomicBool>,
+    key_route: term_keys::KeyRoute,
 ) -> Box<dyn SerialBackend> {
     match terminal_type {
         TerminalType::PopupTerminal => Box::new(PopupTerminal::new(
@@ -192,6 +202,7 @@ fn get_terminal(
             verbose_flag,
             speedometer_flag,
             tracing_flag,
+            key_route,
         )),
         TerminalType::DummyTerminal => Box::new(DummyTerminal::new()),
     }
@@ -247,6 +258,7 @@ fn main() -> anyhow::Result<()> {
     let verbose_flag = Arc::new(AtomicBool::new(false));
     let speedometer_flag = Arc::new(AtomicBool::new(false));
     let tracing_flag = Arc::new(AtomicBool::new(args.tracing));
+    let key_route = term_keys::KeyRoute::default();
     let mut symbols = BTreeMap::new();
     let memory_megs = args.memory_megs.unwrap_or(2048);
     let cache_mode = match args.uop_cache_mode.as_deref() {
@@ -268,6 +280,7 @@ fn main() -> anyhow::Result<()> {
             Arc::clone(&verbose_flag),
             Arc::clone(&speedometer_flag),
             Arc::clone(&tracing_flag),
+            key_route.clone(),
         ),
         memory_megs * 1024 * 1024,
         cache_entries,
@@ -291,6 +304,23 @@ fn main() -> anyhow::Result<()> {
         Some(other) => {
             anyhow::bail!("unknown satp mode: {other:?} (expected sv39, sv48 or sv57)")
         }
+    }
+    // Before -d and -i: both are placed below whatever the framebuffer leaves.
+    let mut keyboard = None;
+    if let Some(ref spec) = args.graphics {
+        let (width, height) = spec
+            .split_once(['x', 'X'])
+            .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+            .ok_or_else(|| anyhow!("--graphics wants WxH, e.g. 800x600, got {spec:?}"))?;
+        let fb = emulator
+            .setup_framebuffer(width, height)
+            .with_context(|| format!("--graphics {spec}"))?;
+        eprintln!(
+            "framebuffer {width}x{height} RGB565 at [{:#x}, {:#x})",
+            fb.base,
+            fb.base + fb.size
+        );
+        keyboard = Some(emulator.setup_keyboard().context("--graphics keyboard")?);
     }
     emulator.cpu.speedometer_flag = Arc::clone(&speedometer_flag);
     emulator.tracing_flag = Arc::clone(&tracing_flag);
@@ -485,6 +515,32 @@ fn main() -> anyhow::Result<()> {
 
     if images == 0 {
         bail!("I have nothing to run");
+    }
+
+    if let Some(fb) = emulator.framebuffer() {
+        let keyboard = keyboard.unwrap_or_default();
+        let display = display::open(
+            fb.width,
+            fb.height,
+            keyboard.clone(),
+            Arc::clone(&exit_flag),
+        );
+        // Drawn in the terminal, the terminal is the only keyboard there is.
+        let _ = key_route.keyboard.set(keyboard);
+        if display.in_terminal && !args.no_terminal {
+            key_route.active.store(true, Ordering::Relaxed);
+            eprintln!(
+                "graphics: keystrokes go to the graphics console; Ctrl-C k switches to serial"
+            );
+        }
+        emulator.set_display(display.refresh);
+        let due = Arc::clone(&emulator.display_due);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(display.period);
+                due.store(true, Ordering::Relaxed);
+            }
+        });
     }
 
     // Only set the PC if we didn't load a snapshot (snapshot already has PC).

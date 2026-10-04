@@ -1,4 +1,5 @@
 use crate::nonblocknoecho::NonblockNoEcho;
+use crate::term_keys::KeyRoute;
 use simmerv::serial_backend::SerialBackend;
 use std::io::Stdout;
 use std::io::Write;
@@ -19,6 +20,7 @@ impl PopupTerminal {
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
         tracing_flag: Arc<AtomicBool>,
+        key_route: KeyRoute,
     ) -> Self {
         Self {
             input: NonblockNoEcho::new(
@@ -28,6 +30,7 @@ impl PopupTerminal {
                 verbose_flag,
                 speedometer_flag,
                 tracing_flag,
+                key_route,
             ),
         }
     }

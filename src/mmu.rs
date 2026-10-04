@@ -288,6 +288,10 @@ impl Mmu {
     pub const VIRTIO2_BASE: u64 = 0x1000_3000;
     pub const VIRTIO2_END: u64 = 0x1000_4000;
     pub const VIRTIO2_IRQ: u32 = 3;
+    /// The keyboard, attached only with a framebuffer (`setup_keyboard`).
+    pub const INPUT_BASE: u64 = 0x1000_4000;
+    pub const INPUT_END: u64 = 0x1000_5000;
+    pub const INPUT_IRQ: u32 = 4;
     pub const SYSCON_BASE: u64 = 0x0010_0000;
     pub const SYSCON_END: u64 = 0x0010_1000;
 

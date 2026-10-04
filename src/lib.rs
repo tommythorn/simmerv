@@ -184,6 +184,9 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
 /// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
 pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC12";
 
+/// Receives the framebuffer's visible bytes, RGB565, on each display refresh.
+pub type DisplaySink = Box<dyn FnMut(&[u8])>;
+
 /// Where [`Emulator::setup_initrd`] put the ramdisk and the tree it edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitrdPlacement {
@@ -283,6 +286,21 @@ pub struct Emulator {
     /// Lowest and highest physical address `load_image` has written, so an
     /// initrd can be shown not to overlap a kernel image.
     image_extent: Option<(u64, u64)>,
+
+    /// The `simple-framebuffer` carved out of the top of RAM, from
+    /// `setup_framebuffer`.  The device tree and ramdisk go below it.
+    framebuffer: Option<fdt::Framebuffer>,
+
+    /// Set (by a host timer) when the display is due a refresh; the run loop
+    /// then hands the framebuffer's bytes to `display` and clears it.
+    pub display_due: Arc<AtomicBool>,
+
+    /// Receives the framebuffer's visible bytes on each refresh.
+    display: Option<DisplaySink>,
+
+    /// The host end of the virtio keyboard, once `setup_keyboard` has
+    /// attached one; kept so a snapshot restore can reconnect the device.
+    keyboard: Option<crate::device::virtio_input::Keyboard>,
 }
 
 impl Emulator {
@@ -360,6 +378,10 @@ impl Emulator {
             dtb_effective: Vec::new(),
             initrd: None,
             image_extent: None,
+            framebuffer: None,
+            display_due: Arc::new(AtomicBool::new(false)),
+            display: None,
+            keyboard: None,
         };
         // The default tree is the emulator's own, so failing to place it is a
         // broken build rather than bad input.
@@ -437,6 +459,20 @@ impl Emulator {
         }
     }
 
+    /// Hand the framebuffer to the display if a refresh is due.  A plain load
+    /// first: this sits in the run loop, and the flag is almost always clear.
+    fn maybe_refresh_display(&mut self) {
+        if !self.display_due.load(Ordering::Relaxed) {
+            return;
+        }
+        self.display_due.store(false, Ordering::Relaxed);
+        if let (Some(fb), Some(display)) = (self.framebuffer, self.display.as_mut())
+            && let Ok(pixels) = self.cpu.mmu.dma_slice(fb.base, fb.visible_len())
+        {
+            display(pixels);
+        }
+    }
+
     /// Runs program set by `load_image()`. The emulator will run forever.
     /// When `tracing_flag` is set, prints a disassembly line for every
     /// instruction.
@@ -483,6 +519,7 @@ impl Emulator {
                 self.tick(600); // 600 is an arbitrary number
             }
             self.maybe_write_requested_snapshot();
+            self.maybe_refresh_display();
             if self.should_stop() {
                 break;
             }
@@ -503,6 +540,7 @@ impl Emulator {
         loop {
             self.tick(6);
             self.maybe_write_requested_snapshot();
+            self.maybe_refresh_display();
             if self.should_stop() {
                 break;
             }
@@ -610,6 +648,7 @@ impl Emulator {
         let mut uart_backend = self.cpu.mmu.take_uart_backend();
         let mut net_backend = self.cpu.mmu.take_net_backend();
         let streamed = self.streamed.clone();
+        let keyboard = self.keyboard.clone().unwrap_or_default();
 
         self.bb_cache.clear();
         self.cpu
@@ -651,6 +690,11 @@ impl Emulator {
                         Some(Box::new(VirtioNet::new(backend, Mmu::NET_IRQ))
                             as Box<dyn crate::device::MemoryMapped>)
                     }
+                    "VirtIO Input" => Some(Box::new(crate::device::virtio_input::VirtioInput::new(
+                        keyboard.clone(),
+                        Mmu::INPUT_IRQ,
+                    ))
+                        as Box<dyn crate::device::MemoryMapped>),
                     "Syscon" => Some(Box::new(Syscon::new(
                         Arc::clone(&self.poweroff_flag),
                         Arc::clone(&self.reset_flag),
@@ -1198,21 +1242,14 @@ impl Emulator {
     /// because the memory writes in this module are not self-checking.
     #[allow(clippy::cast_possible_truncation)] // RAM sizes come from `usize` in the first place
     fn place_device_tree(&mut self) -> anyhow::Result<u64> {
-        let mut dtb = self.dtb_source.clone();
-        if self.dtb_fixed_addr.is_none() {
-            patch_dtb_memory(&mut dtb, self.memory_bytes)?;
-        }
-        if let Some(ref args) = self.bootargs {
-            dtb = fdt::analyze_bootargs_slot(&dtb)?.embed(&dtb, args)?;
-        }
+        let mut dtb = self.tree_before_initrd()?;
         if let Some((start, end)) = self.initrd {
             dtb = fdt::analyze_initrd_slot(&dtb)?.embed(&dtb, start, end)?;
         }
 
-        let base = match self.dtb_fixed_addr {
-            Some(addr) => addr,
-            None => dtb_end_of_ram(0x8000_0000, self.memory_bytes as usize, dtb.len()),
-        };
+        let base = self
+            .dtb_fixed_addr
+            .unwrap_or_else(|| dtb_end_of_ram(0x8000_0000, self.usable_ram_bytes(), dtb.len()));
 
         let ram_end = 0x8000_0000u64.saturating_add(self.memory_bytes);
         let tree_end = base
@@ -1229,6 +1266,15 @@ impl Emulator {
             bail!(
                 "ramdisk [{start:#x}, {end:#x}) overlaps the device tree at {base:#x}; \
                  the tree cannot move to make room"
+            );
+        }
+        if let Some(fb) = self
+            .framebuffer
+            .filter(|fb| base < fb.base + fb.size && tree_end > fb.base)
+        {
+            bail!(
+                "device tree [{base:#x}, {tree_end:#x}) overlaps the framebuffer at {:#x}",
+                fb.base
             );
         }
 
@@ -1249,6 +1295,128 @@ impl Emulator {
         self.cpu.set_dtb_base(base);
         Ok(base)
     }
+
+    /// The tree in force with everything but the ramdisk applied: the memory
+    /// size, `--append`, and the framebuffer.  The ramdisk is left out because
+    /// its address depends on this tree's size.
+    fn tree_before_initrd(&self) -> anyhow::Result<Vec<u8>> {
+        let mut dtb = self.dtb_source.clone();
+        if self.dtb_fixed_addr.is_none() {
+            patch_dtb_memory(&mut dtb, self.memory_bytes)?;
+        }
+        if let Some(ref args) = self.bootargs {
+            dtb = fdt::analyze_bootargs_slot(&dtb)?.embed(&dtb, args)?;
+        }
+        if let Some(ref fb) = self.framebuffer {
+            dtb = fdt::embed_framebuffer(&dtb, fb)?;
+        }
+        if self.keyboard.is_some() {
+            dtb = fdt::embed_virtio_mmio(
+                &dtb,
+                Mmu::INPUT_BASE,
+                Mmu::INPUT_END - Mmu::INPUT_BASE,
+                Mmu::INPUT_IRQ,
+            )?;
+        }
+        Ok(dtb)
+    }
+
+    /// RAM below the framebuffer, if there is one: the part the device tree
+    /// and ramdisk are placed at the top of.
+    #[allow(clippy::cast_possible_truncation)] // RAM sizes come from `usize` in the first place
+    fn usable_ram_bytes(&self) -> usize {
+        self.framebuffer
+            .map_or(self.memory_bytes, |fb| fb.base - 0x8000_0000) as usize
+    }
+
+    /// Carve a `width` x `height` RGB565 framebuffer out of the top of RAM and
+    /// advertise it to the guest as a `simple-framebuffer`.
+    ///
+    /// The region is `width * height * 2` bytes rounded up to a power of two
+    /// and aligned to that size.  It stays ordinary RAM: the guest draws into
+    /// it with plain stores, and the host reads it back on each refresh (see
+    /// [`Self::set_display`]).  Call before `setup_initrd`, which places the
+    /// ramdisk below whatever the framebuffer leaves.
+    ///
+    /// # Errors
+    /// If a dimension is zero, if the framebuffer would take more than half of
+    /// RAM, or if the tree cannot be rebuilt around it.
+    pub fn setup_framebuffer(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<fdt::Framebuffer> {
+        if width == 0 || height == 0 {
+            bail!("framebuffer {width}x{height} has no pixels");
+        }
+        if self.initrd.is_some() {
+            bail!("the framebuffer must be set up before the ramdisk, which goes below it");
+        }
+        let bytes = u64::from(width) * u64::from(height) * 2;
+        let size = bytes.next_power_of_two().max(4096);
+        if size > self.memory_bytes / 2 {
+            bail!(
+                "a {width}x{height} framebuffer needs {size} bytes, more than half of the \
+                 {} bytes of RAM; increase -m",
+                self.memory_bytes
+            );
+        }
+        let base = (0x8000_0000 + self.memory_bytes - size) & !(size - 1);
+        let fb = fdt::Framebuffer {
+            base,
+            size,
+            width,
+            height,
+        };
+        let previous = self.framebuffer.replace(fb);
+        if let Err(e) = self.place_device_tree() {
+            self.framebuffer = previous;
+            return Err(e);
+        }
+        // The tree used to sit here; start the guest on a black screen rather
+        // than on its leftovers.
+        #[allow(clippy::cast_possible_truncation)]
+        if let Ok(pixels) = self.cpu.mmu.dma_slice(base, size as usize) {
+            pixels.fill(0);
+        }
+        Ok(fb)
+    }
+
+    /// Attach a virtio keyboard and advertise it in the device tree.  Keys
+    /// pushed into the returned handle reach the guest's evdev, and so its
+    /// VT console.  Call before `setup_initrd`, as the tree grows.
+    ///
+    /// # Errors
+    /// If a keyboard is already attached, or the tree has no PLIC to route its
+    /// interrupt to.
+    pub fn setup_keyboard(&mut self) -> anyhow::Result<crate::device::virtio_input::Keyboard> {
+        if self.keyboard.is_some() {
+            bail!("a keyboard is already attached");
+        }
+        let keyboard = crate::device::virtio_input::Keyboard::default();
+        self.keyboard = Some(keyboard.clone());
+        if let Err(e) = self.place_device_tree() {
+            self.keyboard = None;
+            return Err(e);
+        }
+        self.cpu.get_mut_mmu().add_device(
+            Mmu::INPUT_BASE..Mmu::INPUT_END,
+            Box::new(crate::device::virtio_input::VirtioInput::new(
+                keyboard.clone(),
+                Mmu::INPUT_IRQ,
+            )),
+        );
+        Ok(keyboard)
+    }
+
+    /// The framebuffer set up by [`Self::setup_framebuffer`], if any.
+    #[must_use]
+    pub const fn framebuffer(&self) -> Option<fdt::Framebuffer> { self.framebuffer }
+
+    /// Install the receiver of framebuffer refreshes.  It is called from the
+    /// run loop, with the visible bytes in RGB565, whenever `display_due` has
+    /// been set; pacing is the caller's business.
+    pub fn set_display(&mut self, display: DisplaySink) { self.display = Some(display); }
 
     /// Place `content` as the initial ramdisk and advertise it to the guest.
     ///
@@ -1299,19 +1467,11 @@ impl Emulator {
         // `#address-cells` -- and not of the addresses being written.  That is
         // what resolves "the address depends on the tree's size" and "the tree
         // depends on the address" in one pass instead of iterating.
-        let mut probe = self.dtb_source.clone();
-        if self.dtb_fixed_addr.is_none() {
-            patch_dtb_memory(&mut probe, self.memory_bytes)?;
-        }
+        let probe = self.tree_before_initrd()?;
         let growth = fdt::analyze_initrd_slot(&probe)?.growth();
-        let base = match self.dtb_fixed_addr {
-            Some(addr) => addr,
-            None => dtb_end_of_ram(
-                0x8000_0000,
-                self.memory_bytes as usize,
-                probe.len() + growth,
-            ),
-        };
+        let base = self.dtb_fixed_addr.unwrap_or_else(|| {
+            dtb_end_of_ram(0x8000_0000, self.usable_ram_bytes(), probe.len() + growth)
+        });
 
         // Default placement is flush below the tree; a pinned address is used
         // as given, page-aligned only so the reserved range's leading edge does

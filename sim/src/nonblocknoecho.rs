@@ -1,3 +1,4 @@
+use crate::term_keys::KeyRoute;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -19,6 +20,9 @@ pub struct NonblockNoEcho {
     speedometer_flag: Arc<AtomicBool>,
     pub tracing_flag: Arc<AtomicBool>,
     awaiting_command: bool,
+    /// Sends keystrokes to the graphics console's keyboard instead, while
+    /// active.
+    key_route: KeyRoute,
 }
 
 impl NonblockNoEcho {
@@ -30,6 +34,7 @@ impl NonblockNoEcho {
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
         tracing_flag: Arc<AtomicBool>,
+        key_route: KeyRoute,
     ) -> Self {
         use std::os::unix::io::AsRawFd;
         use termios::ECHO;
@@ -96,6 +101,7 @@ impl NonblockNoEcho {
             speedometer_flag,
             tracing_flag,
             awaiting_command: false,
+            key_route,
         }
     }
 
@@ -135,6 +141,11 @@ impl NonblockNoEcho {
             for &byte in &buf[..n as usize] {
                 self.feed(byte);
             }
+            // Per read, so an escape sequence is translated whole.
+            if let Some(keyboard) = self.key_route.target() {
+                let bytes: Vec<u8> = self.pending.drain(..).collect();
+                crate::term_keys::send(keyboard, &crate::term_keys::translate(&bytes));
+            }
         }
     }
 
@@ -164,8 +175,20 @@ impl NonblockNoEcho {
                 let tracing = self.tracing_flag.load(Ordering::Relaxed);
                 eprintln!(
                     "[[v - Verbose({verbose}), S - Speedometer({speedometer}), \
-                     t - Tracing({tracing}), s - Save snapshot, x - eXit, \
-                     else pass to guest]]"
+                     t - Tracing({tracing}), s - Save snapshot, k - Keys to {}, \
+                     x - eXit, else pass to guest]]",
+                    if self.key_route.target().is_some() {
+                        "serial"
+                    } else {
+                        "graphics"
+                    }
+                );
+            }
+            'k' if self.key_route.keyboard.get().is_some() => {
+                let to_keyboard = !self.key_route.active.fetch_xor(true, Ordering::Relaxed);
+                eprint!(
+                    "\r\n[[keys now go to the {} console]]\r\n",
+                    if to_keyboard { "graphics" } else { "serial" }
                 );
             }
             't' => {

@@ -631,3 +631,309 @@ pub fn analyze_bootargs_slot(dtb: &[u8]) -> Result<BootargsSlot> {
         size_dt_struct,
     })
 }
+
+/// A `simple-framebuffer` the guest is told about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Framebuffer {
+    /// Physical address of pixel (0, 0).
+    pub base: u64,
+    /// Bytes carved out for it: `width * height * 2` rounded up to a power of
+    /// two, and `base` is aligned to it.
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Framebuffer {
+    /// Bytes per scanline; RGB565 is two bytes a pixel with no padding.
+    #[must_use]
+    pub const fn stride(&self) -> u32 { self.width * 2 }
+
+    /// Bytes the guest actually draws into, `stride * height`.
+    #[must_use]
+    pub const fn visible_len(&self) -> usize { self.stride() as usize * self.height as usize }
+}
+
+/// What one walk of a tree tells us about adding a node to its root.
+struct RootSlot {
+    off_mem_rsvmap: usize,
+    off_dt_struct: usize,
+    off_dt_strings: usize,
+    size_dt_strings: usize,
+    size_dt_struct: usize,
+    addr_cells: u32,
+    size_cells: u32,
+    /// File offset of the `FDT_END_NODE` that closes the root.
+    root_end_node: usize,
+    /// The PLIC's phandle, for an `interrupt-parent`.
+    plic_phandle: Option<u32>,
+}
+
+impl RootSlot {
+    fn analyze(dtb: &[u8]) -> Result<Self> {
+        if dtb.len() < 40 {
+            bail!(
+                "device tree is {} bytes, too short for an FDT header",
+                dtb.len()
+            );
+        }
+        if read_u32(dtb, 0) != FDT_MAGIC {
+            bail!(
+                "device tree has bad magic {:#010x} (expected {FDT_MAGIC:#010x})",
+                read_u32(dtb, 0)
+            );
+        }
+        let (off_dt_struct, off_dt_strings, size_dt_strings, size_dt_struct) =
+            validate_header(dtb)?;
+        let off_mem_rsvmap = read_u32(dtb, 16) as usize;
+        // A reservation is spliced in ahead of the structure block, which
+        // only shifts both blocks uniformly if the map comes first.
+        if off_mem_rsvmap < 40 || off_mem_rsvmap > off_dt_struct {
+            bail!(
+                "device tree reservation map at {off_mem_rsvmap:#x} does not precede the \
+                 structure block at {off_dt_struct:#x}; this layout is not supported"
+            );
+        }
+        let struct_end = off_dt_struct + size_dt_struct;
+
+        let mut addr_cells = DEFAULT_ADDR_CELLS;
+        let mut size_cells = DEFAULT_ADDR_CELLS;
+        let mut root_end_node = None;
+        let mut plic_phandle = None;
+        // Per open node: (is a PLIC, its phandle); properties come in any
+        // order, so the verdict waits for the node's END_NODE.
+        let mut open: Vec<(bool, Option<u32>)> = Vec::new();
+        let mut pos = off_dt_struct;
+        while pos + 4 <= struct_end {
+            let token_at = pos;
+            let token = read_u32(dtb, pos);
+            pos += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let Some(end) = cstr_end(dtb, pos) else {
+                        bail!("unterminated node name at {pos:#x}");
+                    };
+                    pos = (end + 1 + 3) & !3;
+                    open.push((false, None));
+                }
+                FDT_END_NODE => {
+                    if open.len() == 1 {
+                        root_end_node = Some(token_at);
+                    }
+                    if let Some((true, Some(phandle))) = open.pop() {
+                        plic_phandle.get_or_insert(phandle);
+                    }
+                }
+                FDT_PROP => {
+                    if pos + 8 > struct_end {
+                        bail!("truncated property header at {pos:#x}");
+                    }
+                    let len = read_u32(dtb, pos) as usize;
+                    let nameoff = read_u32(dtb, pos + 4) as usize;
+                    let value_at = pos + 8;
+                    pos = value_at + ((len + 3) & !3);
+                    let Some(name) = name_at(dtb, off_dt_strings + nameoff) else {
+                        bail!("property with out-of-range nameoff {nameoff} at {token_at:#x}");
+                    };
+                    let value = dtb.get(value_at..value_at + len).unwrap_or(&[]);
+                    let depth = open.len();
+                    let Some(node) = open.last_mut() else {
+                        continue;
+                    };
+                    match name {
+                        b"#address-cells" if depth == 1 && len == 4 => {
+                            addr_cells = read_u32(dtb, value_at);
+                        }
+                        b"#size-cells" if depth == 1 && len == 4 => {
+                            size_cells = read_u32(dtb, value_at);
+                        }
+                        b"phandle" | b"linux,phandle" if len == 4 => {
+                            node.1 = Some(read_u32(dtb, value_at));
+                        }
+                        b"compatible" => {
+                            node.0 |= value
+                                .split(|&b| b == 0)
+                                .any(|c| c == b"riscv,plic0" || c == b"sifive,plic-1.0.0");
+                        }
+                        _ => {}
+                    }
+                }
+                FDT_END => break,
+                _ => {}
+            }
+        }
+        let Some(root_end_node) = root_end_node else {
+            bail!("device tree has no root node");
+        };
+        Ok(Self {
+            off_mem_rsvmap,
+            off_dt_struct,
+            off_dt_strings,
+            size_dt_strings,
+            size_dt_struct,
+            addr_cells,
+            size_cells,
+            root_end_node,
+            plic_phandle,
+        })
+    }
+
+    /// `reg = <base size>` in the root's cell counts.
+    #[allow(clippy::cast_possible_truncation)]
+    fn reg(&self, base: u64, size: u64) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        for (v, n, what) in [
+            (base, self.addr_cells, "#address-cells"),
+            (size, self.size_cells, "#size-cells"),
+        ] {
+            if n != 1 && n != 2 {
+                bail!("device tree root declares {what} = <{n}>; only 1 or 2 are supported");
+            }
+            if n == 1 && v >> 32 != 0 {
+                bail!("{v:#x} does not fit in the root's {what} = <1>");
+            }
+            for cell in (0..n).rev() {
+                out.extend_from_slice(&((v >> (32 * cell)) as u32).to_be_bytes());
+            }
+        }
+        Ok(out)
+    }
+
+    /// The blob with root-level node `name` holding `props` added, and the
+    /// range `reserve` (base, size), if any, added to `/memreserve/`.
+    #[allow(clippy::cast_possible_truncation)] // FDT fields are 32-bit by definition
+    fn insert(
+        &self,
+        dtb: &[u8],
+        name: &str,
+        props: &[(&str, Vec<u8>)],
+        reserve: Option<(u64, u64)>,
+    ) -> Result<Vec<u8>> {
+        // Names are interned once each, new ones appended so existing
+        // `nameoff`s stay put.
+        let strings = dtb
+            .get(self.off_dt_strings..self.off_dt_strings + self.size_dt_strings)
+            .unwrap_or(&[]);
+        let mut appended: Vec<u8> = Vec::new();
+        let mut node = Vec::new();
+        node.extend_from_slice(&FDT_BEGIN_NODE.to_be_bytes());
+        node.extend_from_slice(name.as_bytes());
+        node.push(0);
+        node.resize((node.len() + 3) & !3, 0);
+        for (name, value) in props {
+            let nameoff = find_string(strings, name)
+                .or_else(|| find_string(&appended, name).map(|off| self.size_dt_strings + off))
+                .unwrap_or_else(|| {
+                    let off = self.size_dt_strings + appended.len();
+                    appended.extend_from_slice(name.as_bytes());
+                    appended.push(0);
+                    off
+                });
+            node.extend_from_slice(&FDT_PROP.to_be_bytes());
+            node.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            node.extend_from_slice(&(nameoff as u32).to_be_bytes());
+            node.extend_from_slice(value);
+            node.resize((node.len() + 3) & !3, 0);
+        }
+        node.extend_from_slice(&FDT_END_NODE.to_be_bytes());
+
+        // A new reservation goes ahead of the map's all-zero terminator.
+        let mut rsv_end = self.off_mem_rsvmap;
+        while rsv_end + 16 <= self.off_dt_struct
+            && dtb[rsv_end..rsv_end + 16].iter().any(|&b| b != 0)
+        {
+            rsv_end += 16;
+        }
+        if rsv_end + 16 > self.off_dt_struct {
+            bail!(
+                "device tree reservation map at {:#x} has no terminator",
+                self.off_mem_rsvmap
+            );
+        }
+        let mut entry = Vec::new();
+        if let Some((base, size)) = reserve {
+            entry.extend_from_slice(&base.to_be_bytes());
+            entry.extend_from_slice(&size.to_be_bytes());
+        }
+
+        let mut out = Vec::with_capacity(dtb.len() + entry.len() + node.len() + appended.len());
+        out.extend_from_slice(&dtb[..rsv_end]);
+        out.extend_from_slice(&entry);
+        out.extend_from_slice(&dtb[rsv_end..self.root_end_node]);
+        out.extend_from_slice(&node);
+        out.extend_from_slice(&dtb[self.root_end_node..]);
+        let names_at = entry.len() + node.len() + self.off_dt_strings + self.size_dt_strings;
+        if names_at > out.len() {
+            bail!("internal error: strings block ends past the end of the tree");
+        }
+        out.splice(names_at..names_at, appended.iter().copied());
+
+        let total = out.len();
+        let off_struct = self.off_dt_struct + entry.len();
+        let off_strings = self.off_dt_strings + entry.len() + node.len();
+        out[4..8].copy_from_slice(&(total as u32).to_be_bytes());
+        out[8..12].copy_from_slice(&(off_struct as u32).to_be_bytes());
+        out[12..16].copy_from_slice(&(off_strings as u32).to_be_bytes());
+        out[32..36]
+            .copy_from_slice(&((self.size_dt_strings + appended.len()) as u32).to_be_bytes());
+        out[36..40].copy_from_slice(&((self.size_dt_struct + node.len()) as u32).to_be_bytes());
+        Ok(out)
+    }
+}
+
+fn str_value(s: &str) -> Vec<u8> {
+    let mut v = s.as_bytes().to_vec();
+    v.push(0);
+    v
+}
+
+/// The blob with `fb` advertised: a `/memreserve/` entry covering it and a
+/// root-level `simple-framebuffer` node in RGB565.
+///
+/// The memory stays inside the tree's `memory` node, so the region is ordinary
+/// RAM in the guest's linear map; the reservation is only what keeps the page
+/// allocator from handing it out.  A `/memreserve/` rather than a
+/// `/reserved-memory` child for the same reason `dts.dts` gives for the
+/// firmware: no node for `OpenSBI`'s own reservations to collide with.
+///
+/// # Errors
+/// If the blob is not a tree this module can edit, or if the root's
+/// `#address-cells` / `#size-cells` is neither 1 nor 2 or too narrow for the
+/// framebuffer's address or size.
+pub fn embed_framebuffer(dtb: &[u8], fb: &Framebuffer) -> Result<Vec<u8>> {
+    let slot = RootSlot::analyze(dtb)?;
+    let props = [
+        ("compatible", str_value("simple-framebuffer")),
+        ("reg", slot.reg(fb.base, fb.size)?),
+        ("width", fb.width.to_be_bytes().to_vec()),
+        ("height", fb.height.to_be_bytes().to_vec()),
+        ("stride", fb.stride().to_be_bytes().to_vec()),
+        ("format", str_value("r5g6b5")),
+    ];
+    slot.insert(
+        dtb,
+        &format!("framebuffer@{:x}", fb.base),
+        &props,
+        Some((fb.base, fb.size)),
+    )
+}
+
+/// The blob with a `virtio,mmio` device at `[base, base + size)` on PLIC
+/// source `irq`.
+///
+/// # Errors
+/// If the blob is not a tree this module can edit, or it has no PLIC to name
+/// as the `interrupt-parent`.
+pub fn embed_virtio_mmio(dtb: &[u8], base: u64, size: u64, irq: u32) -> Result<Vec<u8>> {
+    let slot = RootSlot::analyze(dtb)?;
+    let Some(plic) = slot.plic_phandle else {
+        bail!("device tree has no PLIC with a phandle to route a virtio interrupt to");
+    };
+    let props = [
+        ("interrupts", irq.to_be_bytes().to_vec()),
+        ("interrupt-parent", plic.to_be_bytes().to_vec()),
+        ("reg", slot.reg(base, size)?),
+        ("compatible", str_value("virtio,mmio")),
+    ];
+    slot.insert(dtb, &format!("virtio_mmio@{base:x}"), &props, None)
+}

@@ -18,6 +18,7 @@ pub mod uart;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod url_disk;
 pub mod virtio_block_disk;
+pub mod virtio_input;
 pub mod virtio_net;
 
 // ---------------------------------------------------------------------------
