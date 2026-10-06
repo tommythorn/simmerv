@@ -309,6 +309,11 @@ The kernel needs `CONFIG_FB_SIMPLE`, `CONFIG_FRAMEBUFFER_CONSOLE` and
 them all, plus the console fonts `fbcon=font:` can pick (`SUN12x22`,
 `TER16x32`, `VGA8x16`, ...). The default 8x16 font is small at 1280x1024.
 
+**A Mandelbrot demo.** `linux/mandelbrot/build.sh` builds `mandelbrot`, a
+6 KB static binary with no libc that zooms into the Mandelbrot set on
+`/dev/fb0`. Copy it into a guest booted with `--graphics` and run it there;
+Ctrl-C stops it and gives the console back.
+
 **Where the console goes.** Kernel messages go to every `console=` given; the
 *last* one becomes `/dev/console`, where init and its shell run. So:
 
