@@ -572,7 +572,17 @@ fn main() -> anyhow::Result<()> {
         emulator.cpu.insn_time = k;
     }
 
-    // Run with checkpoints, optional periodic snapshots, or plain run.
+    // Run with checkpoints, optional periodic snapshots, or plain run. Each of
+    // the three drives the run its own way, so a second one named beside
+    // the first would be ignored: refuse it.
+    let modes = [
+        args.mark_every.is_some(),
+        args.ckpt_at.is_some(),
+        args.snapshot_interval.is_some(),
+    ];
+    if modes.iter().filter(|&&on| on).count() > 1 {
+        bail!("--mark-every, --ckpt-at and -S each drive the run their own way: give one of them");
+    }
     let started = std::time::Instant::now();
     if let Some(ref spec) = args.mark_every {
         let every = parse_insn_count(spec)?;
