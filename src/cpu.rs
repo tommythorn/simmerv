@@ -4941,6 +4941,31 @@ mod test_cpu {
         }
     }
 
+    /// `.vi` immediates with bit 4 set are unsigned for vror and vwsll, not
+    /// sign-extended as for most `.vi` forms.
+    #[test]
+    fn zvbb_vi_immediates_are_unsigned() {
+        const VSETVLI_T0_A0_E64M1: u32 = 0x0d85_72d7; // vsetvli t0, a0, e64, m1, ta, ma
+        const VSETVLI_T0_A0_E32M1: u32 = 0x0d05_72d7; // vsetvli t0, a0, e32, m1, ta, ma
+        const VROR_VI_V4_V8_24: u32 = 0x528c_3257; // vror.vi v4, v8, 24
+        const VWSLL_VI_V4_V8_20: u32 = 0xd68a_3257; // vwsll.vi v4, v8, 20
+        let mut cpu = vector_cpu();
+        cpu.write_register(x(10), 1);
+
+        run_one(&mut cpu, VSETVLI_T0_A0_E64M1).expect("vsetvli");
+        cpu.v.eset(8, 0, 8, 0x0123_4567_89ab_cdef);
+        run_one(&mut cpu, VROR_VI_V4_V8_24).expect("vror.vi");
+        assert_eq!(
+            cpu.v.eget(4, 0, 8),
+            0x0123_4567_89ab_cdef_u64.rotate_right(24)
+        );
+
+        run_one(&mut cpu, VSETVLI_T0_A0_E32M1).expect("vsetvli");
+        cpu.v.eset(8, 0, 4, 0x89ab_cdef);
+        run_one(&mut cpu, VWSLL_VI_V4_V8_20).expect("vwsll.vi");
+        assert_eq!(cpu.v.eget(4, 0, 8), 0x89ab_cdef << 20);
+    }
+
     #[test]
     fn vle32_loads_vl_elements_from_memory() {
         let mut cpu = vector_cpu();

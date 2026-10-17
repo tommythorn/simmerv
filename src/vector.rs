@@ -819,14 +819,14 @@ fn op_integer(cpu: &mut Cpu, c: &Ctx, op: Op) -> Result<u64, Exception> {
             ew(cpu, c, |a, b| a & !b);
         }
         // Zvbb vror/vrol.  The rotate amount is taken modulo the element width.
-        // vror.vi carries a *six*-bit immediate whose top bit is funct6[0], so
-        // the two funct6 values are one instruction in the .vi form and two
-        // different ones otherwise.
+        // vror.vi carries an unsigned *six*-bit immediate whose top bit is
+        // funct6[0], so the two funct6 values are one instruction in the .vi
+        // form and two different ones otherwise.
         0b010100 | 0b010101 => {
             require_vm(cpu)?;
             let rotate_left = !vi && c.funct6 == 0b010101;
             let imm_high = u64::from(vi && c.funct6 == 0b010101) << 5;
-            ew(cpu, c, |a, b| {
+            ew_u(cpu, c, |a, b| {
                 let n = (b | imm_high) % u64::from(bits);
                 if n == 0 {
                     a
@@ -850,8 +850,9 @@ fn op_integer(cpu: &mut Cpu, c: &Ctx, op: Op) -> Result<u64, Exception> {
                     continue;
                 }
                 let a = cpu.v.eget(c.vs2, i, sew);
-                // The shift amount is masked to log2 of the *widened* width.
-                let n = bop(&cpu.v, c, i) & (((wide * 8) - 1) as u64);
+                // The shift amount (an unsigned immediate in the .vi form) is
+                // masked to log2 of the *widened* width.
+                let n = bop_u(&cpu.v, c, i) & (((wide * 8) - 1) as u64);
                 cpu.v.eset(c.vd, i, wide, a << n);
             }
         }

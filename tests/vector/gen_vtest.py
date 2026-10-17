@@ -349,11 +349,15 @@ for sew in (8, 16, 32, 64):
     # A .vi rotate of 33 only encodes because funct6[0] carries the immediate's
     # top bit -- the case that distinguishes vror.vi from vrol.
     t("vror.vi v4, v8, 33", sew=sew)
+    # .vi immediates of 16..31 have bit 4 set: they are unsigned here, never
+    # sign-extended as most .vi immediates are.
+    t("vror.vi v4, v8, 24", sew=sew)
     # At SEW=64 the widened element exceeds ELEN, so vwsll must trap; the
     # handler prints mcause, so agreeing on the trap is part of the diff.
     t("vwsll.vv v4, v8, v12", sew=sew)
     t("vwsll.vx v4, v8, a2", sew=sew)
     t("vwsll.vi v4, v8, 5", sew=sew)
+    t("vwsll.vi v4, v8, 20", sew=sew)
 
 # Zfa.  fli materialises the operands, so the constant table is itself covered.
 FLI_CONSTANTS = [
