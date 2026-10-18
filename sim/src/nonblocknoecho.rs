@@ -19,6 +19,7 @@ pub struct NonblockNoEcho {
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
     pub tracing_flag: Arc<AtomicBool>,
+    begin_flag: Arc<AtomicBool>,
     awaiting_command: bool,
     /// Sends keystrokes to the graphics console's keyboard instead, while
     /// active.
@@ -26,7 +27,7 @@ pub struct NonblockNoEcho {
 }
 
 impl NonblockNoEcho {
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    #[allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_arguments)]
     pub fn new(
         ctrlc_breaks: bool,
         exit_flag: Arc<AtomicBool>,
@@ -34,6 +35,7 @@ impl NonblockNoEcho {
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
         tracing_flag: Arc<AtomicBool>,
+        begin_flag: Arc<AtomicBool>,
         key_route: KeyRoute,
     ) -> Self {
         use std::os::unix::io::AsRawFd;
@@ -100,6 +102,7 @@ impl NonblockNoEcho {
             verbose_flag,
             speedometer_flag,
             tracing_flag,
+            begin_flag,
             awaiting_command: false,
             key_route,
         }
@@ -175,8 +178,8 @@ impl NonblockNoEcho {
                 let tracing = self.tracing_flag.load(Ordering::Relaxed);
                 eprintln!(
                     "[[v - Verbose({verbose}), S - Speedometer({speedometer}), \
-                     t - Tracing({tracing}), s - Save snapshot, k - Keys to {}, \
-                     x - eXit, else pass to guest]]",
+                     t - Tracing({tracing}), s - Save snapshot, B - Begin checkpoints, \
+                     k - Keys to {}, x - eXit, else pass to guest]]",
                     if self.key_route.target().is_some() {
                         "serial"
                     } else {
@@ -203,6 +206,12 @@ impl NonblockNoEcho {
             }
             'S' => {
                 self.speedometer_flag.fetch_xor(true, Ordering::Relaxed);
+            }
+            'B' => {
+                // Start the periodic checkpoints that --ckpt-after-key holds
+                // back.
+                self.begin_flag.store(true, Ordering::Relaxed);
+                eprint!("\r\n[[checkpoints begin]]\r\n");
             }
             'x' | 'X' => {
                 self.exit_flag.store(true, Ordering::Relaxed);

@@ -112,6 +112,16 @@ struct Args {
     #[argh(option)]
     ckpt_at: Option<String>,
 
+    /// write an architectural checkpoint every N instructions: format "N:dir",
+    /// each at the first restorable point after its count, as
+    /// dir/<count>.ckpt/; the run ends when the guest does
+    #[argh(option)]
+    ckpt_every: Option<String>,
+
+    /// hold --ckpt-every's checkpoints until Ctrl-C B, and count from there
+    #[argh(switch)]
+    ckpt_after_key: bool,
+
     /// print "[instret N]" to stderr every N instructions (a plain count or a
     /// k/M/G suffix), after flushing the console, so the guest's output can be
     /// placed in the instruction stream -- e.g. to choose --ckpt-at points
@@ -192,6 +202,7 @@ fn get_terminal(
     verbose_flag: Arc<AtomicBool>,
     speedometer_flag: Arc<AtomicBool>,
     tracing_flag: Arc<AtomicBool>,
+    begin_flag: Arc<AtomicBool>,
     key_route: term_keys::KeyRoute,
 ) -> Box<dyn SerialBackend> {
     match terminal_type {
@@ -202,6 +213,7 @@ fn get_terminal(
             verbose_flag,
             speedometer_flag,
             tracing_flag,
+            begin_flag,
             key_route,
         )),
         TerminalType::DummyTerminal => Box::new(DummyTerminal::new()),
@@ -243,6 +255,35 @@ fn parse_insn_count(spec: &str) -> anyhow::Result<u64> {
 /// point.
 const CKPT_SEARCH: u64 = 100_000_000;
 
+/// How many instructions the run goes between looks at Ctrl-C B while
+/// --ckpt-after-key holds the checkpoints back.
+const CKPT_KEY_STEP: u64 = 1_000_000;
+
+/// From instruction count `n`, advance to the next point a restore stub can
+/// reproduce exactly and write the architectural checkpoint `dir/n.ckpt/`.
+fn write_ckpt(emulator: &mut Emulator, n: u64, dir: &str, cmdline: &str) -> anyhow::Result<()> {
+    // The run loop's own batch, so the batches stay those of a straight run.
+    while !ckpt::quiescent(emulator) {
+        if emulator.insns_retired() >= n + CKPT_SEARCH {
+            bail!("no restorable point within {CKPT_SEARCH} instructions of {n}");
+        }
+        emulator.tick(600);
+    }
+    let path = std::path::Path::new(dir).join(format!("{n}.ckpt"));
+    let provenance = format!(
+        "simmerv {} at {} instructions: {cmdline}",
+        env!("CARGO_PKG_VERSION"),
+        emulator.insns_retired()
+    );
+    ckpt::write(emulator, &path, &provenance).with_context(|| path.display().to_string())?;
+    eprintln!(
+        "checkpoint → {} [instret={}]",
+        path.display(),
+        emulator.insns_retired()
+    );
+    Ok(())
+}
+
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -258,6 +299,7 @@ fn main() -> anyhow::Result<()> {
     let verbose_flag = Arc::new(AtomicBool::new(false));
     let speedometer_flag = Arc::new(AtomicBool::new(false));
     let tracing_flag = Arc::new(AtomicBool::new(args.tracing));
+    let begin_flag = Arc::new(AtomicBool::new(false));
     let key_route = term_keys::KeyRoute::default();
     let mut symbols = BTreeMap::new();
     let memory_megs = args.memory_megs.unwrap_or(2048);
@@ -280,6 +322,7 @@ fn main() -> anyhow::Result<()> {
             Arc::clone(&verbose_flag),
             Arc::clone(&speedometer_flag),
             Arc::clone(&tracing_flag),
+            Arc::clone(&begin_flag),
             key_route.clone(),
         ),
         memory_megs * 1024 * 1024,
@@ -578,11 +621,19 @@ fn main() -> anyhow::Result<()> {
     let modes = [
         args.mark_every.is_some(),
         args.ckpt_at.is_some(),
+        args.ckpt_every.is_some(),
         args.snapshot_interval.is_some(),
     ];
     if modes.iter().filter(|&&on| on).count() > 1 {
-        bail!("--mark-every, --ckpt-at and -S each drive the run their own way: give one of them");
+        bail!(
+            "--mark-every, --ckpt-at, --ckpt-every and -S each drive the run their own way: \
+             give one of them"
+        );
     }
+    if args.ckpt_after_key && args.ckpt_every.is_none() {
+        bail!("--ckpt-after-key holds back --ckpt-every's checkpoints: give --ckpt-every too");
+    }
+    let cmdline = std::env::args().collect::<Vec<_>>().join(" ");
     let started = std::time::Instant::now();
     if let Some(ref spec) = args.mark_every {
         let every = parse_insn_count(spec)?;
@@ -609,7 +660,6 @@ fn main() -> anyhow::Result<()> {
             .map(parse_insn_count)
             .collect::<anyhow::Result<Vec<_>>>()?;
         points.sort_unstable();
-        let cmdline = std::env::args().collect::<Vec<_>>().join(" ");
         for n in points {
             emulator.set_max_insns(n);
             emulator.run_program();
@@ -619,27 +669,38 @@ fn main() -> anyhow::Result<()> {
                     emulator.insns_retired()
                 );
             }
-            // The run loop's own batch, so the batches stay those of a straight
-            // run.
-            while !ckpt::quiescent(&mut emulator) {
-                if emulator.insns_retired() >= n + CKPT_SEARCH {
-                    bail!("no restorable point within {CKPT_SEARCH} instructions of {n}");
+            write_ckpt(&mut emulator, n, dir, &cmdline)?;
+        }
+    } else if let Some(ref spec) = args.ckpt_every {
+        let (every, dir) = spec
+            .split_once(':')
+            .ok_or_else(|| anyhow!("--ckpt-every wants N:dir, got {spec:?}"))?;
+        let every = parse_insn_count(every)?;
+        if every == 0 {
+            bail!("--ckpt-every must be positive");
+        }
+        // Held back: run in steps until Ctrl-C B, or until the guest stops
+        // first.
+        if args.ckpt_after_key {
+            eprintln!("[checkpoints every {every} instructions after Ctrl-C B]");
+            while !begin_flag.load(Ordering::Relaxed) {
+                let step = emulator.insns_retired() + CKPT_KEY_STEP;
+                emulator.set_max_insns(step);
+                emulator.run_program();
+                if emulator.insns_retired() < step {
+                    break;
                 }
-                emulator.tick(600);
             }
-            let path = std::path::Path::new(dir).join(format!("{n}.ckpt"));
-            let provenance = format!(
-                "simmerv {} at {} instructions: {cmdline}",
-                env!("CARGO_PKG_VERSION"),
-                emulator.insns_retired()
-            );
-            ckpt::write(&mut emulator, &path, &provenance)
-                .with_context(|| path.display().to_string())?;
-            eprintln!(
-                "checkpoint → {} [instret={}]",
-                path.display(),
-                emulator.insns_retired()
-            );
+        }
+        let mut n = emulator.insns_retired() + every;
+        loop {
+            emulator.set_max_insns(n);
+            emulator.run_program();
+            if emulator.insns_retired() < n {
+                break;
+            }
+            write_ckpt(&mut emulator, n, dir, &cmdline)?;
+            n = n.max(emulator.insns_retired()) + every;
         }
     } else if let Some(spec) = args.snapshot_interval {
         // Format: "N:base_name"

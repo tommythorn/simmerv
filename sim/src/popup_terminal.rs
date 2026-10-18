@@ -13,6 +13,7 @@ pub struct PopupTerminal {
 }
 
 impl PopupTerminal {
+    #[allow(clippy::too_many_arguments)] // one per shared flag
     pub fn new(
         ctrlc_breaks: bool,
         exit_flag: Arc<AtomicBool>,
@@ -20,6 +21,7 @@ impl PopupTerminal {
         verbose_flag: Arc<AtomicBool>,
         speedometer_flag: Arc<AtomicBool>,
         tracing_flag: Arc<AtomicBool>,
+        begin_flag: Arc<AtomicBool>,
         key_route: KeyRoute,
     ) -> Self {
         Self {
@@ -30,6 +32,7 @@ impl PopupTerminal {
                 verbose_flag,
                 speedometer_flag,
                 tracing_flag,
+                begin_flag,
                 key_route,
             ),
         }
