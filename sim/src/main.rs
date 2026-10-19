@@ -122,6 +122,11 @@ struct Args {
     #[argh(switch)]
     ckpt_after_key: bool,
 
+    /// write basic-block vectors for SimPoint-style sampling: format
+    /// "N:file", one line every N instructions (see src/bbv.rs)
+    #[argh(option)]
+    bbv: Option<String>,
+
     /// print "[instret N]" to stderr every N instructions (a plain count or a
     /// k/M/G suffix), after flushing the console, so the guest's output can be
     /// placed in the instruction stream -- e.g. to choose --ckpt-at points
@@ -634,6 +639,17 @@ fn main() -> anyhow::Result<()> {
         bail!("--ckpt-after-key holds back --ckpt-every's checkpoints: give --ckpt-every too");
     }
     let cmdline = std::env::args().collect::<Vec<_>>().join(" ");
+    if let Some(ref spec) = args.bbv {
+        let (every, path) = spec
+            .split_once(':')
+            .ok_or_else(|| anyhow!("--bbv wants N:file, got {spec:?}"))?;
+        let every = parse_insn_count(every)?;
+        if every == 0 {
+            bail!("--bbv's interval must be positive");
+        }
+        emulator.cpu.bbv =
+            Some(simmerv::bbv::Bbv::new(every, path).with_context(|| path.to_string())?);
+    }
     let started = std::time::Instant::now();
     if let Some(ref spec) = args.mark_every {
         let every = parse_insn_count(spec)?;
@@ -715,6 +731,10 @@ fn main() -> anyhow::Result<()> {
         emulator.run_program();
     }
     let elapsed = started.elapsed();
+    let retired = emulator.insns_retired();
+    if let Some(b) = emulator.cpu.bbv.as_mut() {
+        b.emit(retired);
+    }
 
     // stdout is reserved for the guest's own console output, so the summary
     // goes to stderr and a run can still be piped somewhere without the report

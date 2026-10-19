@@ -1,5 +1,6 @@
 #![allow(clippy::unreadable_literal)]
 
+pub mod bbv;
 pub mod bounded;
 pub mod buffered_serial_backend;
 pub mod cpu;

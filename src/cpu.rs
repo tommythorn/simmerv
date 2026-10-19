@@ -520,6 +520,10 @@ pub struct Cpu {
     #[cfg(feature = "bb-trace")]
     tracer: Option<crate::uop_trace::UopTracer>,
 
+    /// Basic-block vectors (`--bbv`); `None`, one branch per block, unless
+    /// asked for.
+    pub bbv: Option<crate::bbv::Bbv>,
+
     pub speedometer: Speedometer,
     pub speedometer_flag: Arc<AtomicBool>,
     speedometer_next_cycle: u64,
@@ -583,6 +587,7 @@ impl Cpu {
             #[cfg(feature = "bb-trace")]
             tracer: crate::uop_trace::UopTracer::from_env(),
             hpm_rebase: false,
+            bbv: None,
             speedometer: Speedometer::new(),
             speedometer_flag: Arc::new(AtomicBool::new(false)),
             speedometer_next_cycle: 0,
@@ -1104,6 +1109,9 @@ impl Cpu {
             self.trace_ref(cache_key, n_executed);
             // Batch seqno update (only used for snapshots, not CSRs)
             self.seqno = self.seqno.wrapping_add(n_executed as usize);
+            if let Some(b) = self.bbv.as_mut() {
+                b.add(cache_key, n_executed, self.seqno as u64);
+            }
             // Extra cycles for instructions beyond the first.
             self.cycle = self
                 .cycle
@@ -1237,6 +1245,9 @@ impl Cpu {
 
         // Cache the complete block.
         bb.insert(cache_key, &block);
+        if let Some(b) = self.bbv.as_mut() {
+            b.add(cache_key, n_executed, self.seqno as u64);
+        }
         #[cfg(feature = "bb-trace")]
         self.trace_ref(cache_key, n_executed);
         self.cycle = self
