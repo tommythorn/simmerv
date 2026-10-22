@@ -1232,6 +1232,10 @@ impl Cpu {
             }
         }
 
+        // The prefix retired whether or not the block is cached, just as on
+        // the hit path.
+        self.seqno = self.seqno.wrapping_add(n_executed as usize);
+
         if let Some(err) = exception {
             // Do not cache blocks that raised an exception.
             //
