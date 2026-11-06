@@ -183,7 +183,17 @@ fn patch_dtb_memory(dtb: &mut [u8], memory_bytes: u64) -> anyhow::Result<u64> {
 /// Anything that writes, validates, or sniffs a snapshot must use this rather
 /// than spelling the bytes out -- three hand-written copies is exactly how the
 /// C8 -> C9 bump got missed in `sim`'s `is_snapshot` and in the Ctrl-C test.
-pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC12";
+pub const SNAPSHOT_MAGIC: &[u8] = b"SIMMERVC13";
+
+/// The previous layout, still loaded: it differs from C13 only in holding
+/// the HPM counters 3..15 ([`crate::csr::HPM_LAST_C12`]), not 3..31.
+pub const SNAPSHOT_MAGIC_C12: &[u8] = b"SIMMERVC12";
+
+/// Whether `data` is a snapshot this build can load.
+#[must_use]
+pub fn is_snapshot(data: &[u8]) -> bool {
+    data.starts_with(SNAPSHOT_MAGIC) || data.starts_with(SNAPSHOT_MAGIC_C12)
+}
 
 /// Receives the framebuffer's visible bytes, RGB565, on each display refresh.
 pub type DisplaySink = Box<dyn FnMut(&[u8])>;
@@ -625,7 +635,11 @@ impl Emulator {
     /// # Errors
     /// Returns an error if the data is not a valid snapshot or is corrupt.
     pub fn load_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let Some(body) = data.strip_prefix(SNAPSHOT_MAGIC) else {
+        let (body, hpm_last) = if let Some(body) = data.strip_prefix(SNAPSHOT_MAGIC) {
+            (body, crate::csr::HPM_LAST)
+        } else if let Some(body) = data.strip_prefix(SNAPSHOT_MAGIC_C12) {
+            (body, crate::csr::HPM_LAST_C12)
+        } else {
             bail!("not a valid snapshot");
         };
         let Some((len_bytes, rest)) = body.split_at_checked(8) else {
@@ -653,7 +667,7 @@ impl Emulator {
 
         self.bb_cache.clear();
         self.cpu
-            .read_state(&state, |name, range| {
+            .read_state(&state, hpm_last, |name, range| {
                 use crate::device::uart::Uart;
                 use crate::device::virtio_block_disk::VirtioBlockDisk;
                 match name {

@@ -233,7 +233,7 @@ fn write_snap(emulator: &mut Emulator, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn is_snapshot(data: &[u8]) -> bool { data.starts_with(simmerv::SNAPSHOT_MAGIC) }
+fn is_snapshot(data: &[u8]) -> bool { simmerv::is_snapshot(data) }
 
 /// Parse an instruction count, with an optional `k`/`M`/`G` suffix.
 ///

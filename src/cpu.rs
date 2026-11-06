@@ -2383,9 +2383,11 @@ impl Cpu {
                 self.mmu.mip &= !MIP_STIP;
             }
             Csr::Mcounteren => self.csr.mcounteren = (value & 0xFFFF_FFFF) as u32,
-            // smolrv64 implements 13 HPM counters; mcountinhibit is WARL masked
-            // to those (bit 1/TM hardwired 0): HPM_INHIBIT_MASK = 0xfffd.
-            Csr::Mcountinhibit => self.csr.mcountinhibit = value & 0xfffd,
+            // mcountinhibit is WARL: a bit for mcycle, minstret and each
+            // implemented counter (bit 1/TM hardwired 0).
+            Csr::Mcountinhibit => {
+                self.csr.mcountinhibit = value & ((1 << (csr::HPM_LAST + 1)) - 1) & !2;
+            }
             // Smcntrpmf: mcyclecfg/minstretcfg store the privilege-inhibit
             // filter bits; the DUT keeps them as plain 64-bit RW registers.
             Csr::Mcyclecfg => self.csr.mcyclecfg = value,
@@ -2556,6 +2558,7 @@ impl Cpu {
     pub fn read_state(
         &mut self,
         data: &[u8],
+        hpm_last: usize,
         make_device: impl FnMut(
             &str,
             std::ops::Range<u64>,
@@ -2618,9 +2621,13 @@ impl Cpu {
         c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.senvcfg = r.u64()?;
         c.mcountinhibit = r.u64()?;
+        // An older snapshot holds fewer counters (`hpm_last`): the rest are 0.
         for i in csr::HPM_FIRST..=csr::HPM_LAST {
-            c.mhpmcounter[i] = r.u64()?;
-            c.mhpmevent[i] = r.u64()?;
+            (c.mhpmcounter[i], c.mhpmevent[i]) = if i <= hpm_last {
+                (r.u64()?, r.u64()?)
+            } else {
+                (0, 0)
+            };
         }
         self.hpm_bb = crate::uop_cache::UopCacheStats::default();
         self.hpm_last = [0; csr::HPM_LAST + 1];

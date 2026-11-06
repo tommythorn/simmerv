@@ -286,11 +286,12 @@ pub const fn legal(csr: Csr) -> bool {
     )
 }
 
-/// Lowest and highest implemented hardware performance monitor counter.
-/// mhpmcounter3..15 / mhpmevent3..15 -- 13 counters, matching the DUT
-/// (smolrv64) and the `mcountinhibit` WARL mask below.
+/// Lowest and highest implemented hardware performance monitor counter:
+/// mhpmcounter3..31 / mhpmevent3..31, all 29 the architecture allows.
 pub const HPM_FIRST: usize = 3;
-pub const HPM_LAST: usize = 15;
+pub const HPM_LAST: usize = 31;
+/// The highest counter a `SIMMERVC12` snapshot holds (it predates 16..31).
+pub const HPM_LAST_C12: usize = 15;
 
 /// `mhpmevent` event selectors.
 ///
