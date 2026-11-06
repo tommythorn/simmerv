@@ -366,8 +366,9 @@ pub struct CsrFile {
     pub senvcfg: u64,
     /// `mstateen0`.  Only `SE0` and `ENVCFG` are writable; see the enum.
     pub mstateen0: u64,
-    // PMP: the DUTs (smolrv64 + probe) store cfg/addr0 verbatim (no enforcement),
-    // so simmerv stores them too -- OpenSBI writes then reads them back at boot.
+    // PMP: the DUTs (smolrv64 + probe) store cfg/addr0 verbatim (no
+    // enforcement), so simmerv stores them too -- OpenSBI writes then reads
+    // them back at boot.
     pub pmpcfg0: u64,
     pub pmpaddr0: u64,
 }

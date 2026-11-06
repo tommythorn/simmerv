@@ -950,7 +950,8 @@ impl RiscvDecoder for Decoder {
             return Self::unimp(a, insn, c);
         }
         Uop {
-            // VWXUNARY0 (vmv.x.s, vcpop.m, vfirst.m) writes an integer register.
+            // VWXUNARY0 (vmv.x.s, vcpop.m, vfirst.m) writes an integer
+            // register.
             rd: if (insn >> 26) & 0x3f == 0b010000 {
                 xd((insn >> 7) & 31)
             } else {

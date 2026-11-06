@@ -346,7 +346,8 @@ impl VirtioBlockDisk {
             0x00d => 0x45,
             0x00e => 0x4d,
             0x00f => 0x55,
-            // 0x010: DeviceFeatures (R) — 32-bit page selected by DeviceFeaturesSel
+            // 0x010: DeviceFeatures (R) — 32-bit page selected by
+            // DeviceFeaturesSel
             0x010..=0x013 => {
                 let shift = u64::from(self.device_features_sel) * 32 + (offset - 0x010) * 8;
                 (self.device_features >> shift) as u8
@@ -407,7 +408,8 @@ impl VirtioBlockDisk {
                 self.device_features_sel =
                     (self.device_features_sel & !(0xff << shift)) | ((value as u32) << shift);
             }
-            // 0x020: DriverFeatures (W) — 32-bit page selected by DriverFeaturesSel
+            // 0x020: DriverFeatures (W) — 32-bit page selected by
+            // DriverFeaturesSel
             0x020..=0x023 => {
                 let shift = self.driver_features_sel as u64 * 32 + (offset - 0x020) * 8;
                 self.driver_features =

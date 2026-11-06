@@ -458,14 +458,16 @@ pub struct Cpu {
     // Cosim: gate on taking the supervisor timer interrupt (STIP). The DUT's
     // STIP latches as soon as mtime>=stimecmp but it only vectors at the next
     // fetch boundary (registered `pre_intr_pending`, 1 cycle stale); simmerv
-    // Cosim: full interrupt DUT-follow. simmerv's mip/mie are retire-stale vs the
-    // DUT, so in cosim_mode it does NOT decide interrupts itself -- it takes EXACTLY
-    // the interrupt the DUT took this retire and nothing else. The harness sets this
-    // each retirement to the DUT's interrupt cause (mcause/scause, MSB set), or 0 if
-    // the DUT took no interrupt. handle_interrupt vectors exactly this cause, forced
-    // through the enable checks (which are likewise stale). mip/sip stay mirrored
-    // normally (mtimecmp/seip/plic_ip) so CSR reads still match. This replaces the
-    // old per-type cosim_{stip,seip,mtip}_armed gates with one general rule.
+    // Cosim: full interrupt DUT-follow. simmerv's mip/mie are retire-stale vs
+    // the DUT, so in cosim_mode it does NOT decide interrupts itself -- it
+    // takes EXACTLY the interrupt the DUT took this retire and nothing else.
+    // The harness sets this each retirement to the DUT's interrupt cause
+    // (mcause/scause, MSB set), or 0 if the DUT took no interrupt.
+    // handle_interrupt vectors exactly this cause, forced through the enable
+    // checks (which are likewise stale). mip/sip stay mirrored
+    // normally (mtimecmp/seip/plic_ip) so CSR reads still match. This replaces
+    // the old per-type cosim_{stip,seip,mtip}_armed gates with one general
+    // rule.
     pub cosim_forced_cause: u64,
 
     // Cosim CSR-read override. When `Some((csrno, value))`, the next
@@ -492,7 +494,8 @@ pub struct Cpu {
     // XXX needn't be part of CPU state; is part of fetch
     pub seqno: usize,
 
-    // Holds all memory and devices (XXX: this public mmu suggests we need to rethink the API)
+    // Holds all memory and devices (XXX: this public mmu suggests we need to
+    // rethink the API)
     pub mmu: Mmu,
 
     // Pending uop-cache flush requested by the last executed instruction.
@@ -2354,7 +2357,8 @@ impl Cpu {
             Csr::Sedeleg => self.csr.sedeleg = value,
             Csr::Sepc => self.csr.sepc = self.legalize_va(value),
             Csr::Sideleg => self.csr.sideleg = value,
-            // SIE mask includes LCOFIE (bit 13) to match the DUT (csr_mie & 0x2222).
+            // SIE mask includes LCOFIE (bit 13) to match the DUT (csr_mie &
+            // 0x2222).
             Csr::Sie => self.csr.mie = self.csr.mie & !0x2222 | value & 0x2222,
             // 0x2222: SSIP/STIP/SEIP plus Sscofpmf's LCOFIP -- the perf
             // overflow handler clears it with csr_clear(CSR_SIP, BIT(13)).
@@ -3387,9 +3391,10 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             },
             uop.imm64(),
         ),
-        // Breakpoint mtval is 0 or the pc per spec (never the instruction word).
-        // The sharded-OoO (probe) core reports the pc, like Spike, so match that.
-        // (Legacy smolrv64 inner core reported 0 -- its cosim would now differ here.)
+        // Breakpoint mtval is 0 or the pc per spec (never the instruction
+        // word). The sharded-OoO (probe) core reports the pc, like Spike, so
+        // match that. (Legacy smolrv64 inner core reported 0 -- its cosim would
+        // now differ here.)
         Op::Ebreak => ExecOut::err(Trap::Breakpoint, insn_addr),
         // RV64I
         Op::Lwu => {
@@ -4243,7 +4248,8 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
             }
             ExecOut::ok(r)
         }
-        // Zicboz — zero a 64-byte cache block (cache-block-aligned address in rs1)
+        // Zicboz — zero a 64-byte cache block (cache-block-aligned address in
+        // rs1)
         Op::CboZero => {
             // NOTE (cosim gating gap): not gated on menvcfg.CBZE.  A
             // spec-correct DUT traps cbo.zero (illegal instr) when
@@ -4276,8 +4282,9 @@ fn new_execute(cpu: &mut Cpu, uop: &Uop, s1: u64, s2: u64, s3: u64, insn_addr: u
         | Op::VopIvx
         | Op::VopFvf
         | Op::VopMvx => vector::execute(cpu, uop.op, uop.imm as u32, s1, s2),
-        // End is the sentinel for unrecognised 32-bit instructions; CUnimp for compressed.
-        // ---------------- Zabha: byte and halfword AMOs ----------------
+        // End is the sentinel for unrecognised 32-bit instructions; CUnimp for
+        // compressed. ---------------- Zabha: byte and halfword AMOs
+        // ----------------
         Op::AmoswapB => amo_narrow(cpu, s1, s2, 1, |_, s| s),
         Op::AmoaddB => amo_narrow(cpu, s1, s2, 1, u64::wrapping_add),
         Op::AmoxorB => amo_narrow(cpu, s1, s2, 1, |o, s| o ^ s),

@@ -188,7 +188,8 @@ impl VirtioInput {
                 }
                 bits
             }
-            // Non-empty is all that matters: it turns on the guest's autorepeat.
+            // Non-empty is all that matters: it turns on the guest's
+            // autorepeat.
             (CFG_EV_BITS, EV_REP) => vec![1],
             _ => Vec::new(),
         }
