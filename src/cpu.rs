@@ -5056,6 +5056,53 @@ mod test_cpu {
         }
     }
 
+    /// `vmv<nr>r.v` copies over its own evl whatever vl is, leaving the
+    /// elements before vstart (counted in SEW) alone.
+    #[test]
+    fn whole_register_move_ignores_vl_and_keeps_prestart() {
+        const VMV2R_V_V4_V8: u32 = 0x9e80_b257; // vmv2r.v v4, v8
+        let mut cpu = vector_cpu();
+        cpu.write_register(x(10), 0);
+        run_one(&mut cpu, VSETVLI_T0_A0_E32M2).expect("vsetvli");
+        assert_eq!(cpu.v.vl, 0);
+        for i in 0..8 {
+            cpu.v.eset(8, i, 4, 0x100 + i as u64);
+            cpu.v.eset(4, i, 4, 0xdead_beef);
+        }
+        cpu.v.vstart = 2;
+        run_one(&mut cpu, VMV2R_V_V4_V8).expect("vmv2r.v");
+        for i in 0..2 {
+            assert_eq!(cpu.v.eget(4, i, 4), 0xdead_beef, "prestart element {i}");
+        }
+        for i in 2..8 {
+            assert_eq!(cpu.v.eget(4, i, 4), 0x100 + i as u64, "element {i}");
+        }
+        assert_eq!(cpu.v.vstart, 0);
+    }
+
+    /// A whole-register load counts vstart in elements of its EEW.
+    #[test]
+    fn whole_register_load_counts_vstart_in_elements() {
+        const VL1RE32_V0_A1: u32 = 0x0285_e007; // vl1re32.v v0, (a1)
+        let mut cpu = vector_cpu();
+        let data = MEMORY_BASE + 0x1000;
+        for i in 0..4u64 {
+            cpu.get_mut_mmu()
+                .store_virt_u32(data + i * 4, 0x1000_0000 + i as u32)
+                .expect("store");
+        }
+        cpu.write_register(x(11), data);
+        for i in 0..4 {
+            cpu.v.eset(0, i, 4, 0xdead_beef);
+        }
+        cpu.v.vstart = 1;
+        run_one(&mut cpu, VL1RE32_V0_A1).expect("vl1re32.v");
+        assert_eq!(cpu.v.eget(0, 0, 4), 0xdead_beef, "the prestart element");
+        for i in 1..4u64 {
+            assert_eq!(cpu.v.eget(0, i as usize, 4), 0x1000_0000 + i);
+        }
+    }
+
     #[test]
     fn vector_csrs_are_unreachable_without_the_extension() {
         // csrr t0, vlenb  ==  csrrs t0, 0xc22, x0

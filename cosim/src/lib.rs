@@ -102,13 +102,51 @@ pub unsafe extern "C" fn simmerv_write_memory(
 
 /// Choose the instruction set: `rva23` enables the RVA23 scalar extensions,
 /// `vector` V (with Zvbb and Zvkt).  Call before the first step; the default
-/// is neither (RVA22).
+/// is neither (RVA22).  `mstatus.VS` starts Off: software turns the vector
+/// unit on, and the first read of mstatus is compared.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn simmerv_set_isa(ctx: *mut SimmervCtx, rva23: bool, vector: bool) {
     if let Some(ctx) = unsafe { ctx.as_mut() } {
         // the hart's switches only: the harness loads its own device tree
         ctx.emu.cpu.set_rva23_enabled(rva23);
         ctx.emu.cpu.set_vector_enabled(vector);
+        ctx.emu.cpu.vs = 0;
+    }
+}
+
+/// Read vector register `idx` (0..31): bytes 0..7 into `lo`, 8..15 into `hi`
+/// (the low 128 bits of a wider register).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_read_vreg(
+    ctx: *mut SimmervCtx,
+    idx: u32,
+    lo: *mut u64,
+    hi: *mut u64,
+) {
+    if let (Some(ctx), Some(lo), Some(hi)) = unsafe { (ctx.as_mut(), lo.as_mut(), hi.as_mut()) } {
+        let v = &ctx.emu.cpu.v;
+        let half = |h: usize| {
+            (0..8).fold(0u64, |a, i| {
+                a | u64::from(v.byte(idx as usize, h * 8 + i)) << (8 * i)
+            })
+        };
+        (*lo, *hi) = if idx < 32 { (half(0), half(1)) } else { (0, 0) };
+    }
+}
+
+/// Read `vl`, `vtype` and `vstart`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_read_vstate(
+    ctx: *mut SimmervCtx,
+    vl: *mut u64,
+    vtype: *mut u64,
+    vstart: *mut u64,
+) {
+    if let (Some(ctx), Some(vl), Some(vtype), Some(vstart)) =
+        unsafe { (ctx.as_mut(), vl.as_mut(), vtype.as_mut(), vstart.as_mut()) }
+    {
+        let v = &ctx.emu.cpu.v;
+        (*vl, *vtype, *vstart) = (v.vl, v.vtype, v.vstart);
     }
 }
 

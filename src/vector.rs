@@ -455,7 +455,7 @@ fn vmem(
         if !matches!(nf, 1 | 2 | 4 | 8) || vd + nf > VREGS {
             return Err(illegal());
         }
-        return whole_reg(cpu, vd, nf, base, is_store);
+        return whole_reg(cpu, vd, nf, width, base, is_store);
     }
 
     // vlm.v / vsm.v move ceil(vl/8) bytes of mask, EEW=8, EMUL=1.
@@ -577,17 +577,20 @@ fn set_elem_of_group(v: &mut VectorUnit, vreg: usize, idx: usize, ebytes: usize,
 }
 
 /// `vl<nf>re<eew>.v` / `vs<nf>r.v`: copy `nf` whole registers to or from
-/// memory, ignoring `vl`, `vtype` and the mask.
+/// memory, ignoring `vl`, `vtype` and the mask.  `vstart` counts elements of
+/// the encoding's EEW (`eew` bytes), and a fault leaves it at the element the
+/// faulting byte belongs to.
 fn whole_reg(
     cpu: &mut Cpu,
     vd: usize,
     nf: usize,
+    eew: usize,
     base: u64,
     is_store: bool,
 ) -> Result<u64, Exception> {
     let vlenb = cpu.v.vlenb;
     let total = nf * vlenb;
-    let start = cpu.v.vstart as usize;
+    let start = cpu.v.vstart as usize * eew;
     for byte in start..total {
         let addr = base.wrapping_add(byte as u64);
         let reg = vd + byte / vlenb;
@@ -595,14 +598,14 @@ fn whole_reg(
         if is_store {
             let b = cpu.v.byte(reg, off);
             if let Err(e) = cpu.memop_write(addr, 0, u64::from(b), 1) {
-                cpu.v.vstart = byte as u64;
+                cpu.v.vstart = (byte / eew) as u64;
                 return Err(e);
             }
         } else {
             match cpu.memop_read(addr, 0, 1) {
                 Ok(b) => cpu.v.set_byte(reg, off, b as u8),
                 Err(e) => {
-                    cpu.v.vstart = byte as u64;
+                    cpu.v.vstart = (byte / eew) as u64;
                     return Err(e);
                 }
             }
@@ -780,8 +783,9 @@ fn varith(cpu: &mut Cpu, op: Op, insn: u32, s1: u64) -> Result<u64, Exception> {
     };
 
     // Nothing to do when the starting element is past the end; vstart is still
-    // cleared by the caller.
-    if c.vstart >= c.vl && !matches!(op, Op::VopMvv | Op::VopFvv) {
+    // cleared by the caller.  vmv<nr>r.v ends at its own evl, not at vl.
+    let whole_move = op == Op::VopIvi && funct6 == 0b100111;
+    if c.vstart >= c.vl && !matches!(op, Op::VopMvv | Op::VopFvv) && !whole_move {
         return Ok(0);
     }
 
@@ -1068,17 +1072,17 @@ fn op_integer(cpu: &mut Cpu, c: &Ctx, op: Op) -> Result<u64, Exception> {
                 r
             });
         }
-        // vmv<nr>r.v — copy whole registers, ignoring vl/vtype/mask.
+        // vmv<nr>r.v: copy whole registers as if EEW = SEW, over evl = nr *
+        // VLEN / SEW elements whatever vl is; the elements before vstart stay.
         0b100111 => {
             let nr = (c.raw_scalar + 1) as usize;
             if !matches!(nr, 1 | 2 | 4 | 8) || c.vd + nr > VREGS || c.vs2 + nr > VREGS {
                 return Err(illegal());
             }
-            for r in 0..nr {
-                for o in 0..cpu.v.vlenb {
-                    let b = cpu.v.byte(c.vs2 + r, o);
-                    cpu.v.set_byte(c.vd + r, o, b);
-                }
+            let vlenb = cpu.v.vlenb;
+            for byte in c.vstart * c.sew..nr * vlenb {
+                let b = cpu.v.byte(c.vs2 + byte / vlenb, byte % vlenb);
+                cpu.v.set_byte(c.vd + byte / vlenb, byte % vlenb, b);
             }
         }
         0b101000 => {
