@@ -100,6 +100,25 @@ pub unsafe extern "C" fn simmerv_write_memory(
     0
 }
 
+/// Read `len` bytes of RAM at `phys_addr` into `out` (no device is read).
+/// Returns the bytes read: 0 when the address is not RAM.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_read_memory(
+    ctx: *mut SimmervCtx,
+    phys_addr: u64,
+    out: *mut u8,
+    len: usize,
+) -> usize {
+    let Some(ctx) = (unsafe { ctx.as_mut() }) else {
+        return 0;
+    };
+    if out.is_null() || len == 0 {
+        return 0;
+    }
+    let slice = unsafe { slice::from_raw_parts_mut(out, len) };
+    ctx.emu.cpu.mmu.read_memory_at(phys_addr, slice)
+}
+
 /// Choose the instruction set: `rva23` enables the RVA23 scalar extensions,
 /// `vector` V (with Zvbb and Zvkt).  Call before the first step; the default
 /// is neither (RVA22).  `mstatus.VS` starts Off: software turns the vector

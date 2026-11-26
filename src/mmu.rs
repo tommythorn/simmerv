@@ -439,6 +439,22 @@ impl Mmu {
         }
     }
 
+    /// Reads the memory region containing `addr` into `out`, as stores left it
+    /// (no device is read).  Returns the bytes read: fewer than `out.len()`
+    /// when the region ends first, 0 when `addr` is not RAM.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn read_memory_at(&self, addr: u64, out: &mut [u8]) -> usize {
+        for (range, mem) in &self.memory {
+            if addr >= range.start && addr < range.end {
+                let offset = (addr - range.start) as usize;
+                let len = out.len().min(mem.len() - offset);
+                out[..len].copy_from_slice(&mem[offset..offset + len]);
+                return len;
+            }
+        }
+        0
+    }
+
     /// Attaches a pluggable memory-mapped device at the given address range and
     /// registers it in the service queue.
     pub fn add_device(&mut self, range: Range<u64>, device: Box<dyn MemoryMapped>) {

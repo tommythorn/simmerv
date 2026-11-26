@@ -48,6 +48,8 @@ void        simmerv_destroy(SimmervCtx*);
 // Initialization — call once before the first step.
 int32_t     simmerv_write_memory(SimmervCtx*, uint64_t phys_addr,
                                  const uint8_t* data, size_t len);
+// RAM as stores left it (no device is read): the bytes read, 0 when not RAM.
+size_t      simmerv_read_memory(SimmervCtx*, uint64_t phys_addr, uint8_t* out, size_t len);
 void        simmerv_set_pc(SimmervCtx*, uint64_t pc);
 // The instruction set: rva23 = the RVA23 scalar extensions, vector = V (with
 // Zvbb, Zvkt). Default: neither (RVA22). mstatus.VS starts Off.
