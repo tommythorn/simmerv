@@ -49,6 +49,9 @@ void        simmerv_destroy(SimmervCtx*);
 int32_t     simmerv_write_memory(SimmervCtx*, uint64_t phys_addr,
                                  const uint8_t* data, size_t len);
 void        simmerv_set_pc(SimmervCtx*, uint64_t pc);
+// The instruction set: rva23 = the RVA23 scalar extensions, vector = V (with
+// Zvbb, Zvkt). Default: neither (RVA22).
+void        simmerv_set_isa(SimmervCtx*, bool rva23, bool vector);
 // Restore an architectural checkpoint directory (its sim.snap) instead of
 // loading images; 0 on success, -1 on failure.
 int32_t     simmerv_load_ckpt(SimmervCtx*, const char* dir);

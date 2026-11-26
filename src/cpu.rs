@@ -409,13 +409,14 @@ pub struct Cpu {
     pub fs: u8,
 
     // The vector unit and its mstatus.VS field.  `rva23_enabled` is the
-    // build-the-machine-as-RVA23 switch: with it clear the decoder rejects
-    // every vector encoding and none of this state is reachable.  RVA23
-    // mandates V, so the same switch gates the other RVA23-only extensions
-    // (Zcb, Zimop, Zcmop, Zfa, Zawrs, Zacas, Zabha, Zvbb, Zvkt).
+    // build-the-machine-as-RVA23 switch for the scalar extensions (Zcb, Zimop,
+    // Zcmop, Zfa, Zawrs, Zacas, Zabha); `vector_enabled` is V's (with Zvbb,
+    // Zvkt): with it clear the decoder rejects every vector encoding and none
+    // of this state is reachable.  `set_rva23_enabled` sets both.
     pub v: VectorUnit,
     pub vs: u8,
     pub rva23_enabled: bool,
+    pub vector_enabled: bool,
 
     /// Widest `satp` MODE this hart accepts, as the raw encoding (8 = Sv39,
     /// 9 = Sv48, 10 = Sv57).
@@ -569,6 +570,7 @@ impl Cpu {
             v: VectorUnit::new(),
             vs: 1,
             rva23_enabled: false,
+            vector_enabled: false,
             max_satp_mode: SatpMode::Sv39 as u64,
 
             seqno: 0,
@@ -736,7 +738,7 @@ impl Cpu {
     /// vector state. The kernel's syscall path gates `riscv_v_vstate_discard`
     /// on `sstatus.VS != Off`, not on `has_vector()`, so a nonzero VS here
     /// sends it into vector code that then executes an illegal V instruction.
-    const fn exposed_vs(&self) -> u8 { if self.rva23_enabled { self.vs } else { 0 } }
+    const fn exposed_vs(&self) -> u8 { if self.vector_enabled { self.vs } else { 0 } }
 
     /// Turn the RVA23 extension set on or off.  This is a machine-construction
     /// switch rather than architectural state: it gates instruction decoding,
@@ -776,6 +778,15 @@ impl Cpu {
 
     pub const fn set_rva23_enabled(&mut self, on: bool) {
         self.rva23_enabled = on;
+        self.set_vector_enabled(on);
+    }
+
+    /// Turn V on or off on its own; [`Cpu::set_rva23_enabled`] sets it with
+    /// the rest of the profile.  A hart with the RVA23 scalar extensions but
+    /// no vector unit is RVA23 minus V.  Gates the vector encodings, the
+    /// `misa` V bit, `mstatus.VS` and the vector CSRs.
+    pub const fn set_vector_enabled(&mut self, on: bool) {
+        self.vector_enabled = on;
         let v_bit = 1u64 << (b'V' - b'A');
         if on {
             self.csr.misa |= v_bit;
@@ -1179,7 +1190,7 @@ impl Cpu {
                 break;
             }
 
-            let uop = decode(fetch_pc, insn, self.rva23_enabled);
+            let uop = decode(fetch_pc, insn, self.rva23_enabled, self.vector_enabled);
 
             if matches!(uop.op, Op::CUnimp | Op::End) {
                 if i == 0 {
@@ -1189,7 +1200,7 @@ impl Cpu {
                     return Err((
                         Exception {
                             trap: Trap::IllegalInstruction,
-                            tval: u64::from(insn),
+                            tval: 0,
                         },
                         fetch_pc,
                     ));
@@ -1288,11 +1299,11 @@ impl Cpu {
         let insn_addr = self.pc;
         let insn = self.memop_code(insn_addr)? as u32;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
-        let uop = decode(insn_addr, insn, self.rva23_enabled);
+        let uop = decode(insn_addr, insn, self.rva23_enabled, self.vector_enabled);
         if matches!(uop.op, Op::CUnimp | Op::End) {
             return Err(Exception {
                 trap: Trap::IllegalInstruction,
-                tval: u64::from(insn),
+                tval: 0,
             });
         }
         self.seqno = self.seqno.wrapping_add(1);
@@ -1428,11 +1439,11 @@ impl Cpu {
         };
         cap.insn = insn;
         self.pc += if insn & 3 == 3 { 4 } else { 2 };
-        let uop = decode(insn_addr, insn, self.rva23_enabled);
+        let uop = decode(insn_addr, insn, self.rva23_enabled, self.vector_enabled);
         if matches!(uop.op, Op::CUnimp | Op::End) {
             let exc = Exception {
                 trap: Trap::IllegalInstruction,
-                tval: u64::from(insn),
+                tval: 0,
             };
             cap.trapped = 1;
             cap.trap_cause = get_trap_cause(&exc);
@@ -2004,7 +2015,7 @@ impl Cpu {
             return illegal;
         };
 
-        if Self::is_vector_csr(csr) && (!self.rva23_enabled || self.vs == 0) {
+        if Self::is_vector_csr(csr) && (!self.vector_enabled || self.vs == 0) {
             return illegal;
         }
 
@@ -2102,7 +2113,7 @@ impl Cpu {
             return illegal;
         }
 
-        if Self::is_vector_csr(csr) && (!self.rva23_enabled || self.vs == 0) {
+        if Self::is_vector_csr(csr) && (!self.vector_enabled || self.vs == 0) {
             return illegal;
         }
 
@@ -2347,7 +2358,7 @@ impl Cpu {
                 self.mmu.mstatus = value & mask | self.mmu.mstatus & !mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
                 // Without V the VS field is hardwired to zero (WARL).
-                if self.rva23_enabled {
+                if self.vector_enabled {
                     self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
                 }
             }
@@ -2371,7 +2382,7 @@ impl Cpu {
                 self.mmu.mstatus &= !mask;
                 self.mmu.mstatus |= value & mask;
                 self.fs = ((value >> MSTATUS_FS_SHIFT) & 3) as u8;
-                if self.rva23_enabled {
+                if self.vector_enabled {
                     self.vs = ((value >> MSTATUS_VS_SHIFT) & 3) as u8;
                 }
             }
@@ -2394,7 +2405,13 @@ impl Cpu {
             Csr::Minstretcfg => self.csr.minstretcfg = value,
             Csr::Scounteren => self.csr.scounteren = (value & 0xFFFF_FFFF) as u32,
             Csr::Menvcfg => self.csr.menvcfg = value,
-            Csr::Senvcfg => self.csr.senvcfg = value,
+            Csr::Senvcfg => {
+                // PMM (bits 33:32) is WARL: PMLEN=7 (10) or off; 01 and 11
+                // (PMLEN=16, not implemented) read back as off.
+                let pmm = if (value >> 32) & 3 == 2 { 2 << 32 } else { 0 };
+                self.csr.senvcfg = value & !(3 << 32) | pmm;
+                self.mmu.pmlen_u = if pmm != 0 { 7 } else { 0 };
+            }
             // WARL: keep only the bits that gate state we actually have.  The
             // other stateen registers are read-only zero and fall through to
             // the write catch-all.
@@ -2440,7 +2457,7 @@ impl Cpu {
             rs2,
             imm,
             ..
-        } = decode(addr, insn as u32, self.rva23_enabled);
+        } = decode(addr, insn as u32, self.rva23_enabled, self.vector_enabled);
 
         let op = format!("{op:?}").to_lowercase(); // XXX More clever CAdd -> c.add
 
@@ -2620,6 +2637,7 @@ impl Cpu {
         c.mcounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.scounteren = (r.u64()? & 0xFFFF_FFFF) as u32;
         c.senvcfg = r.u64()?;
+        self.mmu.pmlen_u = if (c.senvcfg >> 32) & 3 == 2 { 7 } else { 0 };
         c.mcountinhibit = r.u64()?;
         // An older snapshot holds fewer counters (`hpm_last`): the rest are 0.
         for i in csr::HPM_FIRST..=csr::HPM_LAST {
@@ -3016,7 +3034,7 @@ impl Cpu {
     /// Returns `Err(())` if the instruction word is illegal or cannot be
     /// decoded.
     pub fn get_register_info(&self, addr: u64, insn: u32) -> anyhow::Result<Uop> {
-        Ok(decode(addr, insn, self.rva23_enabled))
+        Ok(decode(addr, insn, self.rva23_enabled, self.vector_enabled))
     }
 }
 
@@ -3035,8 +3053,8 @@ pub const fn get_trap_cause(exc: &Exception) -> u64 {
 }
 
 #[must_use]
-pub fn decode(a: u64, word: u32, rva23: bool) -> Uop {
-    let mut uop = decoder(a, word, &mut new_decoder::Decoder { rva23 });
+pub fn decode(a: u64, word: u32, rva23: bool, vector: bool) -> Uop {
+    let mut uop = decoder(a, word, &mut new_decoder::Decoder { rva23, vector });
     let size: u8 = if word & 3 == 3 { 4 } else { 2 };
     let branch_flag: u8 = if Cpu::is_branch(uop.op) { 0x80 } else { 0 };
     uop.insn_size = size | branch_flag;
@@ -4604,8 +4622,10 @@ fn fround_d(a: u64, rm: RoundingMode, nx: bool) -> (u64, u8) {
 /// sign-extend, instead of saturating the way fcvt.w.d does.  (This is exactly
 /// JavaScript's `ToInt32`.)  The rounding mode is architecturally fixed at rtz.
 ///
-/// NaN and infinity produce zero and raise invalid; everything else wraps
-/// silently, raising only inexact when a fractional part was discarded.
+/// NaN and infinity produce zero.  The flags are fcvt.w.d's for the same
+/// operand (the specification says so): invalid for a NaN, an infinity or a
+/// truncated value outside the 32-bit signed range, otherwise inexact when a
+/// fractional part was discarded.
 // The truncating casts below are the point of the instruction, not an
 // oversight: taking the value modulo 2^32 is exactly a truncation to u32.  The
 // exponent cast is likewise safe, as it holds an 11-bit field.
@@ -4651,7 +4671,23 @@ fn fcvtmod_w_d(a: u64) -> (u64, u8) {
     } else {
         low32
     };
-    let flags = if inexact { fp::fflag::INEXACT } else { 0 };
+    // In range: the truncated magnitude is below 2^31, or exactly 2^31 when
+    // negative.  A value that needs no right shift is at least 2^52.
+    let in_range = shift < 0 && {
+        let magnitude = if -shift >= 64 {
+            0
+        } else {
+            significand >> -shift
+        };
+        magnitude < 1 << 31 || (negative && magnitude == 1 << 31)
+    };
+    let flags = if !in_range {
+        fp::fflag::INVALIDOP
+    } else if inexact {
+        fp::fflag::INEXACT
+    } else {
+        0
+    };
     // Sign-extend the 32-bit result into the destination register.
     (i64::from(wrapped as i32) as u64, flags)
 }
@@ -4748,7 +4784,7 @@ mod test_cpu {
 
     #[test]
     fn decode_fcvt_xf_preserves_rounding_mode() {
-        let uop = decode(MEMORY_BASE, 0xc010_1053, false);
+        let uop = decode(MEMORY_BASE, 0xc010_1053, false, false);
         assert_eq!(uop.op, Op::FcvtWuS);
         assert_eq!(uop.rm, RoundingMode::RoundTowardsZero as u8);
     }
@@ -4821,18 +4857,21 @@ mod test_cpu {
         // Without V every vector encoding is an unknown instruction...
         for insn in [VSETVLI_T0_A0_E32M2, VADD_VV_V4_V8_V12, VLE32_V0_A1] {
             assert_eq!(
-                decode(MEMORY_BASE, insn, false).op,
+                decode(MEMORY_BASE, insn, false, false).op,
                 Op::Unimp,
                 "{insn:08x} must not decode without -V"
             );
         }
         // ...and with it they decode into their encoding groups.
         assert_eq!(
-            decode(MEMORY_BASE, VSETVLI_T0_A0_E32M2, true).op,
+            decode(MEMORY_BASE, VSETVLI_T0_A0_E32M2, true, true).op,
             Op::Vsetvli
         );
-        assert_eq!(decode(MEMORY_BASE, VADD_VV_V4_V8_V12, true).op, Op::VopIvv);
-        assert_eq!(decode(MEMORY_BASE, VLE32_V0_A1, true).op, Op::Vload32);
+        assert_eq!(
+            decode(MEMORY_BASE, VADD_VV_V4_V8_V12, true, true).op,
+            Op::VopIvv
+        );
+        assert_eq!(decode(MEMORY_BASE, VLE32_V0_A1, true, true).op, Op::Vload32);
 
         // A gated-off vector instruction traps rather than executing.
         let mut cpu = create_cpu();
@@ -4873,7 +4912,7 @@ mod test_cpu {
             FLI_D_1P0,
         ] {
             assert_eq!(
-                decode(MEMORY_BASE, insn, false).op,
+                decode(MEMORY_BASE, insn, false, false).op,
                 Op::Unimp,
                 "{insn:08x} must not decode without --rva23"
             );
@@ -4881,32 +4920,32 @@ mod test_cpu {
 
         // Zcb aliases: same op, and the same register named as both source and
         // destination.
-        let uop = decode(MEMORY_BASE, C_ZEXT_W_A4, true);
+        let uop = decode(MEMORY_BASE, C_ZEXT_W_A4, true, true);
         assert_eq!(uop.op, Op::AddUw, "c.zext.w is add.uw rd, rd, x0");
         assert_eq!(uop.rs1, x(14), "c.zext.w a4 reads a4");
         assert_eq!(uop.rs2, ZEROREG, "c.zext.w must add zero");
         assert_eq!(uop.get_insn_size(), 2, "still a 16-bit instruction");
 
-        let uop = decode(MEMORY_BASE, C_NOT_A4, true);
+        let uop = decode(MEMORY_BASE, C_NOT_A4, true, true);
         assert_eq!(uop.op, Op::Xori);
         assert_eq!(uop.imm, -1, "c.not is xori rd, rd, -1");
 
-        assert_eq!(decode(MEMORY_BASE, C_MUL_S0_S1, true).op, Op::Mul);
-        let uop = decode(MEMORY_BASE, C_LBU_S0_S1, true);
+        assert_eq!(decode(MEMORY_BASE, C_MUL_S0_S1, true, true).op, Op::Mul);
+        let uop = decode(MEMORY_BASE, C_LBU_S0_S1, true, true);
         assert_eq!(uop.op, Op::Lbu);
         assert_eq!(uop.rs1, x(9), "base register is s1");
         assert_eq!(uop.imm, 0);
 
         // Zcmop and Zawrs retire as nops; Zimop writes zero to a real rd.
-        assert_eq!(decode(MEMORY_BASE, C_MOP_1, true).op, Op::CNop);
-        assert_eq!(decode(MEMORY_BASE, WRS_NTO, true).op, Op::CNop);
-        let uop = decode(MEMORY_BASE, MOP_R_0, true);
+        assert_eq!(decode(MEMORY_BASE, C_MOP_1, true, true).op, Op::CNop);
+        assert_eq!(decode(MEMORY_BASE, WRS_NTO, true, true).op, Op::CNop);
+        let uop = decode(MEMORY_BASE, MOP_R_0, true, true);
         assert_eq!(uop.op, Op::CNop);
         assert!(uop.rd.is_x0_dest(), "mop.r.0 x0, x0 writes nothing");
 
-        assert_eq!(decode(MEMORY_BASE, AMOCAS_W, true).op, Op::AmocasW);
-        assert_eq!(decode(MEMORY_BASE, AMOADD_B, true).op, Op::AmoaddB);
-        let uop = decode(MEMORY_BASE, FLI_D_1P0, true);
+        assert_eq!(decode(MEMORY_BASE, AMOCAS_W, true, true).op, Op::AmocasW);
+        assert_eq!(decode(MEMORY_BASE, AMOADD_B, true, true).op, Op::AmoaddB);
+        let uop = decode(MEMORY_BASE, FLI_D_1P0, true, true);
         assert_eq!(uop.op, Op::FliD);
         assert_eq!(FLI_D[uop.imm as usize], 1.0f64.to_bits(), "fli.d index 16");
     }
@@ -5233,6 +5272,36 @@ mod test_cpu {
 }
 #[cfg(test)]
 mod size_check2 {
+    /// fcvtmod.w.d against values computed exactly: the low 32 bits of the
+    /// truncated value, and fcvt.w.d's flags (invalid out of range, inexact
+    /// for a dropped fraction).
+    #[test]
+    fn fcvtmod_w_d_flags_are_fcvt_w_ds() {
+        let cases: [(u64, u64, u8); 18] = [
+            (0x3ff8000000000000, 0x0000000000000001, 0x01),
+            (0xbff8000000000000, 0xffffffffffffffff, 0x01),
+            (0x41dfffffffc00000, 0x000000007fffffff, 0x00),
+            (0x41e0000000000000, 0xffffffff80000000, 0x10),
+            (0xc1e0000000000000, 0xffffffff80000000, 0x00),
+            (0xc1e0000000200000, 0x000000007fffffff, 0x10),
+            (0x41f0000000700000, 0x0000000000000007, 0x10),
+            (0xc202a05f20000000, 0xffffffffabf41c00, 0x10),
+            (0x4408000000000000, 0x0000000000000000, 0x10),
+            (0x4530000000000000, 0x0000000000000000, 0x10),
+            (0x4520000000000200, 0x0000000000000000, 0x10),
+            (0x0000000000000000, 0x0000000000000000, 0x00),
+            (0x8000000000000000, 0x0000000000000000, 0x00),
+            (0x0000000000000001, 0x0000000000000000, 0x01),
+            (0x7ff0000000000000, 0x0000000000000000, 0x10),
+            (0xfff0000000000000, 0x0000000000000000, 0x10),
+            (0x7ff8000000000000, 0x0000000000000000, 0x10),
+            (0x7ff0000000000001, 0x0000000000000000, 0x10),
+        ];
+        for (a, want, flags) in cases {
+            assert_eq!(fcvtmod_w_d(a), (want, flags), "fcvtmod.w.d {a:#018x}");
+        }
+    }
+
     use super::*;
     #[test]
     fn uop_size() {

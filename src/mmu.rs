@@ -90,6 +90,9 @@ pub struct Mmu {
     pub mstatus: u64,
     pub mip: u64,
     pub satp: u64,
+    /// Pointer masking for U-mode data accesses (Ssnpm/Supm): the PMLEN that
+    /// `senvcfg.PMM` selects, 0 or 7.  Set wherever `senvcfg` is written.
+    pub pmlen_u: u32,
 
     /// Plain RAM regions — fast path for load/store.
     pub memory: Vec<(Range<u64>, Vec<u8>)>,
@@ -320,6 +323,7 @@ impl Mmu {
             mstatus: 0,
             mip: 0,
             satp: 0,
+            pmlen_u: 0,
             memory: Vec::new(),
             mem_start: [0; Self::MAX_MEM_REGIONS],
             clint: (Self::CLINT_BASE..Self::CLINT_END, Clint::new()),
@@ -1372,6 +1376,25 @@ impl Mmu {
         } else {
             self.prv
         };
+        // Pointer masking: a U-mode explicit access ignores its top PMLEN
+        // bits -- sign-extended from the bit below them under translation,
+        // zeroed under Bare -- except a load while MXR is in effect.  Every
+        // fault below then reports the transformed address, as the extension
+        // says.
+        let bare = (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64;
+        let address = if self.pmlen_u != 0
+            && effective_prv == PrivMode::U
+            && !(access_type == MemoryAccessType::Read && self.mstatus & MSTATUS_MXR != 0)
+        {
+            let top = !(u64::MAX >> self.pmlen_u);
+            if !bare && address & (1 << (63 - self.pmlen_u)) != 0 {
+                address | top
+            } else {
+                address & !top
+            }
+        } else {
+            address
+        };
 
         if effective_prv == PrivMode::M
             || (self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK == SatpMode::Bare as u64
@@ -1415,7 +1438,17 @@ impl Mmu {
         let sum = self.mstatus & MSTATUS_SUM != 0;
         let mxr = self.mstatus & MSTATUS_MXR != 0;
 
-        if let Some((mem_idx, page_byte_offset, perm, host_page)) = self.dtlb.lookup(vpage, asid)
+        // The TLBs are indexed by the page number's low bits alone: only a
+        // canonical address may hit, else the walk below faults it.
+        let va_shift = 64
+            - (PG_SHIFT
+                + (3 + ((self.satp >> SATP_MODE_SHIFT) & SATP_MODE_MASK) as usize
+                    - SatpMode::Sv39 as usize)
+                    * 9);
+        let canonical = ((address as i64) << va_shift) >> va_shift == address as i64;
+        if canonical
+            && let Some((mem_idx, page_byte_offset, perm, host_page)) =
+                self.dtlb.lookup(vpage, asid)
             && check_perm(perm, access_shift, prv_is_user, sum, mxr)
         {
             let pa = self.mem_start[mem_idx as usize] + page_byte_offset + (address & 0xfff);
@@ -1428,8 +1461,9 @@ impl Mmu {
                 page_byte_offset,
             });
         }
-        if let Some((mem_idx, base_offset_2m, perm, base_ptr_2m)) =
-            self.dtlb2m.lookup(vpage2m, asid)
+        if canonical
+            && let Some((mem_idx, base_offset_2m, perm, base_ptr_2m)) =
+                self.dtlb2m.lookup(vpage2m, asid)
             && check_perm(perm, access_shift, prv_is_user, sum, mxr)
         {
             // The stored offset is 2 MiB-aligned; add this 4 KiB page's offset

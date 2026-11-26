@@ -109,11 +109,15 @@ const fn sign_extend(value: u32, bits: u32) -> i32 {
     (value as i32) << shift >> shift
 }
 
-/// Decoder context.  `vector` is the runtime V-extension enable: with it clear
-/// every vector encoding decodes to `Op::Unimp` (illegal instruction), which is
-/// exactly what a hart without V does.
+/// Decoder context: which extensions decode.
+///
+/// `rva23` enables the RVA23 scalar extensions; `vector` enables V (and the
+/// vector members of RVA23).  With `vector` clear every vector encoding
+/// decodes to `Op::Unimp` (illegal instruction), which is exactly what a hart
+/// without V does.
 pub struct Decoder {
     pub rva23: bool,
+    pub vector: bool,
 }
 
 impl RiscvDecoder for Decoder {
@@ -872,13 +876,13 @@ impl RiscvDecoder for Decoder {
     // the x (or f) source of a .vx/.vf/vset form, and rd is set only for the
     // handful of vector instructions that write a scalar register.
     fn vsetvli(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         decode_vset(insn, Op::Vsetvli)
     }
     fn vsetivli(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         // AVL is the 5-bit uimm in the rs1 field, not a register read.
@@ -890,7 +894,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vsetvl(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -925,19 +929,19 @@ impl RiscvDecoder for Decoder {
     }
 
     fn vop_ivv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         decode_vop(insn, Op::VopIvv)
     }
     fn vop_ivi(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         decode_vop(insn, Op::VopIvi)
     }
     fn vop_ivx(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -946,7 +950,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_mvv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -961,7 +965,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_mvx(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -970,7 +974,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_fvv(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -984,7 +988,7 @@ impl RiscvDecoder for Decoder {
         }
     }
     fn vop_fvf(a: u64, insn: u32, c: &mut Self::Context) -> Uop {
-        if !c.rva23 {
+        if !c.vector {
             return Self::unimp(a, insn, c);
         }
         Uop {
@@ -1392,7 +1396,7 @@ fn decode_vset(word: u32, op: Op) -> Uop {
 /// scalar only for the strided forms (mop=0b10) — for the indexed forms it
 /// names a vector index register instead, so we must not claim to read it.
 fn decode_vmem(a: u64, word: u32, c: &mut Decoder, op: Op) -> Uop {
-    if !c.rva23 {
+    if !c.vector {
         return Decoder::unimp(a, word, c);
     }
     let strided = (word >> 26) & 3 == 0b10;

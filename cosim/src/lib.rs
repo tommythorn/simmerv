@@ -100,6 +100,18 @@ pub unsafe extern "C" fn simmerv_write_memory(
     0
 }
 
+/// Choose the instruction set: `rva23` enables the RVA23 scalar extensions,
+/// `vector` V (with Zvbb and Zvkt).  Call before the first step; the default
+/// is neither (RVA22).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simmerv_set_isa(ctx: *mut SimmervCtx, rva23: bool, vector: bool) {
+    if let Some(ctx) = unsafe { ctx.as_mut() } {
+        // the hart's switches only: the harness loads its own device tree
+        ctx.emu.cpu.set_rva23_enabled(rva23);
+        ctx.emu.cpu.set_vector_enabled(vector);
+    }
+}
+
 /// Drive simmerv's `mtime` to `value`. Call this on every retirement (after
 /// `simmerv_create` has frozen CLINT) so timer interrupts stay in lockstep
 /// with the DUT.

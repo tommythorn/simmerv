@@ -427,6 +427,10 @@ impl Emulator {
             .expect("can't place the vector device tree");
     }
 
+    /// Turn V on or off apart from the rest of RVA23 (see
+    /// [`crate::cpu::Cpu::set_vector_enabled`]).
+    pub const fn set_vector_enabled(&mut self, on: bool) { self.cpu.set_vector_enabled(on); }
+
     /// Set `VLEN` in bits (128, the default, or 256).  RVA23 must also be
     /// enabled for the vector unit to be reachable at all.
     ///
@@ -504,7 +508,12 @@ impl Emulator {
                 print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
                 if let Ok(insn) = insn_word {
                     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                    let uop = cpu::decode(insn_addr, insn as u32, self.cpu.rva23_enabled);
+                    let uop = cpu::decode(
+                        insn_addr,
+                        insn as u32,
+                        self.cpu.rva23_enabled,
+                        self.cpu.vector_enabled,
+                    );
                     if !uop.rd.is_x0_dest() && !exceptional {
                         print!("{:16x}", self.cpu.read_register(uop.rd));
                         if self.cpu.fflags != fflags {
@@ -760,7 +769,12 @@ impl Emulator {
             print!("{cycle:5} {:1} {s:72}", u64::from(self.cpu.mmu.prv));
             if let Ok(insn) = insn_word {
                 #[allow(clippy::cast_sign_loss)]
-                let uop = cpu::decode(insn_addr, insn as u32, self.cpu.rva23_enabled);
+                let uop = cpu::decode(
+                    insn_addr,
+                    insn as u32,
+                    self.cpu.rva23_enabled,
+                    self.cpu.vector_enabled,
+                );
                 if !uop.rd.is_x0_dest() && !exceptional {
                     print!("{:16x}", self.cpu.read_register(uop.rd));
                     if self.cpu.fflags != fflags {
